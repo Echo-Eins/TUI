@@ -1,0 +1,115 @@
+# TUI+ Configuration File
+
+[general]
+app_name = "TUI+"
+refresh_rate_ms = 1000
+compact_mode = false
+theme = "dark"
+
+[tabs]
+enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services"]
+default = "cpu"
+
+[monitors.cpu]
+enabled = true
+refresh_interval_ms = 1000
+show_per_core = true
+show_frequency = true
+show_temperature = true
+top_processes_count = 5
+
+[monitors.gpu]
+enabled = true
+refresh_interval_ms = 1000
+use_nvml = true
+show_processes = true
+show_memory = true
+top_processes_count = 3
+
+[monitors.ram]
+enabled = true
+refresh_interval_ms = 1000
+show_breakdown = true
+show_pagefile = true
+top_processes_count = 5
+
+[monitors.disk]
+enabled = true
+refresh_interval_ms = 2000
+show_health = true
+show_temperature = true
+show_activity = true
+
+[monitors.network]
+enabled = true
+refresh_interval_ms = 1000
+show_graph = true
+graph_duration_seconds = 60
+show_connections = true
+max_connections = 10
+
+[integrations.ollama]
+enabled = true
+refresh_interval_ms = 5000
+command_timeout_seconds = 30
+show_vram_usage = true
+
+[integrations.everything]
+enabled = true
+es_executable = "C:\\Program Files\\Everything\\es.exe"
+max_depth = 10
+
+[ui]
+mouse_support = true
+tab_switch_key = "Tab"
+compact_toggle_key = "F2"
+command_menu_key = "Ctrl+F"  # Changed from Space to Ctrl+F for command history
+quit_key = "Ctrl+C"
+
+# Graph settings (320x320 pixels as specified)
+[ui.graphs]
+width = 320
+height = 320
+
+# Command history settings
+[ui.command_history]
+max_entries = 100
+circular_menu_radius = 10
+
+# Section highlighting (Variant B: brackets + color change)
+[ui.section_highlight]
+variant = "B"  # [CPU] white -> (CPU) yellow
+normal_bracket = "square"  # []
+highlighted_bracket = "round"  # ()
+normal_color = "white"
+highlighted_color = "yellow"
+
+[hotkeys]
+cpu = "1"
+gpu = "2"
+ram = "3"
+disk = "4"
+network = "5"
+ollama = "6"
+processes = "7"
+services = "8"
+disk_analyzer = "9"
+settings = "0"
+
+[powershell]
+executable = "powershell.exe"
+timeout_seconds = 10
+use_cache = true
+cache_ttl_seconds = 2
+
+[theme.dark]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+cpu_color = "#f38ba8"
+gpu_color = "#94e2d5"
+ram_color = "#89b4fa"
+disk_color = "#a6e3a1"
+network_color = "#f9e2af"
+warning_color = "#fab387"
+error_color = "#f38ba8"
+success_color = "#a6e3a1"
