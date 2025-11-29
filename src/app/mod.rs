@@ -1,6 +1,7 @@
 pub mod state;
 pub mod config;
 pub mod tabs;
+pub mod monitors_task;
 
 pub use state::AppState;
 pub use config::{Config, ConfigManager};

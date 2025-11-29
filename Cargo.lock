@@ -1495,6 +1495,7 @@ dependencies = [
  "ratatui",
  "regex",
  "serde",
+ "serde_json",
  "sysinfo",
  "thiserror",
  "tokio",

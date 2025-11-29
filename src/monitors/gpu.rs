@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use crate::integrations::PowerShellExecutor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuData {
@@ -26,28 +27,54 @@ pub struct GpuProcessInfo {
     pub process_type: String,
 }
 
-pub struct GpuMonitor {}
+pub struct GpuMonitor {
+    ps: PowerShellExecutor,
+}
 
 impl GpuMonitor {
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
+    pub fn new(ps: PowerShellExecutor) -> Result<Self> {
+        Ok(Self { ps })
     }
 
     pub async fn collect_data(&self) -> Result<GpuData> {
-        // TODO: Implement NVML integration
+        let gpu_info = self.get_gpu_info().await?;
+        Ok(gpu_info)
+    }
+
+    async fn get_gpu_info(&self) -> Result<GpuData> {
+        let script = r#"
+            $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+            [PSCustomObject]@{
+                Name = $gpu.Name
+                DriverVersion = $gpu.DriverVersion
+                AdapterRAM = $gpu.AdapterRAM
+            } | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        let info: GpuInfo = serde_json::from_str(&output)
+            .context("Failed to parse GPU info")?;
+
         Ok(GpuData {
-            name: "NVIDIA GeForce RTX 4090".to_string(),
-            utilization: 67.0,
-            memory_used: 18_200_000_000,
-            memory_total: 24_000_000_000,
-            temperature: 58.0,
-            power_usage: 385.0,
-            power_limit: 450.0,
-            fan_speed: 68.0,
-            clock_speed: 2520,
-            memory_clock: 1310,
-            driver_version: "546.33".to_string(),
+            name: info.Name,
+            utilization: 0.0,
+            memory_used: 0,
+            memory_total: info.AdapterRAM,
+            temperature: 0.0,
+            power_usage: 0.0,
+            power_limit: 300.0,
+            fan_speed: 0.0,
+            clock_speed: 0,
+            memory_clock: 0,
+            driver_version: info.DriverVersion,
             processes: vec![],
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct GpuInfo {
+    Name: String,
+    DriverVersion: String,
+    AdapterRAM: u64,
 }

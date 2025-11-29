@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use crate::integrations::PowerShellExecutor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuData {
@@ -44,55 +45,195 @@ pub struct ProcessInfo {
 }
 
 pub struct CpuMonitor {
-    // TODO: Add PowerShell executor
+    ps: PowerShellExecutor,
 }
 
 impl CpuMonitor {
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
+    pub fn new(ps: PowerShellExecutor) -> Result<Self> {
+        Ok(Self { ps })
     }
 
     pub async fn collect_data(&self) -> Result<CpuData> {
-        // TODO: Implement data collection via PowerShell
-        // For now, return mock data
+        // Get CPU info
+        let cpu_info = self.get_cpu_info().await?;
+
+        // Get per-core usage
+        let core_usage = self.get_core_usage().await?;
+
+        // Get overall CPU usage
+        let overall_usage = self.get_overall_usage().await?;
+
+        // Get frequency info
+        let frequency = self.get_frequency_info(&cpu_info).await?;
+
+        // Get top processes
+        let top_processes = self.get_top_processes().await?;
+
+        // Get core counts
+        let (core_count, thread_count) = self.get_core_counts(&cpu_info)?;
+
         Ok(CpuData {
-            name: "AMD Ryzen 9 5950X 16-Core @ 3.40GHz".to_string(),
-            overall_usage: 34.0,
-            core_count: 16,
-            thread_count: 32,
-            core_usage: (0..16)
-                .map(|i| CoreUsage {
-                    core_id: i,
-                    usage: (i as f32 * 3.0 + 25.0) % 65.0,
-                })
-                .collect(),
-            frequency: FrequencyInfo {
-                base_clock: 3.4,
-                avg_frequency: 3.87,
-                max_frequency: 4.45,
-                boost_active: true,
-            },
+            name: cpu_info.name,
+            overall_usage,
+            core_count,
+            thread_count,
+            core_usage,
+            frequency,
             power: PowerInfo {
-                current_power: 65.0,
-                max_power: 105.0,
+                current_power: (overall_usage / 100.0) * cpu_info.tdp,
+                max_power: cpu_info.tdp,
             },
-            temperature: Some(45.0),
-            top_processes: vec![
-                ProcessInfo {
-                    pid: 4521,
-                    name: "chrome.exe".to_string(),
-                    cpu_usage: 12.4,
-                    threads: 42,
-                    memory: 1_200_000_000,
-                },
-                ProcessInfo {
-                    pid: 8934,
-                    name: "rust-analyzer.exe".to_string(),
-                    cpu_usage: 8.7,
-                    threads: 16,
-                    memory: 842_000_000,
-                },
-            ],
+            temperature: None, // Requires additional sensors
+            top_processes,
         })
     }
+
+    async fn get_cpu_info(&self) -> Result<CpuInfo> {
+        let script = r#"
+            Get-CimInstance Win32_Processor | Select-Object -First 1 | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        let info: Win32Processor = serde_json::from_str(&output)
+            .context("Failed to parse CPU info")?;
+
+        Ok(CpuInfo {
+            name: info.Name,
+            max_clock_speed: info.MaxClockSpeed,
+            current_clock_speed: info.CurrentClockSpeed,
+            number_of_cores: info.NumberOfCores,
+            number_of_logical_processors: info.NumberOfLogicalProcessors,
+            tdp: info.TDP.unwrap_or(65.0), // Default TDP if not available
+        })
+    }
+
+    async fn get_overall_usage(&self) -> Result<f32> {
+        let script = r#"
+            (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        let usage: f32 = output.trim().parse()
+            .context("Failed to parse CPU usage")?;
+
+        Ok(usage.min(100.0))
+    }
+
+    async fn get_core_usage(&self) -> Result<Vec<CoreUsage>> {
+        let script = r#"
+            $cores = Get-Counter '\Processor(*)\% Processor Time' |
+                     Select-Object -ExpandProperty CounterSamples |
+                     Where-Object { $_.InstanceName -ne '_total' }
+            $result = @()
+            foreach ($core in $cores) {
+                $result += [PSCustomObject]@{
+                    Core = $core.InstanceName
+                    Usage = $core.CookedValue
+                }
+            }
+            ConvertTo-Json @($result)
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        if output.trim().is_empty() || output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        let cores: Vec<CoreSample> = serde_json::from_str(&output)
+            .unwrap_or_default();
+
+        Ok(cores
+            .into_iter()
+            .enumerate()
+            .map(|(id, sample)| CoreUsage {
+                core_id: id,
+                usage: sample.Usage.min(100.0),
+            })
+            .collect())
+    }
+
+    async fn get_frequency_info(&self, cpu_info: &CpuInfo) -> Result<FrequencyInfo> {
+        let current_mhz = cpu_info.current_clock_speed as f32;
+        let max_mhz = cpu_info.max_clock_speed as f32;
+
+        Ok(FrequencyInfo {
+            base_clock: max_mhz / 1000.0,
+            avg_frequency: current_mhz / 1000.0,
+            max_frequency: max_mhz / 1000.0 * 1.2, // Estimated boost
+            boost_active: current_mhz > max_mhz * 0.95,
+        })
+    }
+
+    async fn get_top_processes(&self) -> Result<Vec<ProcessInfo>> {
+        let script = r#"
+            Get-Process |
+            Where-Object { $_.CPU -gt 0 } |
+            Sort-Object CPU -Descending |
+            Select-Object -First 5 Id, ProcessName, CPU, Threads, @{Name='Memory';Expression={$_.WorkingSet64}} |
+            ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        if output.trim().is_empty() || output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        let processes: Vec<ProcessSample> = serde_json::from_str(&output)
+            .unwrap_or_default();
+
+        Ok(processes
+            .into_iter()
+            .map(|p| ProcessInfo {
+                pid: p.Id,
+                name: p.ProcessName,
+                cpu_usage: p.CPU.unwrap_or(0.0) as f32 / 10.0, // Normalize
+                threads: p.Threads.unwrap_or(1) as usize,
+                memory: p.Memory.unwrap_or(0),
+            })
+            .collect())
+    }
+
+    fn get_core_counts(&self, cpu_info: &CpuInfo) -> Result<(usize, usize)> {
+        Ok((
+            cpu_info.number_of_cores as usize,
+            cpu_info.number_of_logical_processors as usize,
+        ))
+    }
+}
+
+// PowerShell data structures
+#[derive(Debug, Deserialize)]
+struct Win32Processor {
+    Name: String,
+    MaxClockSpeed: u32,
+    CurrentClockSpeed: u32,
+    NumberOfCores: u32,
+    NumberOfLogicalProcessors: u32,
+    TDP: Option<f32>,
+}
+
+#[derive(Debug)]
+struct CpuInfo {
+    name: String,
+    max_clock_speed: u32,
+    current_clock_speed: u32,
+    number_of_cores: u32,
+    number_of_logical_processors: u32,
+    tdp: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreSample {
+    Usage: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessSample {
+    Id: u32,
+    ProcessName: String,
+    CPU: Option<f64>,
+    Threads: Option<u32>,
+    Memory: Option<u64>,
 }

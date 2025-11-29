@@ -3,9 +3,9 @@ use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers,
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::{Config, TabManager, TabType};
+use super::{Config, TabManager, TabType, monitors_task};
 use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData};
-use crate::integrations::ollama::OllamaData;
+use crate::integrations::{PowerShellExecutor, ollama::OllamaData};
 use crate::utils::command_history::CommandHistory;
 
 pub struct AppState {
@@ -40,17 +40,37 @@ impl AppState {
 
         let command_history = CommandHistory::new(config.ui.command_history.max_entries);
 
+        let cpu_data = Arc::new(RwLock::new(None));
+        let gpu_data = Arc::new(RwLock::new(None));
+        let ram_data = Arc::new(RwLock::new(None));
+        let disk_data = Arc::new(RwLock::new(None));
+        let network_data = Arc::new(RwLock::new(None));
+        let process_data = Arc::new(RwLock::new(None));
+
+        // Start monitor tasks
+        monitors_task::spawn_monitor_tasks(
+            Arc::clone(&cpu_data),
+            Arc::clone(&gpu_data),
+            Arc::clone(&ram_data),
+            Arc::clone(&disk_data),
+            Arc::clone(&network_data),
+            Arc::clone(&process_data),
+            config.powershell.executable.clone(),
+            config.powershell.timeout_seconds,
+            config.powershell.cache_ttl_seconds,
+        );
+
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             tab_manager,
             compact_mode: false,
 
-            cpu_data: Arc::new(RwLock::new(None)),
-            gpu_data: Arc::new(RwLock::new(None)),
-            ram_data: Arc::new(RwLock::new(None)),
-            disk_data: Arc::new(RwLock::new(None)),
-            network_data: Arc::new(RwLock::new(None)),
-            process_data: Arc::new(RwLock::new(None)),
+            cpu_data,
+            gpu_data,
+            ram_data,
+            disk_data,
+            network_data,
+            process_data,
 
             ollama_data: Arc::new(RwLock::new(None)),
 
@@ -195,8 +215,21 @@ impl AppState {
         // Add to history
         self.command_history.add(self.command_input.clone());
 
-        // TODO: Execute PowerShell command or Ollama command
-        log::info!("Executing command: {}", self.command_input);
+        // Execute PowerShell command
+        let ps = PowerShellExecutor::new(
+            self.config.read().powershell.executable.clone(),
+            self.config.read().powershell.timeout_seconds,
+            self.config.read().powershell.cache_ttl_seconds,
+        );
+
+        match ps.execute(&self.command_input).await {
+            Ok(output) => {
+                log::info!("Command output: {}", output);
+            }
+            Err(e) => {
+                log::error!("Command failed: {}", e);
+            }
+        }
 
         Ok(())
     }
