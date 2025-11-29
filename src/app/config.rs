@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -204,5 +206,81 @@ impl Config {
 }
 
 pub struct ConfigManager {
-    // TODO: Implement hot reload with notify crate
+    config: Arc<RwLock<Config>>,
+    config_path: std::path::PathBuf,
+}
+
+impl ConfigManager {
+    pub fn new(config: Config, config_path: std::path::PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            config: Arc::new(RwLock::new(config)),
+            config_path,
+        })
+    }
+
+    pub fn get_config(&self) -> Arc<RwLock<Config>> {
+        Arc::clone(&self.config)
+    }
+
+    pub fn watch(self: Arc<Self>) -> Result<()> {
+        use notify::{Watcher, RecursiveMode, RecommendedWatcher, Event};
+        use std::sync::mpsc::channel;
+
+        let (tx, rx) = channel::<Result<Event, notify::Error>>();
+
+        let mut watcher = RecommendedWatcher::new(
+            tx,
+            notify::Config::default(),
+        )
+        .context("Failed to create file watcher")?;
+
+        watcher.watch(
+            self.config_path.as_ref(),
+            RecursiveMode::NonRecursive,
+        )
+        .context("Failed to watch config file")?;
+
+        let config = Arc::clone(&self.config);
+        let config_path = self.config_path.clone();
+
+        // Spawn watcher thread
+        std::thread::spawn(move || {
+            // Keep watcher alive
+            let _watcher = watcher;
+
+            loop {
+                match rx.recv() {
+                    Ok(Ok(event)) => {
+                        use notify::EventKind;
+                        match event.kind {
+                            EventKind::Modify(_) | EventKind::Create(_) => {
+                                // Small delay to ensure file is fully written
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                                match Config::load(&config_path) {
+                                    Ok(new_config) => {
+                                        *config.write() = new_config;
+                                        log::info!("Configuration reloaded successfully");
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to reload config: {}", e);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("Watch error: {:?}", e);
+                    }
+                    Err(e) => {
+                        log::error!("Channel error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
 }

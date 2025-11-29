@@ -9,16 +9,35 @@ pub use tabs::{TabType, TabManager};
 
 use anyhow::Result;
 use crossterm::event::Event as CrosstermEvent;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub struct App {
     pub state: AppState,
+    pub config_manager: Option<Arc<ConfigManager>>,
 }
 
 impl App {
     pub async fn new() -> Result<Self> {
-        let config = Config::load("config.toml")?;
+        let config_path = PathBuf::from("config.toml");
+        let config = Config::load(&config_path)?;
+
+        // Create config manager with hot reload
+        let config_manager = ConfigManager::new(config.clone(), config_path);
+
+        // Start watching for config changes
+        if let Err(e) = config_manager.clone().watch() {
+            log::warn!("Failed to start config hot reload: {}", e);
+        } else {
+            log::info!("Config hot reload enabled");
+        }
+
         let state = AppState::new(config).await?;
-        Ok(Self { state })
+
+        Ok(Self {
+            state,
+            config_manager: Some(config_manager),
+        })
     }
 
     pub async fn handle_event(&mut self, event: CrosstermEvent) -> Result<bool> {
