@@ -83,9 +83,26 @@ pub fn spawn_monitor_tasks(
         let network_data = Arc::clone(&network_data);
         let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
         tokio::spawn(async move {
-            let monitor = NetworkMonitor::new(ps).unwrap();
+            let mut monitor = NetworkMonitor::new(ps).unwrap();
+            let mut traffic_history = std::collections::VecDeque::with_capacity(60);
+
             loop {
-                if let Ok(data) = monitor.collect_data().await {
+                if let Ok(mut data) = monitor.collect_data().await {
+                    // Update traffic history (60 seconds)
+                    if !data.traffic_history.is_empty() {
+                        for sample in data.traffic_history.iter() {
+                            traffic_history.push_back(sample.clone());
+                        }
+                    }
+
+                    // Keep only last 60 samples
+                    while traffic_history.len() > 60 {
+                        traffic_history.pop_front();
+                    }
+
+                    // Update data with accumulated history
+                    data.traffic_history = traffic_history.clone();
+
                     *network_data.write() = Some(data);
                 }
                 sleep(Duration::from_millis(1000)).await;
