@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::{Config, TabManager, TabType, monitors_task};
 use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData, ServiceData};
-use crate::integrations::{PowerShellExecutor, ollama::OllamaData};
+use crate::integrations::{PowerShellExecutor, OllamaData};
 use crate::utils::command_history::CommandHistory;
 
 pub struct AppState {
@@ -36,6 +36,9 @@ pub struct AppState {
 
     // Services UI state
     pub services_state: ServicesUIState,
+
+    // Ollama UI state
+    pub ollama_state: OllamaUIState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -79,6 +82,20 @@ pub struct ServicesUIState {
     pub status_filter: ServiceStatusFilter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OllamaView {
+    Models,
+    Running,
+}
+
+pub struct OllamaUIState {
+    pub selected_model_index: usize,
+    pub selected_running_index: usize,
+    pub current_view: OllamaView,
+    pub command_input: String,
+    pub show_command_input: bool,
+}
+
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
         let tab_manager = TabManager::new(
@@ -96,6 +113,8 @@ impl AppState {
         let process_data = Arc::new(RwLock::new(None));
         let service_data = Arc::new(RwLock::new(None));
 
+        let ollama_data = Arc::new(RwLock::new(None));
+
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
             Arc::clone(&cpu_data),
@@ -105,6 +124,7 @@ impl AppState {
             Arc::clone(&network_data),
             Arc::clone(&process_data),
             Arc::clone(&service_data),
+            Arc::clone(&ollama_data),
             config.powershell.executable.clone(),
             config.powershell.timeout_seconds,
             config.powershell.cache_ttl_seconds,
@@ -123,7 +143,7 @@ impl AppState {
             process_data,
             service_data,
 
-            ollama_data: Arc::new(RwLock::new(None)),
+            ollama_data,
 
             command_menu_active: false,
             command_history,
@@ -144,6 +164,14 @@ impl AppState {
                 sort_column: ServiceSortColumn::Name,
                 sort_ascending: true,
                 status_filter: ServiceStatusFilter::All,
+            },
+
+            ollama_state: OllamaUIState {
+                selected_model_index: 0,
+                selected_running_index: 0,
+                current_view: OllamaView::Models,
+                command_input: String::new(),
+                show_command_input: false,
             },
         })
     }
@@ -359,6 +387,105 @@ impl AppState {
                         ServiceStatusFilter::Running => ServiceStatusFilter::Stopped,
                         ServiceStatusFilter::Stopped => ServiceStatusFilter::All,
                     };
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        // Ollama tab hotkeys
+        if self.tab_manager.current() == TabType::Ollama {
+            // Handle command input mode
+            if self.ollama_state.show_command_input {
+                match key.code {
+                    KeyCode::Enter => {
+                        // Execute ollama command (to be implemented in execute_command)
+                        self.ollama_state.show_command_input = false;
+                        // Command will be executed via execute_command later
+                    }
+                    KeyCode::Esc => {
+                        self.ollama_state.show_command_input = false;
+                        self.ollama_state.command_input.clear();
+                    }
+                    KeyCode::Backspace => {
+                        self.ollama_state.command_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        self.ollama_state.command_input.push(c);
+                    }
+                    _ => {}
+                }
+                return Ok(true);
+            }
+
+            match key.code {
+                KeyCode::Up => {
+                    match self.ollama_state.current_view {
+                        OllamaView::Models => {
+                            if self.ollama_state.selected_model_index > 0 {
+                                self.ollama_state.selected_model_index -= 1;
+                            }
+                        }
+                        OllamaView::Running => {
+                            if self.ollama_state.selected_running_index > 0 {
+                                self.ollama_state.selected_running_index -= 1;
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    match self.ollama_state.current_view {
+                        OllamaView::Models => {
+                            let model_count = self.ollama_data.read().as_ref()
+                                .map(|d| d.models.len()).unwrap_or(0);
+                            if self.ollama_state.selected_model_index + 1 < model_count {
+                                self.ollama_state.selected_model_index += 1;
+                            }
+                        }
+                        OllamaView::Running => {
+                            let running_count = self.ollama_data.read().as_ref()
+                                .map(|d| d.running_models.len()).unwrap_or(0);
+                            if self.ollama_state.selected_running_index + 1 < running_count {
+                                self.ollama_state.selected_running_index += 1;
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('v') => {
+                    // Toggle between Models and Running view
+                    self.ollama_state.current_view = match self.ollama_state.current_view {
+                        OllamaView::Models => OllamaView::Running,
+                        OllamaView::Running => OllamaView::Models,
+                    };
+                    return Ok(true);
+                }
+                KeyCode::Char('c') => {
+                    // Open command input
+                    self.ollama_state.show_command_input = true;
+                    return Ok(true);
+                }
+                KeyCode::Char('r') => {
+                    // Run selected model (placeholder - to be implemented)
+                    return Ok(true);
+                }
+                KeyCode::Char('s') => {
+                    // Stop selected running model (placeholder - to be implemented)
+                    return Ok(true);
+                }
+                KeyCode::Char('d') => {
+                    // Delete selected model (placeholder - to be implemented)
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    // Pull model (open command input with "pull ")
+                    self.ollama_state.show_command_input = true;
+                    self.ollama_state.command_input = "pull ".to_string();
+                    return Ok(true);
+                }
+                KeyCode::Char('l') => {
+                    // Refresh list (force re-fetch)
                     return Ok(true);
                 }
                 _ => {}

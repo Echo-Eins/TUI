@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, OllamaClient, OllamaData};
 use crate::monitors::*;
 
 pub fn spawn_monitor_tasks(
@@ -15,6 +15,7 @@ pub fn spawn_monitor_tasks(
     network_data: Arc<RwLock<Option<NetworkData>>>,
     process_data: Arc<RwLock<Option<ProcessData>>>,
     service_data: Arc<RwLock<Option<ServiceData>>>,
+    ollama_data: Arc<RwLock<Option<OllamaData>>>,
     ps_executable: String,
     timeout: u64,
     cache_ttl: u64,
@@ -137,6 +138,20 @@ pub fn spawn_monitor_tasks(
                     *service_data.write() = Some(data);
                 }
                 sleep(Duration::from_millis(3000)).await;
+            }
+        });
+    }
+
+    // Ollama monitor task
+    {
+        let ollama_data = Arc::clone(&ollama_data);
+        tokio::spawn(async move {
+            let mut client = OllamaClient::new(None).unwrap();
+            loop {
+                if let Ok(data) = client.collect_data().await {
+                    *ollama_data.write() = Some(data);
+                }
+                sleep(Duration::from_millis(5000)).await;
             }
         });
     }
