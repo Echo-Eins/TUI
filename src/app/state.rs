@@ -1,11 +1,14 @@
 use anyhow::Result;
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+    MouseEventKind,
+};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::{Config, TabManager, TabType, monitors_task};
-use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData, ServiceData};
-use crate::integrations::{PowerShellExecutor, OllamaData};
+use super::{monitors_task, Config, TabManager, TabType};
+use crate::integrations::{OllamaData, PowerShellExecutor};
+use crate::monitors::{CpuData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData};
 use crate::utils::command_history::CommandHistory;
 
 pub struct AppState {
@@ -98,10 +101,7 @@ pub struct OllamaUIState {
 
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
-        let tab_manager = TabManager::new(
-            config.tabs.enabled.clone(),
-            &config.tabs.default,
-        );
+        let tab_manager = TabManager::new(config.tabs.enabled.clone(), &config.tabs.default);
 
         let command_history = CommandHistory::new(config.ui.command_history.max_entries);
 
@@ -185,6 +185,7 @@ impl AppState {
     }
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
+        let is_initial_press = matches!(key.kind, KeyEventKind::Press);
         // Handle Ctrl+C to quit
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(false);
@@ -192,7 +193,9 @@ impl AppState {
 
         // Handle Ctrl+F to open command history menu
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
-            self.command_menu_active = !self.command_menu_active;
+            if is_initial_press {
+                self.command_menu_active = !self.command_menu_active;
+            }
             return Ok(true);
         }
 
@@ -202,23 +205,23 @@ impl AppState {
                 KeyCode::Esc => {
                     self.command_menu_active = false;
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if is_initial_press => {
                     // First Enter: insert command into input
                     if let Some(cmd) = self.command_history.get_selected() {
                         self.command_input = cmd.clone();
                         self.command_menu_active = false;
                     }
                 }
-                KeyCode::Up => {
+                KeyCode::Up if is_initial_press => {
                     self.command_history.previous();
                 }
-                KeyCode::Down => {
+                KeyCode::Down if is_initial_press => {
                     self.command_history.next();
                 }
-                KeyCode::Tab => {
+                KeyCode::Tab if is_initial_press => {
                     self.command_history.next();
                 }
-                KeyCode::BackTab => {
+                KeyCode::BackTab if is_initial_press => {
                     self.command_history.previous();
                 }
                 _ => {}
@@ -229,7 +232,7 @@ impl AppState {
         // Handle command input
         if !self.command_input.is_empty() {
             match key.code {
-                KeyCode::Enter => {
+                KeyCode::Enter if is_initial_press => {
                     // Execute command
                     self.execute_command().await?;
                     self.command_input.clear();
@@ -254,14 +257,21 @@ impl AppState {
                 KeyCode::Up => {
                     if self.processes_state.selected_index > 0 {
                         self.processes_state.selected_index -= 1;
-                        if self.processes_state.selected_index < self.processes_state.scroll_offset {
-                            self.processes_state.scroll_offset = self.processes_state.selected_index;
+                        if self.processes_state.selected_index < self.processes_state.scroll_offset
+                        {
+                            self.processes_state.scroll_offset =
+                                self.processes_state.selected_index;
                         }
                     }
                     return Ok(true);
                 }
                 KeyCode::Down => {
-                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    let process_count = self
+                        .process_data
+                        .read()
+                        .as_ref()
+                        .map(|d| d.processes.len())
+                        .unwrap_or(0);
                     if self.processes_state.selected_index + 1 < process_count {
                         self.processes_state.selected_index += 1;
                     }
@@ -277,7 +287,12 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
-                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    let process_count = self
+                        .process_data
+                        .read()
+                        .as_ref()
+                        .map(|d| d.processes.len())
+                        .unwrap_or(0);
                     if self.processes_state.selected_index + 10 < process_count {
                         self.processes_state.selected_index += 10;
                     } else if process_count > 0 {
@@ -336,7 +351,12 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Down => {
-                    let service_count = self.service_data.read().as_ref().map(|d| d.services.len()).unwrap_or(0);
+                    let service_count = self
+                        .service_data
+                        .read()
+                        .as_ref()
+                        .map(|d| d.services.len())
+                        .unwrap_or(0);
                     if self.services_state.selected_index + 1 < service_count {
                         self.services_state.selected_index += 1;
                     }
@@ -352,7 +372,12 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
-                    let service_count = self.service_data.read().as_ref().map(|d| d.services.len()).unwrap_or(0);
+                    let service_count = self
+                        .service_data
+                        .read()
+                        .as_ref()
+                        .map(|d| d.services.len())
+                        .unwrap_or(0);
                     if self.services_state.selected_index + 10 < service_count {
                         self.services_state.selected_index += 10;
                     } else if service_count > 0 {
@@ -437,15 +462,23 @@ impl AppState {
                 KeyCode::Down => {
                     match self.ollama_state.current_view {
                         OllamaView::Models => {
-                            let model_count = self.ollama_data.read().as_ref()
-                                .map(|d| d.models.len()).unwrap_or(0);
+                            let model_count = self
+                                .ollama_data
+                                .read()
+                                .as_ref()
+                                .map(|d| d.models.len())
+                                .unwrap_or(0);
                             if self.ollama_state.selected_model_index + 1 < model_count {
                                 self.ollama_state.selected_model_index += 1;
                             }
                         }
                         OllamaView::Running => {
-                            let running_count = self.ollama_data.read().as_ref()
-                                .map(|d| d.running_models.len()).unwrap_or(0);
+                            let running_count = self
+                                .ollama_data
+                                .read()
+                                .as_ref()
+                                .map(|d| d.running_models.len())
+                                .unwrap_or(0);
                             if self.ollama_state.selected_running_index + 1 < running_count {
                                 self.ollama_state.selected_running_index += 1;
                             }
@@ -469,7 +502,9 @@ impl AppState {
                 KeyCode::Char('r') => {
                     // Run selected model
                     if let Some(ollama) = self.ollama_data.read().as_ref() {
-                        if let Some(model) = ollama.models.get(self.ollama_state.selected_model_index) {
+                        if let Some(model) =
+                            ollama.models.get(self.ollama_state.selected_model_index)
+                        {
                             let model_name = model.name.clone();
                             tokio::spawn(async move {
                                 use crate::integrations::OllamaClient;
@@ -484,7 +519,10 @@ impl AppState {
                 KeyCode::Char('s') => {
                     // Stop selected running model
                     if let Some(ollama) = self.ollama_data.read().as_ref() {
-                        if let Some(running) = ollama.running_models.get(self.ollama_state.selected_running_index) {
+                        if let Some(running) = ollama
+                            .running_models
+                            .get(self.ollama_state.selected_running_index)
+                        {
                             let model_name = running.name.clone();
                             tokio::spawn(async move {
                                 use crate::integrations::OllamaClient;
@@ -499,7 +537,9 @@ impl AppState {
                 KeyCode::Char('d') => {
                     // Delete selected model
                     if let Some(ollama) = self.ollama_data.read().as_ref() {
-                        if let Some(model) = ollama.models.get(self.ollama_state.selected_model_index) {
+                        if let Some(model) =
+                            ollama.models.get(self.ollama_state.selected_model_index)
+                        {
                             let model_name = model.name.clone();
                             tokio::spawn(async move {
                                 use crate::integrations::OllamaClient;
@@ -530,10 +570,10 @@ impl AppState {
             KeyCode::F(2) => {
                 self.compact_mode = !self.compact_mode;
             }
-            KeyCode::Tab => {
+            KeyCode::Tab if is_initial_press => {
                 self.tab_manager.next();
             }
-            KeyCode::BackTab => {
+            KeyCode::BackTab if is_initial_press => {
                 self.tab_manager.previous();
             }
             KeyCode::Char('1') => self.tab_manager.select(TabType::Cpu),
@@ -546,14 +586,14 @@ impl AppState {
             KeyCode::Char('8') => self.tab_manager.select(TabType::Services),
             KeyCode::Char('9') => self.tab_manager.select(TabType::DiskAnalyzer),
             KeyCode::Char('0') => self.tab_manager.select(TabType::Settings),
-            KeyCode::Up => {
+            KeyCode::Up if is_initial_press => {
                 // Navigate command history with arrow keys (only when not on Processes tab)
                 self.command_history.previous();
                 if let Some(cmd) = self.command_history.get_selected() {
                     self.command_input = cmd.clone();
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down if is_initial_press => {
                 self.command_history.next();
                 if let Some(cmd) = self.command_history.get_selected() {
                     self.command_input = cmd.clone();
@@ -570,7 +610,8 @@ impl AppState {
             MouseEventKind::Down(_) => {
                 // Handle mouse clicks for radial menu
                 if self.command_menu_active {
-                    self.command_history.handle_mouse_click(mouse.column, mouse.row);
+                    self.command_history
+                        .handle_mouse_click(mouse.column, mouse.row);
                 }
             }
             _ => {}
