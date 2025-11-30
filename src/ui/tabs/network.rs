@@ -6,14 +6,16 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
-use crate::utils::format::format_bytes;
+use crate::app::{state::MonitorStatus, App};
 use crate::ui::theme::Theme;
+use crate::ui::widgets::render_monitor_status;
+use crate::utils::format::format_bytes;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let network_data = app.state.network_data.read();
+    let network_state = app.state.network_data.read();
 
-    if let Some(data) = network_data.as_ref() {
+    if let (MonitorStatus::Ready, Some(data)) = (&network_state.status, network_state.data.as_ref())
+    {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -23,16 +25,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             render_full(f, area, data, &theme);
         }
     } else {
-        let block = Block::default()
-            .title("Network Monitor")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
-
-        let text = Paragraph::new("Loading network data...")
-            .block(block)
-            .style(Style::default().fg(Color::White));
-
-        f.render_widget(text, area);
+        render_monitor_status(
+            f,
+            area,
+            "Network Monitor",
+            &network_state.status,
+            network_state.last_updated,
+        );
     }
 }
 
@@ -40,10 +39,10 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),   // Header
-            Constraint::Length(8),   // Interface details (per interface)
-            Constraint::Length(8),   // Traffic graphs (Download/Upload)
-            Constraint::Min(10),     // Active connections and bandwidth consumers
+            Constraint::Length(3), // Header
+            Constraint::Length(8), // Interface details (per interface)
+            Constraint::Length(8), // Traffic graphs (Download/Upload)
+            Constraint::Min(10),   // Active connections and bandwidth consumers
         ])
         .split(area);
 
@@ -60,8 +59,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50),  // Active connections
-            Constraint::Percentage(50),  // Bandwidth consumers
+            Constraint::Percentage(50), // Active connections
+            Constraint::Percentage(50), // Bandwidth consumers
         ])
         .split(chunks[3]);
 
@@ -76,9 +75,9 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),   // Header
-            Constraint::Length(6),   // Quick stats
-            Constraint::Min(8),      // Connections (compact)
+            Constraint::Length(3), // Header
+            Constraint::Length(6), // Quick stats
+            Constraint::Min(8),    // Connections (compact)
         ])
         .split(area);
 
@@ -91,7 +90,12 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
     if let Some(iface) = data.interfaces.first() {
         lines.push(Line::from(vec![
             Span::styled("Status: ", Style::default().fg(Color::Gray)),
-            Span::styled(&iface.status, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &iface.status,
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled("Speed: ", Style::default().fg(Color::Gray)),
             Span::styled(&iface.link_speed, Style::default().fg(Color::Cyan)),
@@ -107,20 +111,34 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
 
         lines.push(Line::from(vec![
             Span::styled("Download: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2} Mbps", iface.download_speed),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:.2} Mbps", iface.download_speed),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled("Upload: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2} Mbps", iface.upload_speed),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:.2} Mbps", iface.upload_speed),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
 
         lines.push(Line::from(vec![
             Span::styled("Total RX: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(iface.bytes_received), Style::default().fg(Color::White)),
+            Span::styled(
+                format_bytes(iface.bytes_received),
+                Style::default().fg(Color::White),
+            ),
             Span::raw("  "),
             Span::styled("TX: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(iface.bytes_sent), Style::default().fg(Color::White)),
+            Span::styled(
+                format_bytes(iface.bytes_sent),
+                Style::default().fg(Color::White),
+            ),
         ]));
     }
 
@@ -154,14 +172,21 @@ fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData,
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.network_color));
 
-    let header_paragraph = Paragraph::new(header_text)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_paragraph = Paragraph::new(header_text).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_paragraph, area);
 }
 
-fn render_interface_details(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+fn render_interface_details(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    theme: &Theme,
+) {
     if let Some(iface) = data.interfaces.first() {
         let lines = vec![
             Line::from(vec![
@@ -190,12 +215,17 @@ fn render_interface_details(f: &mut Frame, area: Rect, data: &crate::monitors::N
                     } else {
                         iface.dns_servers.join(", ")
                     },
-                    Style::default().fg(Color::White)
+                    Style::default().fg(Color::White),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("Link Speed: ", Style::default().fg(Color::Gray)),
-                Span::styled(&iface.link_speed, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    &iface.link_speed,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled("Duplex: ", Style::default().fg(Color::Gray)),
                 Span::styled(&iface.duplex, Style::default().fg(Color::White)),
@@ -205,10 +235,16 @@ fn render_interface_details(f: &mut Frame, area: Rect, data: &crate::monitors::N
             ]),
             Line::from(vec![
                 Span::styled("Total Received: ", Style::default().fg(Color::Gray)),
-                Span::styled(format_bytes(iface.bytes_received), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format_bytes(iface.bytes_received),
+                    Style::default().fg(Color::Green),
+                ),
                 Span::raw("  "),
                 Span::styled("Total Sent: ", Style::default().fg(Color::Gray)),
-                Span::styled(format_bytes(iface.bytes_sent), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format_bytes(iface.bytes_sent),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
 
@@ -222,7 +258,12 @@ fn render_interface_details(f: &mut Frame, area: Rect, data: &crate::monitors::N
     }
 }
 
-fn render_traffic_graphs(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+fn render_traffic_graphs(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -230,7 +271,8 @@ fn render_traffic_graphs(f: &mut Frame, area: Rect, data: &crate::monitors::Netw
 
     // Download graph
     if !data.traffic_history.is_empty() {
-        let download_data: Vec<u64> = data.traffic_history
+        let download_data: Vec<u64> = data
+            .traffic_history
             .iter()
             .map(|s| (s.download_mbps * 100.0) as u64)
             .collect();
@@ -262,7 +304,8 @@ fn render_traffic_graphs(f: &mut Frame, area: Rect, data: &crate::monitors::Netw
 
     // Upload graph
     if !data.traffic_history.is_empty() {
-        let upload_data: Vec<u64> = data.traffic_history
+        let upload_data: Vec<u64> = data
+            .traffic_history
             .iter()
             .map(|s| (s.upload_mbps * 100.0) as u64)
             .collect();
@@ -293,30 +336,45 @@ fn render_traffic_graphs(f: &mut Frame, area: Rect, data: &crate::monitors::Netw
     }
 }
 
-fn render_connections_table(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
-    let header = Row::new(vec!["Process", "PID", "Protocol", "Local", "Remote", "State"])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .bottom_margin(0);
+fn render_connections_table(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    theme: &Theme,
+) {
+    let header = Row::new(vec![
+        "Process", "PID", "Protocol", "Local", "Remote", "State",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(0);
 
-    let rows: Vec<Row> = data.connections.iter().map(|conn| {
-        Row::new(vec![
-            conn.process_name.clone(),
-            format!("{}", conn.pid),
-            conn.protocol.clone(),
-            format!("{}:{}", conn.local_address, conn.local_port),
-            format!("{}:{}", conn.remote_address, conn.remote_port),
-            conn.state.clone(),
-        ])
-        .style(Style::default().fg(Color::White))
-    }).collect();
+    let rows: Vec<Row> = data
+        .connections
+        .iter()
+        .map(|conn| {
+            Row::new(vec![
+                conn.process_name.clone(),
+                format!("{}", conn.pid),
+                conn.protocol.clone(),
+                format!("{}:{}", conn.local_address, conn.local_port),
+                format!("{}:{}", conn.remote_address, conn.remote_port),
+                conn.state.clone(),
+            ])
+            .style(Style::default().fg(Color::White))
+        })
+        .collect();
 
     let widths = [
-        Constraint::Percentage(20),  // Process
-        Constraint::Percentage(8),   // PID
-        Constraint::Percentage(10),  // Protocol
-        Constraint::Percentage(25),  // Local
-        Constraint::Percentage(25),  // Remote
-        Constraint::Percentage(12),  // State
+        Constraint::Percentage(20), // Process
+        Constraint::Percentage(8),  // PID
+        Constraint::Percentage(10), // Protocol
+        Constraint::Percentage(25), // Local
+        Constraint::Percentage(25), // Remote
+        Constraint::Percentage(12), // State
     ];
 
     let table = Table::new(rows, widths)
@@ -332,24 +390,38 @@ fn render_connections_table(f: &mut Frame, area: Rect, data: &crate::monitors::N
     f.render_widget(table, area);
 }
 
-fn render_connections_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+fn render_connections_compact(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    theme: &Theme,
+) {
     let header = Row::new(vec!["Process", "Remote", "State"])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .bottom_margin(0);
 
-    let rows: Vec<Row> = data.connections.iter().take(5).map(|conn| {
-        Row::new(vec![
-            format!("{} ({})", conn.process_name, conn.pid),
-            format!("{}:{}", conn.remote_address, conn.remote_port),
-            conn.state.clone(),
-        ])
-        .style(Style::default().fg(Color::White))
-    }).collect();
+    let rows: Vec<Row> = data
+        .connections
+        .iter()
+        .take(5)
+        .map(|conn| {
+            Row::new(vec![
+                format!("{} ({})", conn.process_name, conn.pid),
+                format!("{}:{}", conn.remote_address, conn.remote_port),
+                conn.state.clone(),
+            ])
+            .style(Style::default().fg(Color::White))
+        })
+        .collect();
 
     let widths = [
-        Constraint::Percentage(40),  // Process
-        Constraint::Percentage(40),  // Remote
-        Constraint::Percentage(20),  // State
+        Constraint::Percentage(40), // Process
+        Constraint::Percentage(40), // Remote
+        Constraint::Percentage(20), // State
     ];
 
     let table = Table::new(rows, widths)
@@ -365,30 +437,46 @@ fn render_connections_compact(f: &mut Frame, area: Rect, data: &crate::monitors:
     f.render_widget(table, area);
 }
 
-fn render_bandwidth_consumers(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
-    let header = Row::new(vec!["Process", "PID", "Download", "Upload", "Total RX", "Total TX"])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .bottom_margin(0);
+fn render_bandwidth_consumers(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    theme: &Theme,
+) {
+    let header = Row::new(vec![
+        "Process", "PID", "Download", "Upload", "Total RX", "Total TX",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(0);
 
-    let rows: Vec<Row> = data.bandwidth_consumers.iter().take(10).map(|consumer| {
-        Row::new(vec![
-            consumer.process_name.clone(),
-            format!("{}", consumer.pid),
-            format!("{:.2} Mbps", consumer.download_speed),
-            format!("{:.2} Mbps", consumer.upload_speed),
-            format_bytes(consumer.total_bytes_received),
-            format_bytes(consumer.total_bytes_sent),
-        ])
-        .style(Style::default().fg(Color::White))
-    }).collect();
+    let rows: Vec<Row> = data
+        .bandwidth_consumers
+        .iter()
+        .take(10)
+        .map(|consumer| {
+            Row::new(vec![
+                consumer.process_name.clone(),
+                format!("{}", consumer.pid),
+                format!("{:.2} Mbps", consumer.download_speed),
+                format!("{:.2} Mbps", consumer.upload_speed),
+                format_bytes(consumer.total_bytes_received),
+                format_bytes(consumer.total_bytes_sent),
+            ])
+            .style(Style::default().fg(Color::White))
+        })
+        .collect();
 
     let widths = [
-        Constraint::Percentage(20),  // Process
-        Constraint::Percentage(10),  // PID
-        Constraint::Percentage(15),  // Download
-        Constraint::Percentage(15),  // Upload
-        Constraint::Percentage(20),  // Total RX
-        Constraint::Percentage(20),  // Total TX
+        Constraint::Percentage(20), // Process
+        Constraint::Percentage(10), // PID
+        Constraint::Percentage(15), // Download
+        Constraint::Percentage(15), // Upload
+        Constraint::Percentage(20), // Total RX
+        Constraint::Percentage(20), // Total TX
     ];
 
     let table = Table::new(rows, widths)
@@ -396,7 +484,10 @@ fn render_bandwidth_consumers(f: &mut Frame, area: Rect, data: &crate::monitors:
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("Bandwidth Consumers (Top {})", data.bandwidth_consumers.len().min(10)))
+                .title(format!(
+                    "Bandwidth Consumers (Top {})",
+                    data.bandwidth_consumers.len().min(10)
+                ))
                 .border_style(Style::default().fg(theme.network_color)),
         )
         .column_spacing(1);

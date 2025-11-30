@@ -6,14 +6,15 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
-use crate::utils::format::{create_progress_bar, format_bytes};
+use crate::app::{state::MonitorStatus, App};
 use crate::ui::theme::Theme;
+use crate::ui::widgets::render_monitor_status;
+use crate::utils::format::{create_progress_bar, format_bytes};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let ram_data = app.state.ram_data.read();
+    let ram_state = app.state.ram_data.read();
 
-    if let Some(data) = ram_data.as_ref() {
+    if let (MonitorStatus::Ready, Some(data)) = (&ram_state.status, ram_state.data.as_ref()) {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -23,16 +24,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             render_full(f, area, data, &theme);
         }
     } else {
-        let block = Block::default()
-            .title("RAM Monitor")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red));
-
-        let text = Paragraph::new("Loading RAM data...")
-            .block(block)
-            .style(Style::default().fg(Color::White));
-
-        f.render_widget(text, area);
+        render_monitor_status(
+            f,
+            area,
+            "RAM Monitor",
+            &ram_state.status,
+            ram_state.last_updated,
+        );
     }
 }
 
@@ -40,12 +38,12 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(3),  // Overall usage
-            Constraint::Length(3),  // Committed memory
-            Constraint::Length(3),  // Pagefile gauge
-            Constraint::Length(9),  // Memory breakdown
-            Constraint::Min(8),     // Top processes
+            Constraint::Length(3), // Header
+            Constraint::Length(3), // Overall usage
+            Constraint::Length(3), // Committed memory
+            Constraint::Length(3), // Pagefile gauge
+            Constraint::Length(9), // Memory breakdown
+            Constraint::Min(8),    // Top processes
         ])
         .split(area);
 
@@ -61,9 +59,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.ram_color));
 
-    let header_text = Paragraph::new(header)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_text = Paragraph::new(header).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_text, chunks[0]);
 
@@ -71,9 +71,14 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
     let usage_percent = ((data.used as f64 / data.total as f64) * 100.0) as u16;
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("Memory Usage"))
-        .gauge_style(Style::default().fg(theme.ram_color).add_modifier(Modifier::BOLD))
+        .gauge_style(
+            Style::default()
+                .fg(theme.ram_color)
+                .add_modifier(Modifier::BOLD),
+        )
         .percent(usage_percent)
-        .label(format!("{}% - {} / {}",
+        .label(format!(
+            "{}% - {} / {}",
             usage_percent,
             format_bytes(data.used),
             format_bytes(data.total)
@@ -84,10 +89,19 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
     // Committed memory gauge
     let commit_percent = data.commit_percent.min(100.0) as u16;
     let commit_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title("Committed Memory"))
-        .gauge_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Committed Memory"),
+        )
+        .gauge_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .percent(commit_percent)
-        .label(format!("{}% - {} / {} (Physical + Pagefile)",
+        .label(format!(
+            "{}% - {} / {} (Physical + Pagefile)",
             commit_percent,
             format_bytes(data.committed),
             format_bytes(data.commit_limit)
@@ -109,20 +123,26 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(5),     // Memory info
+            Constraint::Length(3), // Header
+            Constraint::Min(5),    // Memory info
         ])
         .split(area);
 
     // Header
-    let header = format!("RAM: {} / {}", format_bytes(data.used), format_bytes(data.total));
+    let header = format!(
+        "RAM: {} / {}",
+        format_bytes(data.used),
+        format_bytes(data.total)
+    );
     let header_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.ram_color));
 
-    let header_text = Paragraph::new(header)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_text = Paragraph::new(header).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_text, chunks[0]);
 
@@ -134,15 +154,23 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
         Line::from(vec![
             Span::raw("Usage:     "),
             Span::styled(
-                format!("{}%  {}", usage_percent as u16, create_progress_bar(usage_percent, 20)),
-                Style::default().fg(theme.ram_color)
+                format!(
+                    "{}%  {}",
+                    usage_percent as u16,
+                    create_progress_bar(usage_percent, 20)
+                ),
+                Style::default().fg(theme.ram_color),
             ),
         ]),
         Line::from(vec![
             Span::raw("Committed: "),
             Span::styled(
-                format!("{}%  {}", commit_percent as u16, create_progress_bar(commit_percent, 20)),
-                Style::default().fg(Color::Yellow)
+                format!(
+                    "{}%  {}",
+                    commit_percent as u16,
+                    create_progress_bar(commit_percent, 20)
+                ),
+                Style::default().fg(Color::Yellow),
             ),
         ]),
     ];
@@ -158,15 +186,17 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
         info_text.push(Line::from(vec![
             Span::raw("Pagefile:  "),
             Span::styled(
-                format!("{}%  {}", pagefile_percent as u16, create_progress_bar(pagefile_percent, 20)),
-                Style::default().fg(Color::Magenta)
+                format!(
+                    "{}%  {}",
+                    pagefile_percent as u16,
+                    create_progress_bar(pagefile_percent, 20)
+                ),
+                Style::default().fg(Color::Magenta),
             ),
         ]));
     }
 
-    let info_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Memory Info");
+    let info_block = Block::default().borders(Borders::ALL).title("Memory Info");
 
     let info_para = Paragraph::new(info_text)
         .block(info_block)
@@ -175,79 +205,86 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
     f.render_widget(info_para, chunks[1]);
 }
 
-fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
+fn render_memory_breakdown(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::RamData,
+    theme: &Theme,
+) {
     let mut breakdown_text = vec![
         Line::from(vec![
             Span::raw("  In Use:     "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.in_use)),
-                Style::default().fg(theme.ram_color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.ram_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(create_progress_bar(
                 ((data.in_use as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
         Line::from(vec![
             Span::raw("  Available:  "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.available)),
-                Style::default().fg(Color::Green)
+                Style::default().fg(Color::Green),
             ),
             Span::raw(create_progress_bar(
                 ((data.available as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
         Line::from(vec![
             Span::raw("  Cached:     "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.cached)),
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::Cyan),
             ),
             Span::raw(create_progress_bar(
                 ((data.cached as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
         Line::from(vec![
             Span::raw("  Standby:    "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.standby)),
-                Style::default().fg(Color::Blue)
+                Style::default().fg(Color::Blue),
             ),
             Span::raw(create_progress_bar(
                 ((data.standby as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
         Line::from(vec![
             Span::raw("  Free:       "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.free)),
-                Style::default().fg(Color::Gray)
+                Style::default().fg(Color::Gray),
             ),
             Span::raw(create_progress_bar(
                 ((data.free as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
         Line::from(vec![
             Span::raw("  Modified:   "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.modified)),
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(Color::Yellow),
             ),
             Span::raw(create_progress_bar(
                 ((data.modified as f64 / data.total as f64) * 100.0) as f32,
-                30
+                30,
             )),
         ]),
     ];
 
     // Add pagefile details if configured
     if !data.pagefiles.is_empty() {
-        breakdown_text.push(Line::from(""));  // Empty line for spacing
+        breakdown_text.push(Line::from("")); // Empty line for spacing
         for (i, pf) in data.pagefiles.iter().enumerate() {
             let pf_name = if data.pagefiles.len() > 1 {
                 format!("  PF{}:       ", i + 1)
@@ -259,12 +296,12 @@ fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::Ra
                 Span::raw(pf_name),
                 Span::styled(
                     format!("{:>12}  ", format_bytes(pf.current_usage)),
-                    Style::default().fg(Color::Magenta)
+                    Style::default().fg(Color::Magenta),
                 ),
                 Span::raw(create_progress_bar(pf.usage_percent as f32, 30)),
                 Span::styled(
                     format!(" / {}", format_bytes(pf.total_size)),
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(Color::Gray),
                 ),
             ]));
         }
@@ -282,7 +319,12 @@ fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::Ra
     f.render_widget(breakdown_para, area);
 }
 
-fn render_pagefile_gauge(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
+fn render_pagefile_gauge(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::RamData,
+    theme: &Theme,
+) {
     if data.total_pagefile_size == 0 {
         // No pagefile configured
         let block = Block::default()
@@ -301,14 +343,20 @@ fn render_pagefile_gauge(f: &mut Frame, area: Rect, data: &crate::monitors::RamD
         let pagefile_percent = pf.usage_percent.min(100.0) as u16;
 
         let gauge = Gauge::default()
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Pagefile: {}", pf.name))
-                .border_style(Style::default().fg(theme.disk_color))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Pagefile: {}", pf.name))
+                    .border_style(Style::default().fg(theme.disk_color)),
             )
-            .gauge_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            .gauge_style(
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )
             .percent(pagefile_percent)
-            .label(format!("{}% - {} / {}",
+            .label(format!(
+                "{}% - {} / {}",
                 pagefile_percent,
                 format_bytes(pf.current_usage),
                 format_bytes(pf.total_size)
@@ -318,20 +366,27 @@ fn render_pagefile_gauge(f: &mut Frame, area: Rect, data: &crate::monitors::RamD
     } else {
         // Multiple pagefiles - show total
         let total_percent = if data.total_pagefile_size > 0 {
-            ((data.total_pagefile_used as f64 / data.total_pagefile_size as f64) * 100.0).min(100.0) as u16
+            ((data.total_pagefile_used as f64 / data.total_pagefile_size as f64) * 100.0).min(100.0)
+                as u16
         } else {
             0
         };
 
         let gauge = Gauge::default()
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Pagefile (Total: {} files)", data.pagefiles.len()))
-                .border_style(Style::default().fg(theme.disk_color))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Pagefile (Total: {} files)", data.pagefiles.len()))
+                    .border_style(Style::default().fg(theme.disk_color)),
             )
-            .gauge_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            .gauge_style(
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )
             .percent(total_percent)
-            .label(format!("{}% - {} / {}",
+            .label(format!(
+                "{}% - {} / {}",
                 total_percent,
                 format_bytes(data.total_pagefile_used),
                 format_bytes(data.total_pagefile_size)
@@ -344,33 +399,46 @@ fn render_pagefile_gauge(f: &mut Frame, area: Rect, data: &crate::monitors::RamD
 fn render_top_processes(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
     let header_cells = ["PID", "Process Name", "Working Set", "Private Bytes"]
         .iter()
-        .map(|h| ratatui::widgets::Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        .map(|h| {
+            ratatui::widgets::Cell::from(*h).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
-    let rows: Vec<Row> = data.top_processes.iter().map(|proc| {
-        let cells = vec![
-            ratatui::widgets::Cell::from(proc.pid.to_string()),
-            ratatui::widgets::Cell::from(proc.name.clone()),
-            ratatui::widgets::Cell::from(format_bytes(proc.working_set)),
-            ratatui::widgets::Cell::from(format_bytes(proc.private_bytes)),
-        ];
-        Row::new(cells).height(1)
-    }).collect();
+    let rows: Vec<Row> = data
+        .top_processes
+        .iter()
+        .map(|proc| {
+            let cells = vec![
+                ratatui::widgets::Cell::from(proc.pid.to_string()),
+                ratatui::widgets::Cell::from(proc.name.clone()),
+                ratatui::widgets::Cell::from(format_bytes(proc.working_set)),
+                ratatui::widgets::Cell::from(format_bytes(proc.private_bytes)),
+            ];
+            Row::new(cells).height(1)
+        })
+        .collect();
 
-    let table = Table::new(rows, [
-        Constraint::Length(8),
-        Constraint::Min(20),
-        Constraint::Length(15),
-        Constraint::Length(15),
-    ])
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Top Memory Consumers")
-                .border_style(Style::default().fg(theme.ram_color))
-        )
-        .style(Style::default().fg(Color::White));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Min(20),
+            Constraint::Length(15),
+            Constraint::Length(15),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Top Memory Consumers")
+            .border_style(Style::default().fg(theme.ram_color)),
+    )
+    .style(Style::default().fg(Color::White));
 
     f.render_widget(table, area);
 }

@@ -2,18 +2,19 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table, Sparkline},
+    widgets::{Block, Borders, Gauge, Paragraph, Row, Sparkline, Table},
     Frame,
 };
 
-use crate::app::App;
-use crate::utils::format::{create_progress_bar, format_bytes};
+use crate::app::{state::MonitorStatus, App};
 use crate::ui::theme::Theme;
+use crate::ui::widgets::render_monitor_status;
+use crate::utils::format::{create_progress_bar, format_bytes};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let disk_data = app.state.disk_data.read();
+    let disk_state = app.state.disk_data.read();
 
-    if let Some(data) = disk_data.as_ref() {
+    if let (MonitorStatus::Ready, Some(data)) = (&disk_state.status, disk_state.data.as_ref()) {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -23,16 +24,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             render_full(f, area, data, &theme);
         }
     } else {
-        let block = Block::default()
-            .title("Disk Monitor")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red));
-
-        let text = Paragraph::new("Loading disk data...")
-            .block(block)
-            .style(Style::default().fg(Color::White));
-
-        f.render_widget(text, area);
+        render_monitor_status(
+            f,
+            area,
+            "Disk Monitor",
+            &disk_state.status,
+            disk_state.last_updated,
+        );
     }
 }
 
@@ -86,17 +84,21 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, t
     // Show summary of all disks
     for disk in &data.physical_disks {
         let health_indicator = get_health_indicator(&disk.health_status);
-        let usage_pct = ((disk.size as f64 - get_disk_free_space(disk, data) as f64) / disk.size as f64 * 100.0) as u16;
+        let usage_pct = ((disk.size as f64 - get_disk_free_space(disk, data) as f64)
+            / disk.size as f64
+            * 100.0) as u16;
 
         info_lines.push(Line::from(vec![
             Span::styled(
                 format!("Disk {}: ", disk.disk_number),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} {} ", health_indicator, disk.model)),
             Span::styled(
                 format!("{}%", usage_pct),
-                Style::default().fg(get_usage_color(usage_pct as f32))
+                Style::default().fg(get_usage_color(usage_pct as f32)),
             ),
         ]));
     }
@@ -123,10 +125,10 @@ fn render_physical_disk(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header with model and health
-            Constraint::Length(3),  // Overall usage
-            Constraint::Length(8),  // I/O graphs
-            Constraint::Min(8),     // Details, partitions, and process table
+            Constraint::Length(3), // Header with model and health
+            Constraint::Length(3), // Overall usage
+            Constraint::Length(8), // I/O graphs
+            Constraint::Min(8),    // Details, partitions, and process table
         ])
         .split(area);
 
@@ -153,9 +155,11 @@ fn render_physical_disk(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(get_health_color(&disk.health_status)));
 
-    let header_text = Paragraph::new(header)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_text = Paragraph::new(header).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_text, chunks[0]);
 
@@ -170,11 +174,14 @@ fn render_physical_disk(
 
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("Total Usage"))
-        .gauge_style(Style::default()
-            .fg(get_usage_color(usage_percent as f32))
-            .add_modifier(Modifier::BOLD))
+        .gauge_style(
+            Style::default()
+                .fg(get_usage_color(usage_percent as f32))
+                .add_modifier(Modifier::BOLD),
+        )
         .percent(usage_percent)
-        .label(format!("{}% - {} / {}",
+        .label(format!(
+            "{}% - {} / {}",
             usage_percent,
             format_bytes(used_space),
             format_bytes(disk.size)
@@ -197,18 +204,22 @@ fn render_io_stats(
     theme: &Theme,
 ) {
     // Find I/O stats for this disk
-    let io_stat = all_data.io_stats.iter()
+    let io_stat = all_data
+        .io_stats
+        .iter()
         .find(|s| s.disk_number == disk.disk_number);
 
     // Find I/O history for this disk
-    let io_history = all_data.io_history.iter()
+    let io_history = all_data
+        .io_history
+        .iter()
         .find(|h| h.disk_number == disk.disk_number);
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(40),  // I/O metrics text
-            Constraint::Percentage(60),  // Graphs
+            Constraint::Percentage(40), // I/O metrics text
+            Constraint::Percentage(60), // Graphs
         ])
         .split(area);
 
@@ -216,33 +227,51 @@ fn render_io_stats(
     let mut metrics_lines = vec![];
 
     if let Some(stat) = io_stat {
-        metrics_lines.push(Line::from(vec![
-            Span::styled("I/O Activity", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
+        metrics_lines.push(Line::from(vec![Span::styled(
+            "I/O Activity",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         metrics_lines.push(Line::from(vec![
             Span::raw(format!("  Read:  {:.2} MB/s  ", stat.read_speed)),
-            Span::styled(format!("{:.0} IOPS", stat.read_iops), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("{:.0} IOPS", stat.read_iops),
+                Style::default().fg(Color::Green),
+            ),
         ]));
 
         metrics_lines.push(Line::from(vec![
             Span::raw(format!("  Write: {:.2} MB/s  ", stat.write_speed)),
-            Span::styled(format!("{:.0} IOPS", stat.write_iops), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:.0} IOPS", stat.write_iops),
+                Style::default().fg(Color::Cyan),
+            ),
         ]));
 
         metrics_lines.push(Line::from(vec![
             Span::raw(format!("  Queue Depth: ")),
-            Span::styled(format!("{:.1}", stat.queue_depth), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("{:.1}", stat.queue_depth),
+                Style::default().fg(Color::Magenta),
+            ),
         ]));
 
         metrics_lines.push(Line::from(vec![
             Span::raw(format!("  Avg Response: ")),
-            Span::styled(format!("{:.2} ms", stat.avg_response_time), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:.2} ms", stat.avg_response_time),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
 
         metrics_lines.push(Line::from(vec![
             Span::raw(format!("  Active Time: ")),
-            Span::styled(format!("{:.1}%", stat.active_time), Style::default().fg(get_usage_color(stat.active_time as f32))),
+            Span::styled(
+                format!("{:.1}%", stat.active_time),
+                Style::default().fg(get_usage_color(stat.active_time as f32)),
+            ),
         ]));
     } else {
         metrics_lines.push(Line::from("No I/O statistics available"));
@@ -285,10 +314,12 @@ fn render_io_graphs(
             let max_value = data.iter().max().copied().unwrap_or(1).max(1);
 
             let sparkline = Sparkline::default()
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Read (max {:.1} MB/s)", max_value))
-                    .border_style(Style::default().fg(Color::Green)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Read (max {:.1} MB/s)", max_value))
+                        .border_style(Style::default().fg(Color::Green)),
+                )
                 .data(&data)
                 .style(Style::default().fg(Color::Green))
                 .max(max_value);
@@ -302,10 +333,12 @@ fn render_io_graphs(
             let max_value = data.iter().max().copied().unwrap_or(1).max(1);
 
             let sparkline = Sparkline::default()
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Write (max {:.1} MB/s)", max_value))
-                    .border_style(Style::default().fg(Color::Cyan)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Write (max {:.1} MB/s)", max_value))
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
                 .data(&data)
                 .style(Style::default().fg(Color::Cyan))
                 .max(max_value);
@@ -319,10 +352,12 @@ fn render_io_graphs(
             let max_value = data.iter().max().copied().unwrap_or(1).max(1);
 
             let sparkline = Sparkline::default()
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Total IOPS (max {})", max_value))
-                    .border_style(Style::default().fg(Color::Yellow)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Total IOPS (max {})", max_value))
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
                 .data(&data)
                 .style(Style::default().fg(Color::Yellow))
                 .max(max_value);
@@ -353,8 +388,8 @@ fn render_disk_details(
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50),  // Details and partitions
-            Constraint::Percentage(50),  // Process table
+            Constraint::Percentage(50), // Details and partitions
+            Constraint::Percentage(50), // Process table
         ])
         .split(area);
 
@@ -366,7 +401,9 @@ fn render_disk_details(
         Span::raw("  Health: "),
         Span::styled(
             &disk.health_status,
-            Style::default().fg(get_health_color(&disk.health_status)).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(get_health_color(&disk.health_status))
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  Status: "),
         Span::styled(&disk.operational_status, Style::default().fg(Color::Cyan)),
@@ -397,12 +434,19 @@ fn render_disk_details(
     // Partitions
     if !disk.partitions.is_empty() {
         detail_lines.push(Line::from(""));
-        detail_lines.push(Line::from(vec![
-            Span::styled("  Partitions:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
+        detail_lines.push(Line::from(vec![Span::styled(
+            "  Partitions:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         for partition_letter in &disk.partitions {
-            if let Some(drive) = all_data.logical_drives.iter().find(|d| &d.letter == partition_letter) {
+            if let Some(drive) = all_data
+                .logical_drives
+                .iter()
+                .find(|d| &d.letter == partition_letter)
+            {
                 let usage_pct = if drive.total > 0 {
                     (drive.used as f64 / drive.total as f64 * 100.0) as f32
                 } else {
@@ -413,7 +457,7 @@ fn render_disk_details(
                     Span::raw(format!("    {} ", drive.letter)),
                     Span::styled(
                         format!("{:15}", drive.name),
-                        Style::default().fg(Color::Cyan)
+                        Style::default().fg(Color::Cyan),
                     ),
                     Span::raw("  "),
                     Span::raw(create_progress_bar(usage_pct, 15)),
@@ -460,29 +504,41 @@ fn render_process_table(
 
     // Create table rows
     let header = Row::new(vec!["Process", "PID", "I/O/s"])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .bottom_margin(1);
 
-    let rows: Vec<Row> = all_data.process_activity.iter().take(6).map(|proc| {
-        let io_formatted = if proc.io_bytes_per_sec > 1_000_000.0 {
-            format!("{:.1} MB/s", proc.io_bytes_per_sec / 1_000_000.0)
-        } else if proc.io_bytes_per_sec > 1_000.0 {
-            format!("{:.1} KB/s", proc.io_bytes_per_sec / 1_000.0)
-        } else {
-            format!("{:.0} B/s", proc.io_bytes_per_sec)
-        };
-
-        Row::new(vec![
-            format!("{:20}", if proc.process_name.len() > 20 {
-                format!("{}...", &proc.process_name[..17])
+    let rows: Vec<Row> = all_data
+        .process_activity
+        .iter()
+        .take(6)
+        .map(|proc| {
+            let io_formatted = if proc.io_bytes_per_sec > 1_000_000.0 {
+                format!("{:.1} MB/s", proc.io_bytes_per_sec / 1_000_000.0)
+            } else if proc.io_bytes_per_sec > 1_000.0 {
+                format!("{:.1} KB/s", proc.io_bytes_per_sec / 1_000.0)
             } else {
-                proc.process_name.clone()
-            }),
-            format!("{:6}", proc.pid),
-            io_formatted,
-        ])
-        .style(Style::default().fg(Color::White))
-    }).collect();
+                format!("{:.0} B/s", proc.io_bytes_per_sec)
+            };
+
+            Row::new(vec![
+                format!(
+                    "{:20}",
+                    if proc.process_name.len() > 20 {
+                        format!("{}...", &proc.process_name[..17])
+                    } else {
+                        proc.process_name.clone()
+                    }
+                ),
+                format!("{:6}", proc.pid),
+                io_formatted,
+            ])
+            .style(Style::default().fg(Color::White))
+        })
+        .collect();
 
     let widths = [
         Constraint::Percentage(50),
@@ -492,10 +548,12 @@ fn render_process_table(
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .title("Top Processes by Disk I/O")
-            .border_style(Style::default().fg(theme.disk_color)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Top Processes by Disk I/O")
+                .border_style(Style::default().fg(theme.disk_color)),
+        )
         .column_spacing(1);
 
     f.render_widget(table, area);

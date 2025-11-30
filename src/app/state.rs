@@ -1,12 +1,39 @@
 use anyhow::Result;
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use chrono::{DateTime, Local};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::{Config, TabManager, TabType, monitors_task};
-use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData};
-use crate::integrations::{PowerShellExecutor, ollama::OllamaData};
+use super::{monitors_task, Config, TabManager, TabType};
+use crate::integrations::{ollama::OllamaData, PowerShellExecutor};
+use crate::monitors::{CpuData, DiskData, GpuData, NetworkData, ProcessData, RamData};
 use crate::utils::command_history::CommandHistory;
+
+#[derive(Debug, Clone)]
+pub enum MonitorStatus {
+    Loading,
+    Ready,
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorState<T> {
+    pub status: MonitorStatus,
+    pub data: Option<T>,
+    pub last_updated: Option<DateTime<Local>>,
+}
+
+impl<T> MonitorState<T> {
+    pub fn new() -> Self {
+        Self {
+            status: MonitorStatus::Loading,
+            data: None,
+            last_updated: None,
+        }
+    }
+}
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
@@ -14,12 +41,12 @@ pub struct AppState {
     pub compact_mode: bool,
 
     // Monitor data
-    pub cpu_data: Arc<RwLock<Option<CpuData>>>,
-    pub gpu_data: Arc<RwLock<Option<GpuData>>>,
-    pub ram_data: Arc<RwLock<Option<RamData>>>,
-    pub disk_data: Arc<RwLock<Option<DiskData>>>,
-    pub network_data: Arc<RwLock<Option<NetworkData>>>,
-    pub process_data: Arc<RwLock<Option<ProcessData>>>,
+    pub cpu_data: Arc<RwLock<MonitorState<CpuData>>>,
+    pub gpu_data: Arc<RwLock<MonitorState<GpuData>>>,
+    pub ram_data: Arc<RwLock<MonitorState<RamData>>>,
+    pub disk_data: Arc<RwLock<MonitorState<DiskData>>>,
+    pub network_data: Arc<RwLock<MonitorState<NetworkData>>>,
+    pub process_data: Arc<RwLock<MonitorState<ProcessData>>>,
 
     // Ollama integration
     pub ollama_data: Arc<RwLock<Option<OllamaData>>>,
@@ -54,19 +81,16 @@ pub struct ProcessesUIState {
 
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
-        let tab_manager = TabManager::new(
-            config.tabs.enabled.clone(),
-            &config.tabs.default,
-        );
+        let tab_manager = TabManager::new(config.tabs.enabled.clone(), &config.tabs.default);
 
         let command_history = CommandHistory::new(config.ui.command_history.max_entries);
 
-        let cpu_data = Arc::new(RwLock::new(None));
-        let gpu_data = Arc::new(RwLock::new(None));
-        let ram_data = Arc::new(RwLock::new(None));
-        let disk_data = Arc::new(RwLock::new(None));
-        let network_data = Arc::new(RwLock::new(None));
-        let process_data = Arc::new(RwLock::new(None));
+        let cpu_data = Arc::new(RwLock::new(MonitorState::new()));
+        let gpu_data = Arc::new(RwLock::new(MonitorState::new()));
+        let ram_data = Arc::new(RwLock::new(MonitorState::new()));
+        let disk_data = Arc::new(RwLock::new(MonitorState::new()));
+        let network_data = Arc::new(RwLock::new(MonitorState::new()));
+        let process_data = Arc::new(RwLock::new(MonitorState::new()));
 
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
@@ -188,14 +212,22 @@ impl AppState {
                 KeyCode::Up => {
                     if self.processes_state.selected_index > 0 {
                         self.processes_state.selected_index -= 1;
-                        if self.processes_state.selected_index < self.processes_state.scroll_offset {
-                            self.processes_state.scroll_offset = self.processes_state.selected_index;
+                        if self.processes_state.selected_index < self.processes_state.scroll_offset
+                        {
+                            self.processes_state.scroll_offset =
+                                self.processes_state.selected_index;
                         }
                     }
                     return Ok(true);
                 }
                 KeyCode::Down => {
-                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    let process_count = self
+                        .process_data
+                        .read()
+                        .data
+                        .as_ref()
+                        .map(|d| d.processes.len())
+                        .unwrap_or(0);
                     if self.processes_state.selected_index + 1 < process_count {
                         self.processes_state.selected_index += 1;
                     }
@@ -211,7 +243,13 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
-                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    let process_count = self
+                        .process_data
+                        .read()
+                        .data
+                        .as_ref()
+                        .map(|d| d.processes.len())
+                        .unwrap_or(0);
                     if self.processes_state.selected_index + 10 < process_count {
                         self.processes_state.selected_index += 10;
                     } else if process_count > 0 {
@@ -302,7 +340,8 @@ impl AppState {
             MouseEventKind::Down(_) => {
                 // Handle mouse clicks for radial menu
                 if self.command_menu_active {
-                    self.command_history.handle_mouse_click(mouse.column, mouse.row);
+                    self.command_history
+                        .handle_mouse_click(mouse.column, mouse.row);
                 }
             }
             _ => {}
