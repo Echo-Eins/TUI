@@ -11,6 +11,7 @@ use ratatui::{
 };
 
 use crate::app::{App, TabType};
+use theme::Theme;
 
 pub fn render(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -36,22 +37,24 @@ pub fn render(f: &mut Frame, app: &App) {
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let config = app.state.config.read();
+    let theme = Theme::from_config(&config);
     let title = format!("{} System Monitor v1.0", config.general.app_name);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.foreground));
 
     let text = Paragraph::new(title)
         .block(block)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        .style(Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD));
 
     f.render_widget(text, area);
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     let config = app.state.config.read();
+    let theme = Theme::from_config(&config);
     let highlight_config = &config.ui.section_highlight;
 
     let tab_titles: Vec<Line> = app.state.tab_manager.tabs
@@ -116,7 +119,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     let tabs = RatatuiTabs::new(tab_titles)
         .block(Block::default().borders(Borders::ALL))
         .select(app.state.tab_manager.current_index)
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(theme.foreground))
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
 
     f.render_widget(tabs, area);
