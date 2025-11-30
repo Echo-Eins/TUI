@@ -1,6 +1,16 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use crate::integrations::PowerShellExecutor;
+use anyhow::{Context, Result};
+use log::warn;
+#[cfg(feature = "nvidia")]
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+#[cfg(feature = "nvidia")]
+use nvml_wrapper::enums::device::UsedGpuMemory;
+#[cfg(feature = "nvidia")]
+use nvml_wrapper::struct_wrappers::device::ProcessInfo;
+#[cfg(feature = "nvidia")]
+use nvml_wrapper::Nvml;
+use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuData {
@@ -29,21 +39,28 @@ pub struct GpuProcessInfo {
 
 pub struct GpuMonitor {
     ps: PowerShellExecutor,
+    prefer_nvml: bool,
 }
 
 impl GpuMonitor {
-    pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self { ps })
+    pub fn new(ps: PowerShellExecutor, prefer_nvml: bool) -> Result<Self> {
+        Ok(Self { ps, prefer_nvml })
     }
 
     pub async fn collect_data(&self) -> Result<GpuData> {
-        // Try nvidia-smi first (for NVIDIA GPUs)
+        #[cfg(feature = "nvidia")]
+        if self.prefer_nvml {
+            match self.get_nvml_data() {
+                Ok(data) => return Ok(data),
+                Err(e) => warn!("NVML telemetry unavailable, falling back: {}", e),
+            }
+        }
+
         if let Ok(nvidia_data) = self.get_nvidia_smi_data().await {
             return Ok(nvidia_data);
         }
 
-        // Fallback to basic info via PowerShell
-        let gpu_info = self.get_gpu_info().await?;
+        let gpu_info = self.get_windows_gpu_counters().await?;
         Ok(gpu_info)
     }
 
@@ -72,11 +89,10 @@ impl GpuMonitor {
             }
         "#;
 
-        let output = self.ps.execute(script).await?;
-        let info: NvidiaSmiData = serde_json::from_str(&output)
-            .context("Failed to parse nvidia-smi data")?;
+        let output = self.ps.execute_uncached(script).await?;
+        let info: NvidiaSmiData =
+            serde_json::from_str(&output).context("Failed to parse nvidia-smi data")?;
 
-        // Get top GPU processes
         let processes = self.get_gpu_processes().await.unwrap_or_default();
 
         Ok(GpuData {
@@ -95,34 +111,173 @@ impl GpuMonitor {
         })
     }
 
-    async fn get_gpu_info(&self) -> Result<GpuData> {
+    async fn get_windows_gpu_counters(&self) -> Result<GpuData> {
         let script = r#"
             $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+
+            $engineCounters = Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction SilentlyContinue
+            $utilization = if ($engineCounters.CounterSamples) {
+                ($engineCounters.CounterSamples | Measure-Object -Property CookedValue -Sum).Sum
+            } else {
+                0
+            }
+
+            $memoryUsedCounter = Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Usage' -ErrorAction SilentlyContinue
+            $memoryLimitCounter = Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Limit' -ErrorAction SilentlyContinue
+
+            $memoryUsed = if ($memoryUsedCounter.CounterSamples) {
+                ($memoryUsedCounter.CounterSamples | Measure-Object -Property CookedValue -Sum).Sum * 1MB
+            } else {
+                0
+            }
+
+            $memoryTotal = if ($memoryLimitCounter.CounterSamples) {
+                ($memoryLimitCounter.CounterSamples | Measure-Object -Property CookedValue -Sum).Sum * 1MB
+            } else {
+                $gpu.AdapterRAM
+            }
+
+            $processSamples = Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage' -ErrorAction SilentlyContinue
+            $processes = @()
+
+            if ($processSamples.CounterSamples) {
+                foreach ($sample in $processSamples.CounterSamples) {
+                    if ($sample.InstanceName -match 'pid_(\d+)_') {
+                        $pid = [uint32]$matches[1]
+                        $procName = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
+                        $processes += [PSCustomObject]@{
+                            Pid = $pid
+                            Name = if ($procName) { $procName } else { "" }
+                            Vram = [uint64]$sample.CookedValue * 1MB
+                        }
+                    }
+                }
+            }
+
             [PSCustomObject]@{
                 Name = $gpu.Name
                 DriverVersion = $gpu.DriverVersion
-                AdapterRAM = $gpu.AdapterRAM
-            } | ConvertTo-Json
+                Utilization = [float]$utilization
+                MemoryUsed = [uint64]$memoryUsed
+                MemoryTotal = [uint64]$memoryTotal
+                Processes = $processes
+            } | ConvertTo-Json -Depth 4
         "#;
 
-        let output = self.ps.execute(script).await?;
-        let info: GpuInfo = serde_json::from_str(&output)
-            .context("Failed to parse GPU info")?;
+        let output = self.ps.execute_uncached(script).await?;
+        let info: WindowsGpuCounters = serde_json::from_str(&output)
+            .context("Failed to parse Windows GPU performance data")?;
+
+        let processes = info
+            .Processes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| GpuProcessInfo {
+                pid: p.Pid,
+                name: p.Name.unwrap_or_default(),
+                gpu_usage: 0.0,
+                vram: p.Vram,
+                process_type: "Unknown".to_string(),
+            })
+            .collect();
 
         Ok(GpuData {
             name: info.Name,
-            utilization: 0.0,
-            memory_used: 0,
-            memory_total: info.AdapterRAM,
-            temperature: 45.0,  // Estimated
+            utilization: info.Utilization,
+            memory_used: info.MemoryUsed,
+            memory_total: info.MemoryTotal,
+            temperature: 0.0,
             power_usage: 0.0,
-            power_limit: 300.0,
+            power_limit: 0.0,
             fan_speed: 0.0,
             clock_speed: 0,
             memory_clock: 0,
             driver_version: info.DriverVersion,
-            processes: vec![],
+            processes,
         })
+    }
+
+    #[cfg(feature = "nvidia")]
+    fn get_nvml_data(&self) -> Result<GpuData> {
+        let nvml = Nvml::init().context("Failed to initialize NVML")?;
+        let device = nvml
+            .device_by_index(0)
+            .context("Failed to access primary GPU via NVML")?;
+
+        let utilization = device
+            .utilization_rates()
+            .context("Failed to read GPU utilization from NVML")?;
+        let memory = device
+            .memory_info()
+            .context("Failed to read GPU memory from NVML")?;
+
+        let temperature = device.temperature(TemperatureSensor::Gpu).unwrap_or(0) as f32;
+        let power_usage = device.power_usage().unwrap_or(0) as f32 / 1000.0;
+        let power_limit = device.enforced_power_limit().unwrap_or(0) as f32 / 1000.0;
+        let fan_speed = device.fan_speed(0).unwrap_or(0) as f32;
+        let clock_speed = device.clock_info(Clock::Graphics).unwrap_or(0);
+        let memory_clock = device.clock_info(Clock::Memory).unwrap_or(0);
+        let driver_version = nvml.sys_driver_version().unwrap_or_else(|_| "".to_string());
+        let name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
+
+        let mut system = System::new_all();
+        system.refresh_processes();
+
+        let mut processes = Vec::new();
+        if let Ok(compute_processes) = device.running_compute_processes() {
+            processes.extend(self.map_nvml_processes(compute_processes, "Compute", &mut system));
+        }
+
+        if let Ok(graphics_processes) = device.running_graphics_processes() {
+            processes.extend(self.map_nvml_processes(graphics_processes, "Graphics", &mut system));
+        }
+
+        Ok(GpuData {
+            name,
+            utilization: utilization.gpu as f32,
+            memory_used: memory.used,
+            memory_total: memory.total,
+            temperature,
+            power_usage,
+            power_limit,
+            fan_speed,
+            clock_speed,
+            memory_clock,
+            driver_version,
+            processes,
+        })
+    }
+
+    #[cfg(feature = "nvidia")]
+    fn map_nvml_processes(
+        &self,
+        processes: Vec<ProcessInfo>,
+        process_type: &str,
+        system: &mut System,
+    ) -> Vec<GpuProcessInfo> {
+        processes
+            .into_iter()
+            .map(|p| {
+                let pid = p.pid;
+                let name = system
+                    .process(Pid::from_u32(pid))
+                    .map(|proc| proc.name().to_string())
+                    .unwrap_or_default();
+
+                let vram = match p.used_gpu_memory {
+                    UsedGpuMemory::Used(bytes) => bytes,
+                    UsedGpuMemory::Unavailable => 0,
+                };
+
+                GpuProcessInfo {
+                    pid,
+                    name,
+                    gpu_usage: 0.0,
+                    vram,
+                    process_type: process_type.to_string(),
+                }
+            })
+            .collect()
     }
 
     async fn get_gpu_processes(&self) -> Result<Vec<GpuProcessInfo>> {
@@ -141,20 +296,19 @@ impl GpuMonitor {
             }
         "#;
 
-        let output = self.ps.execute(script).await?;
+        let output = self.ps.execute_uncached(script).await?;
         if output.trim().is_empty() || output.trim() == "[]" {
             return Ok(Vec::new());
         }
 
-        let processes: Vec<GpuProcessSample> = serde_json::from_str(&output)
-            .unwrap_or_default();
+        let processes: Vec<GpuProcessSample> = serde_json::from_str(&output).unwrap_or_default();
 
         Ok(processes
             .into_iter()
             .map(|p| GpuProcessInfo {
                 pid: p.Pid,
                 name: p.Name,
-                gpu_usage: 0.0,  // Not available via nvidia-smi compute-apps
+                gpu_usage: 0.0, // Not available via nvidia-smi compute-apps
                 vram: p.Vram,
                 process_type: "Compute".to_string(),
             })
@@ -186,8 +340,18 @@ struct GpuProcessSample {
 }
 
 #[derive(Debug, Deserialize)]
-struct GpuInfo {
+struct WindowsGpuCounters {
     Name: String,
     DriverVersion: String,
-    AdapterRAM: u64,
+    Utilization: f32,
+    MemoryUsed: u64,
+    MemoryTotal: u64,
+    Processes: Option<Vec<WindowsGpuProcess>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowsGpuProcess {
+    Pid: u32,
+    Name: Option<String>,
+    Vram: u64,
 }

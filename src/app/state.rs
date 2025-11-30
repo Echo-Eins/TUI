@@ -92,6 +92,9 @@ impl AppState {
         let network_data = Arc::new(RwLock::new(MonitorState::new()));
         let process_data = Arc::new(RwLock::new(MonitorState::new()));
 
+        let monitors_config = config.monitors.clone();
+        let powershell_config = config.powershell.clone();
+
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
             Arc::clone(&cpu_data),
@@ -100,9 +103,8 @@ impl AppState {
             Arc::clone(&disk_data),
             Arc::clone(&network_data),
             Arc::clone(&process_data),
-            config.powershell.executable.clone(),
-            config.powershell.timeout_seconds,
-            config.powershell.cache_ttl_seconds,
+            powershell_config,
+            monitors_config,
         );
 
         Ok(Self {
@@ -363,6 +365,7 @@ impl AppState {
             self.config.read().powershell.executable.clone(),
             self.config.read().powershell.timeout_seconds,
             self.config.read().powershell.cache_ttl_seconds,
+            self.config.read().powershell.use_cache,
         );
 
         match ps.execute(&self.command_input).await {
