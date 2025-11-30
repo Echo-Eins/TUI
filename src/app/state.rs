@@ -467,15 +467,48 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Char('r') => {
-                    // Run selected model (placeholder - to be implemented)
+                    // Run selected model
+                    if let Some(ollama) = self.ollama_data.read().as_ref() {
+                        if let Some(model) = ollama.models.get(self.ollama_state.selected_model_index) {
+                            let model_name = model.name.clone();
+                            tokio::spawn(async move {
+                                use crate::integrations::OllamaClient;
+                                if let Ok(mut client) = OllamaClient::new(None) {
+                                    let _ = client.run_model(&model_name).await;
+                                }
+                            });
+                        }
+                    }
                     return Ok(true);
                 }
                 KeyCode::Char('s') => {
-                    // Stop selected running model (placeholder - to be implemented)
+                    // Stop selected running model
+                    if let Some(ollama) = self.ollama_data.read().as_ref() {
+                        if let Some(running) = ollama.running_models.get(self.ollama_state.selected_running_index) {
+                            let model_name = running.name.clone();
+                            tokio::spawn(async move {
+                                use crate::integrations::OllamaClient;
+                                if let Ok(client) = OllamaClient::new(None) {
+                                    let _ = client.stop_model(&model_name).await;
+                                }
+                            });
+                        }
+                    }
                     return Ok(true);
                 }
                 KeyCode::Char('d') => {
-                    // Delete selected model (placeholder - to be implemented)
+                    // Delete selected model
+                    if let Some(ollama) = self.ollama_data.read().as_ref() {
+                        if let Some(model) = ollama.models.get(self.ollama_state.selected_model_index) {
+                            let model_name = model.name.clone();
+                            tokio::spawn(async move {
+                                use crate::integrations::OllamaClient;
+                                if let Ok(client) = OllamaClient::new(None) {
+                                    let _ = client.remove_model(&model_name).await;
+                                }
+                            });
+                        }
+                    }
                     return Ok(true);
                 }
                 KeyCode::Char('p') => {

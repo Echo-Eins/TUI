@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessData {
@@ -24,14 +24,53 @@ pub struct ProcessEntry {
 
 pub struct ProcessMonitor {
     ps: PowerShellExecutor,
+    linux_sys: LinuxSysMonitor,
 }
 
 impl ProcessMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self { ps })
+        Ok(Self {
+            ps,
+            linux_sys: LinuxSysMonitor::new(),
+        })
     }
 
     pub async fn collect_data(&self) -> Result<ProcessData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
+
+    async fn collect_data_linux(&self) -> Result<ProcessData> {
+        let linux_processes = self.linux_sys.get_processes()?;
+
+        let processes: Vec<ProcessEntry> = linux_processes
+            .into_iter()
+            .map(|p| ProcessEntry {
+                pid: p.pid,
+                name: p.name,
+                cpu_usage: 0.0,  // Will calculate later
+                memory: p.memory,
+                threads: p.threads,
+                user: String::from("user"),
+                command_line: p.cmdline,
+                start_time: None,
+                handle_count: 0,
+                io_read_bytes: 0,
+                io_write_bytes: 0,
+            })
+            .collect();
+
+        Ok(ProcessData { processes })
+    }
+
+    async fn collect_data_windows(&self) -> Result<ProcessData> {
         let processes = self.get_processes().await?;
         Ok(ProcessData { processes })
     }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuData {
@@ -46,14 +46,68 @@ pub struct ProcessInfo {
 
 pub struct CpuMonitor {
     ps: PowerShellExecutor,
+    linux_sys: LinuxSysMonitor,
 }
 
 impl CpuMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self { ps })
+        Ok(Self {
+            ps,
+            linux_sys: LinuxSysMonitor::new(),
+        })
     }
 
     pub async fn collect_data(&self) -> Result<CpuData> {
+        // Check if we're on Linux - use linux_sys, otherwise use PowerShell
+        #[cfg(target_os = "linux")]
+        {
+            self.collect_data_linux().await
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.collect_data_windows().await
+        }
+    }
+
+    async fn collect_data_linux(&self) -> Result<CpuData> {
+        let cpu_info = self.linux_sys.get_cpu_info()?;
+        let overall_usage = self.linux_sys.get_cpu_usage()?;
+        let core_usage_values = self.linux_sys.get_core_usage()?;
+
+        let core_usage: Vec<CoreUsage> = core_usage_values
+            .iter()
+            .enumerate()
+            .map(|(i, &usage)| CoreUsage {
+                core_id: i,
+                usage,
+            })
+            .collect();
+
+        let frequency = FrequencyInfo {
+            base_clock: cpu_info.frequency_mhz / 1000.0,
+            avg_frequency: cpu_info.frequency_mhz / 1000.0,
+            max_frequency: cpu_info.frequency_mhz / 1000.0,
+            boost_active: false,
+        };
+
+        Ok(CpuData {
+            name: cpu_info.name,
+            overall_usage,
+            core_count: cpu_info.core_count,
+            thread_count: cpu_info.core_count,
+            core_usage,
+            frequency,
+            power: PowerInfo {
+                current_power: (overall_usage / 100.0) * 65.0,  // Assume 65W TDP
+                max_power: 65.0,
+            },
+            temperature: Some(50.0),  // Placeholder
+            top_processes: Vec::new(),  // Will implement later
+        })
+    }
+
+    async fn collect_data_windows(&self) -> Result<CpuData> {
         // Get CPU info
         let cpu_info = self.get_cpu_info().await?;
 

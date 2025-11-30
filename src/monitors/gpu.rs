@@ -37,6 +37,28 @@ impl GpuMonitor {
     }
 
     pub async fn collect_data(&self) -> Result<GpuData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
+
+    async fn collect_data_linux(&self) -> Result<GpuData> {
+        // Try nvidia-smi directly (for NVIDIA GPUs)
+        if let Ok(nvidia_data) = self.get_nvidia_smi_linux().await {
+            return Ok(nvidia_data);
+        }
+
+        // Fallback to stub data if no GPU found
+        Ok(self.get_stub_gpu_data())
+    }
+
+    async fn collect_data_windows(&self) -> Result<GpuData> {
         // Try nvidia-smi first (for NVIDIA GPUs)
         if let Ok(nvidia_data) = self.get_nvidia_smi_data().await {
             return Ok(nvidia_data);
@@ -159,6 +181,109 @@ impl GpuMonitor {
                 process_type: "Compute".to_string(),
             })
             .collect())
+    }
+
+    // Linux-specific nvidia-smi implementation
+    async fn get_nvidia_smi_linux(&self) -> Result<GpuData> {
+        use std::process::Command;
+
+        let output = Command::new("nvidia-smi")
+            .args(&[
+                "--query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version",
+                "--format=csv,noheader,nounits"
+            ])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split(',').map(|s| s.trim()).collect();
+
+        if parts.len() < 12 {
+            anyhow::bail!("Invalid nvidia-smi output");
+        }
+
+        let name = parts[0].to_string();
+        let temperature = parts[1].parse::<f32>().unwrap_or(0.0);
+        let utilization_gpu = parts[2].parse::<f32>().unwrap_or(0.0);
+        let _utilization_memory = parts[3].parse::<f32>().unwrap_or(0.0);
+        let memory_used = parts[4].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MB to bytes
+        let memory_total = parts[5].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MB to bytes
+        let power_draw = parts[6].parse::<f32>().unwrap_or(0.0);
+        let power_limit = parts[7].parse::<f32>().unwrap_or(300.0);
+        let fan_speed = if parts[8] == "[N/A]" { 0.0 } else { parts[8].parse::<f32>().unwrap_or(0.0) };
+        let clock_graphics = parts[9].parse::<u32>().unwrap_or(0);
+        let clock_memory = parts[10].parse::<u32>().unwrap_or(0);
+        let driver_version = parts[11].to_string();
+
+        // Get GPU processes
+        let processes = self.get_gpu_processes_linux().await.unwrap_or_default();
+
+        Ok(GpuData {
+            name,
+            utilization: utilization_gpu,
+            memory_used,
+            memory_total,
+            temperature,
+            power_usage: power_draw,
+            power_limit,
+            fan_speed,
+            clock_speed: clock_graphics,
+            memory_clock: clock_memory,
+            driver_version,
+            processes,
+        })
+    }
+
+    async fn get_gpu_processes_linux(&self) -> Result<Vec<GpuProcessInfo>> {
+        use std::process::Command;
+
+        let output = Command::new("nvidia-smi")
+            .args(&[
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits"
+            ])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut processes = Vec::new();
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            if parts.len() >= 3 {
+                let pid = parts[0].parse::<u32>().unwrap_or(0);
+                let name = parts[1].to_string();
+                let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MB to bytes
+
+                processes.push(GpuProcessInfo {
+                    pid,
+                    name,
+                    gpu_usage: 0.0,
+                    vram,
+                    process_type: "Compute".to_string(),
+                });
+            }
+        }
+
+        Ok(processes)
+    }
+
+    fn get_stub_gpu_data(&self) -> GpuData {
+        GpuData {
+            name: "No GPU detected".to_string(),
+            utilization: 0.0,
+            memory_used: 0,
+            memory_total: 0,
+            temperature: 0.0,
+            power_usage: 0.0,
+            power_limit: 0.0,
+            fan_speed: 0.0,
+            clock_speed: 0,
+            memory_clock: 0,
+            driver_version: "N/A".to_string(),
+            processes: Vec::new(),
+        }
     }
 }
 

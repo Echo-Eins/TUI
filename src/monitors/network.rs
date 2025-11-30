@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +78,7 @@ impl Default for NetworkData {
 
 pub struct NetworkMonitor {
     ps: PowerShellExecutor,
+    linux_sys: LinuxSysMonitor,
     last_stats: Option<Vec<InterfaceStats>>,
     last_timestamp: Option<std::time::Instant>,
     last_process_stats: Option<std::collections::HashMap<u32, ProcessNetworkStats>>,
@@ -101,6 +102,7 @@ impl NetworkMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
         Ok(Self {
             ps,
+            linux_sys: LinuxSysMonitor::new(),
             last_stats: None,
             last_timestamp: None,
             last_process_stats: None,
@@ -108,6 +110,34 @@ impl NetworkMonitor {
     }
 
     pub async fn collect_data(&mut self) -> Result<NetworkData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
+
+    async fn collect_data_linux(&mut self) -> Result<NetworkData> {
+        let interfaces = self.get_interfaces_linux().await?;
+        let connections = self.get_connections_linux().await?;
+        let bandwidth_consumers = Vec::new(); // TODO: Implement for Linux
+
+        // Calculate traffic history
+        let traffic_history = self.calculate_traffic_history(&interfaces);
+
+        Ok(NetworkData {
+            interfaces,
+            connections,
+            traffic_history,
+            bandwidth_consumers,
+        })
+    }
+
+    async fn collect_data_windows(&mut self) -> Result<NetworkData> {
         let interfaces = self.get_interfaces().await?;
         let connections = self.get_connections().await?;
         let bandwidth_consumers = self.get_bandwidth_consumers().await?;
@@ -459,6 +489,181 @@ impl NetworkMonitor {
         });
 
         Ok(bandwidth_consumers)
+    }
+
+    // Linux-specific implementation
+    async fn get_interfaces_linux(&mut self) -> Result<Vec<NetworkInterface>> {
+        let linux_interfaces = self.linux_sys.get_network_stats()?;
+
+        let current_time = std::time::Instant::now();
+        let time_delta = if let Some(last_time) = self.last_timestamp {
+            current_time.duration_since(last_time).as_secs_f64()
+        } else {
+            1.0
+        };
+
+        let mut interfaces = Vec::new();
+        let mut current_stats = Vec::new();
+
+        for iface in linux_interfaces {
+            let (download_speed, upload_speed, peak_download, peak_upload) =
+                self.calculate_speed(&iface.name, iface.rx_bytes, iface.tx_bytes, time_delta);
+
+            current_stats.push(InterfaceStats {
+                name: iface.name.clone(),
+                bytes_received: iface.rx_bytes,
+                bytes_sent: iface.tx_bytes,
+            });
+
+            // Try to get IP address using ip command
+            let (ipv4, gateway) = self.get_ip_info_linux(&iface.name);
+
+            interfaces.push(NetworkInterface {
+                name: iface.name.clone(),
+                description: format!("Linux Network Interface {}", iface.name),
+                status: "Up".to_string(),
+                link_speed: "Unknown".to_string(),
+                mac_address: "00:00:00:00:00:00".to_string(),
+                mtu: 1500,
+                duplex: "Full".to_string(),
+                ipv4_address: ipv4,
+                ipv6_address: "N/A".to_string(),
+                gateway,
+                dns_servers: Vec::new(),
+                bytes_received: iface.rx_bytes,
+                bytes_sent: iface.tx_bytes,
+                download_speed,
+                upload_speed,
+                peak_download,
+                peak_upload,
+            });
+        }
+
+        self.last_stats = Some(current_stats);
+        self.last_timestamp = Some(current_time);
+
+        Ok(interfaces)
+    }
+
+    fn get_ip_info_linux(&self, interface: &str) -> (String, String) {
+        use std::process::Command;
+
+        // Get IPv4 address
+        let ipv4 = if let Ok(output) = Command::new("ip")
+            .args(&["addr", "show", interface])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = stdout.lines().find(|l| l.contains("inet ")) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() > 1 {
+                    parts[1].split('/').next().unwrap_or("N/A").to_string()
+                } else {
+                    "N/A".to_string()
+                }
+            } else {
+                "N/A".to_string()
+            }
+        } else {
+            "N/A".to_string()
+        };
+
+        // Get default gateway
+        let gateway = if let Ok(output) = Command::new("ip").args(&["route"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = stdout.lines().find(|l| l.contains("default")) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(pos) = parts.iter().position(|&p| p == "via") {
+                    if pos + 1 < parts.len() {
+                        parts[pos + 1].to_string()
+                    } else {
+                        "N/A".to_string()
+                    }
+                } else {
+                    "N/A".to_string()
+                }
+            } else {
+                "N/A".to_string()
+            }
+        } else {
+            "N/A".to_string()
+        };
+
+        (ipv4, gateway)
+    }
+
+    async fn get_connections_linux(&self) -> Result<Vec<NetworkConnection>> {
+        use std::fs;
+
+        let mut connections = Vec::new();
+
+        // Read /proc/net/tcp for established connections
+        if let Ok(content) = fs::read_to_string("/proc/net/tcp") {
+            for line in content.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 10 {
+                    continue;
+                }
+
+                // Parse connection state (0A = LISTEN, 01 = ESTABLISHED, etc.)
+                let state_hex = parts.get(3).unwrap_or(&"00");
+                if state_hex != &"01" {
+                    // Skip non-established connections
+                    continue;
+                }
+
+                // Parse local address:port
+                let local = parts.get(1).unwrap_or(&"00000000:0000");
+                let (local_addr, local_port) = self.parse_hex_address(local);
+
+                // Parse remote address:port
+                let remote = parts.get(2).unwrap_or(&"00000000:0000");
+                let (remote_addr, remote_port) = self.parse_hex_address(remote);
+
+                // Parse inode to find process (simplified - would need to search /proc/*/fd/)
+                let uid = parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                connections.push(NetworkConnection {
+                    process_name: "unknown".to_string(),
+                    pid: uid, // Using UID as placeholder
+                    protocol: "TCP".to_string(),
+                    local_address: local_addr,
+                    local_port,
+                    remote_address: remote_addr,
+                    remote_port,
+                    state: "ESTABLISHED".to_string(),
+                });
+
+                if connections.len() >= 10 {
+                    break;
+                }
+            }
+        }
+
+        Ok(connections)
+    }
+
+    fn parse_hex_address(&self, hex_addr: &str) -> (String, u16) {
+        let parts: Vec<&str> = hex_addr.split(':').collect();
+        if parts.len() != 2 {
+            return ("0.0.0.0".to_string(), 0);
+        }
+
+        // Parse IP address (little-endian hex)
+        let ip_hex = parts[0];
+        if ip_hex.len() == 8 {
+            let ip = format!(
+                "{}.{}.{}.{}",
+                u8::from_str_radix(&ip_hex[6..8], 16).unwrap_or(0),
+                u8::from_str_radix(&ip_hex[4..6], 16).unwrap_or(0),
+                u8::from_str_radix(&ip_hex[2..4], 16).unwrap_or(0),
+                u8::from_str_radix(&ip_hex[0..2], 16).unwrap_or(0)
+            );
+            let port = u16::from_str_radix(parts[1], 16).unwrap_or(0);
+            (ip, port)
+        } else {
+            ("0.0.0.0".to_string(), 0)
+        }
     }
 }
 

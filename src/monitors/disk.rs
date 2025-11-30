@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +77,7 @@ pub struct DriveInfo {
 
 pub struct DiskMonitor {
     ps: PowerShellExecutor,
+    linux_sys: LinuxSysMonitor,
     io_history_map: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u32, DiskIOHistory>>>,
 }
 
@@ -84,11 +85,50 @@ impl DiskMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
         Ok(Self {
             ps,
+            linux_sys: LinuxSysMonitor::new(),
             io_history_map: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
     pub async fn collect_data(&self) -> Result<DiskData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
+
+    async fn collect_data_linux(&self) -> Result<DiskData> {
+        let disks = self.linux_sys.get_disk_info()?;
+
+        let logical_drives: Vec<DriveInfo> = disks
+            .iter()
+            .map(|d| DriveInfo {
+                letter: d.mount_point.clone(),
+                name: d.name.clone(),
+                drive_type: d.fs_type.clone(),
+                file_system: d.fs_type.clone(),
+                total: d.total,
+                used: d.used,
+                free: d.available,
+                disk_number: Some(0),
+            })
+            .collect();
+
+        Ok(DiskData {
+            physical_disks: Vec::new(),
+            logical_drives,
+            io_stats: Vec::new(),
+            process_activity: Vec::new(),
+            io_history: Vec::new(),
+        })
+    }
+
+    async fn collect_data_windows(&self) -> Result<DiskData> {
         let physical_disks = self.get_physical_disks().await?;
         let logical_drives = self.get_logical_drives().await?;
         let io_stats = self.get_io_stats().await?;

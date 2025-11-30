@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::PowerShellExecutor;
+use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RamData {
@@ -50,14 +50,54 @@ pub struct PagefileInfo {
 
 pub struct RamMonitor {
     ps: PowerShellExecutor,
+    linux_sys: LinuxSysMonitor,
 }
 
 impl RamMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self { ps })
+        Ok(Self {
+            ps,
+            linux_sys: LinuxSysMonitor::new(),
+        })
     }
 
     pub async fn collect_data(&self) -> Result<RamData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
+
+    async fn collect_data_linux(&self) -> Result<RamData> {
+        let mem_info = self.linux_sys.get_memory_info()?;
+
+        Ok(RamData {
+            total: mem_info.total,
+            used: mem_info.used,
+            available: mem_info.available,
+            cached: mem_info.cached,
+            free: mem_info.free,
+            speed: String::from("Unknown"),
+            type_name: String::from("DDR4"),
+            in_use: mem_info.used,
+            standby: 0,
+            modified: 0,
+            committed: mem_info.used,
+            commit_limit: mem_info.total + mem_info.swap_total,
+            commit_percent: (mem_info.used as f64 / mem_info.total as f64) * 100.0,
+            top_processes: Vec::new(),
+            pagefiles: Vec::new(),
+            total_pagefile_size: mem_info.swap_total,
+            total_pagefile_used: mem_info.swap_used,
+        })
+    }
+
+    async fn collect_data_windows(&self) -> Result<RamData> {
         let memory_info = self.get_memory_info().await?;
         let physical_memory = self.get_physical_memory_info().await?;
         let detailed_memory = self.get_detailed_memory_breakdown().await?;
