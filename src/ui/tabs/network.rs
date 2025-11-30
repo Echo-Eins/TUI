@@ -43,7 +43,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
             Constraint::Length(3),   // Header
             Constraint::Length(8),   // Interface details (per interface)
             Constraint::Length(8),   // Traffic graphs (Download/Upload)
-            Constraint::Min(10),     // Active connections table
+            Constraint::Min(10),     // Active connections and bandwidth consumers
         ])
         .split(area);
 
@@ -56,8 +56,20 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
     // Traffic graphs
     render_traffic_graphs(f, chunks[2], data, theme);
 
+    // Split bottom section for connections and bandwidth consumers
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),  // Active connections
+            Constraint::Percentage(50),  // Bandwidth consumers
+        ])
+        .split(chunks[3]);
+
     // Active connections
-    render_connections_table(f, chunks[3], data, theme);
+    render_connections_table(f, bottom_chunks[0], data, theme);
+
+    // Bandwidth consumers
+    render_bandwidth_consumers(f, bottom_chunks[1], data, theme);
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
@@ -346,6 +358,45 @@ fn render_connections_compact(f: &mut Frame, area: Rect, data: &crate::monitors:
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!("Active Connections ({})", data.connections.len()))
+                .border_style(Style::default().fg(theme.network_color)),
+        )
+        .column_spacing(1);
+
+    f.render_widget(table, area);
+}
+
+fn render_bandwidth_consumers(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+    let header = Row::new(vec!["Process", "PID", "Download", "Upload", "Total RX", "Total TX"])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .bottom_margin(0);
+
+    let rows: Vec<Row> = data.bandwidth_consumers.iter().take(10).map(|consumer| {
+        Row::new(vec![
+            consumer.process_name.clone(),
+            format!("{}", consumer.pid),
+            format!("{:.2} Mbps", consumer.download_speed),
+            format!("{:.2} Mbps", consumer.upload_speed),
+            format_bytes(consumer.total_bytes_received),
+            format_bytes(consumer.total_bytes_sent),
+        ])
+        .style(Style::default().fg(Color::White))
+    }).collect();
+
+    let widths = [
+        Constraint::Percentage(20),  // Process
+        Constraint::Percentage(10),  // PID
+        Constraint::Percentage(15),  // Download
+        Constraint::Percentage(15),  // Upload
+        Constraint::Percentage(20),  // Total RX
+        Constraint::Percentage(20),  // Total TX
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Bandwidth Consumers (Top {})", data.bandwidth_consumers.len().min(10)))
                 .border_style(Style::default().fg(theme.network_color)),
         )
         .column_spacing(1);

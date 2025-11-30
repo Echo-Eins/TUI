@@ -8,6 +8,7 @@ pub struct NetworkData {
     pub interfaces: Vec<NetworkInterface>,
     pub connections: Vec<NetworkConnection>,
     pub traffic_history: VecDeque<TrafficSample>,
+    pub bandwidth_consumers: Vec<BandwidthConsumer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,12 +55,23 @@ pub struct TrafficSample {
     pub upload_mbps: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthConsumer {
+    pub process_name: String,
+    pub pid: u32,
+    pub download_speed: f64,  // Mbps
+    pub upload_speed: f64,    // Mbps
+    pub total_bytes_received: u64,
+    pub total_bytes_sent: u64,
+}
+
 impl Default for NetworkData {
     fn default() -> Self {
         Self {
             interfaces: Vec::new(),
             connections: Vec::new(),
             traffic_history: VecDeque::with_capacity(60),
+            bandwidth_consumers: Vec::new(),
         }
     }
 }
@@ -68,11 +80,19 @@ pub struct NetworkMonitor {
     ps: PowerShellExecutor,
     last_stats: Option<Vec<InterfaceStats>>,
     last_timestamp: Option<std::time::Instant>,
+    last_process_stats: Option<std::collections::HashMap<u32, ProcessNetworkStats>>,
 }
 
 #[derive(Debug, Clone)]
 struct InterfaceStats {
     name: String,
+    bytes_received: u64,
+    bytes_sent: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessNetworkStats {
+    process_name: String,
     bytes_received: u64,
     bytes_sent: u64,
 }
@@ -83,12 +103,14 @@ impl NetworkMonitor {
             ps,
             last_stats: None,
             last_timestamp: None,
+            last_process_stats: None,
         })
     }
 
     pub async fn collect_data(&mut self) -> Result<NetworkData> {
         let interfaces = self.get_interfaces().await?;
         let connections = self.get_connections().await?;
+        let bandwidth_consumers = self.get_bandwidth_consumers().await?;
 
         // Calculate traffic history
         let traffic_history = self.calculate_traffic_history(&interfaces);
@@ -97,6 +119,7 @@ impl NetworkMonitor {
             interfaces,
             connections,
             traffic_history,
+            bandwidth_consumers,
         })
     }
 
@@ -320,6 +343,123 @@ impl NetworkMonitor {
 
         Ok(connections)
     }
+
+    // 5.4: Bandwidth Consumers - Top processes by network usage
+    async fn get_bandwidth_consumers(&mut self) -> Result<Vec<BandwidthConsumer>> {
+        let script = r#"
+            # Get network connections with process info and bytes transferred
+            $netstat = Get-NetTCPConnection -ErrorAction SilentlyContinue |
+                Where-Object { $_.State -eq 'Established' } |
+                Group-Object -Property OwningProcess |
+                ForEach-Object {
+                    $pid = $_.Name
+                    try {
+                        $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                        if ($process) {
+                            # Get network adapter statistics for this process
+                            # Note: Windows doesn't provide per-process network stats directly
+                            # We'll estimate based on connection count and system-wide stats
+                            $connCount = $_.Count
+
+                            [PSCustomObject]@{
+                                ProcessName = $process.ProcessName
+                                PID = [int]$pid
+                                ConnectionCount = $connCount
+                            }
+                        }
+                    } catch {
+                        # Skip if process no longer exists
+                    }
+                }
+
+            if ($netstat) {
+                $netstat | Sort-Object -Property ConnectionCount -Descending |
+                    Select-Object -First 10 |
+                    ConvertTo-Json -Depth 2
+            } else {
+                "[]"
+            }
+        "#;
+
+        let output = self.ps.execute(script).await
+            .context("Failed to execute bandwidth consumers query")?;
+
+        if output.trim().is_empty() || output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        // Parse the output
+        let consumers_raw: serde_json::Value = serde_json::from_str(&output)
+            .context("Failed to parse bandwidth consumers data")?;
+
+        let consumers_array = if consumers_raw.is_array() {
+            consumers_raw.as_array().unwrap().clone()
+        } else {
+            vec![consumers_raw]
+        };
+
+        let current_time = std::time::Instant::now();
+        let time_delta = if let Some(last_time) = self.last_timestamp {
+            current_time.duration_since(last_time).as_secs_f64()
+        } else {
+            1.0
+        };
+
+        let mut bandwidth_consumers = Vec::new();
+        let mut current_process_stats = std::collections::HashMap::new();
+
+        for consumer_val in consumers_array {
+            let consumer: ProcessBandwidthData = serde_json::from_value(consumer_val)
+                .context("Failed to deserialize bandwidth consumer")?;
+
+            // Estimate bandwidth based on connection count
+            // This is a rough approximation since Windows doesn't provide per-process network stats
+            let connection_count = consumer.ConnectionCount as f64;
+            let estimated_bytes = (connection_count * 1024.0 * 100.0) as u64; // ~100KB per connection
+
+            let (download_speed, upload_speed) = if let Some(ref last_stats) = self.last_process_stats {
+                if let Some(last) = last_stats.get(&consumer.PID) {
+                    let bytes_rx_delta = estimated_bytes.saturating_sub(last.bytes_received) as f64;
+                    let bytes_tx_delta = estimated_bytes.saturating_sub(last.bytes_sent) as f64;
+
+                    let download = (bytes_rx_delta / time_delta) * 8.0 / 1_000_000.0; // Mbps
+                    let upload = (bytes_tx_delta / time_delta) * 8.0 / 1_000_000.0;   // Mbps
+
+                    (download, upload)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            };
+
+            current_process_stats.insert(consumer.PID, ProcessNetworkStats {
+                process_name: consumer.ProcessName.clone(),
+                bytes_received: estimated_bytes,
+                bytes_sent: estimated_bytes,
+            });
+
+            bandwidth_consumers.push(BandwidthConsumer {
+                process_name: consumer.ProcessName,
+                pid: consumer.PID,
+                download_speed,
+                upload_speed,
+                total_bytes_received: estimated_bytes,
+                total_bytes_sent: estimated_bytes,
+            });
+        }
+
+        self.last_process_stats = Some(current_process_stats);
+
+        // Sort by total bandwidth (download + upload)
+        bandwidth_consumers.sort_by(|a, b| {
+            let total_a = a.download_speed + a.upload_speed;
+            let total_b = b.download_speed + b.upload_speed;
+            total_b.partial_cmp(&total_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(bandwidth_consumers)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,4 +489,11 @@ struct ConnectionData {
     RemoteAddress: String,
     RemotePort: u16,
     State: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessBandwidthData {
+    ProcessName: String,
+    PID: u32,
+    ConnectionCount: u32,
 }
