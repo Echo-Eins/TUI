@@ -14,8 +14,14 @@ use crate::app::{App, TabType};
 use theme::Theme;
 
 pub fn render(f: &mut Frame, app: &App) {
-    // Clear the entire frame to avoid stale renders on some terminals
-    f.render_widget(Clear, f.size());
+    // Get the full size of the frame
+    let size = f.size();
+
+    // Render a background block to ensure the frame is filled
+    // This forces ratatui to update the entire screen
+    let background = Block::default()
+        .style(Style::default().bg(Color::Reset));
+    f.render_widget(background, size);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -25,7 +31,7 @@ pub fn render(f: &mut Frame, app: &App) {
             Constraint::Min(0),     // Content
             Constraint::Length(3),  // Footer/Command input
         ])
-        .split(f.size());
+        .split(size);
 
     render_header(f, chunks[0], app);
     render_tabs(f, chunks[1], app);
@@ -34,7 +40,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // Render command history menu if active
     if app.state.command_menu_active {
-        render_command_menu(f, f.size(), app);
+        render_command_menu(f, size, app);
     }
 }
 
@@ -68,7 +74,6 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
             let tab_name = tab.as_str();
 
             if is_selected {
-                // Variant B: Use round brackets and yellow color
                 let bracket_left = match highlight_config.highlighted_bracket.as_str() {
                     "round" => "(",
                     "square" => "[",
@@ -93,7 +98,6 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
                     Span::raw(bracket_right),
                 ])
             } else {
-                // Normal: Use square brackets and white color
                 let bracket_left = match highlight_config.normal_bracket.as_str() {
                     "round" => "(",
                     "square" => "[",
@@ -160,10 +164,11 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_command_menu(f: &mut Frame, _area: Rect, app: &App) {
-    // Create centered popup for command history
     let popup_area = centered_rect(60, 60, f.size());
 
-    // Clear background
+    // Clear the popup area first
+    f.render_widget(Clear, popup_area);
+
     let block = Block::default()
         .title("Command History (Ctrl+F)")
         .borders(Borders::ALL)
@@ -172,7 +177,6 @@ fn render_command_menu(f: &mut Frame, _area: Rect, app: &App) {
 
     f.render_widget(block, popup_area);
 
-    // Render command list
     let inner = Rect {
         x: popup_area.x + 2,
         y: popup_area.y + 2,
