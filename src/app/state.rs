@@ -29,6 +29,27 @@ pub struct AppState {
     pub command_history: CommandHistory,
     pub command_input: String,
     pub selected_section: Option<String>,
+
+    // Processes UI state
+    pub processes_state: ProcessesUIState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProcessSortColumn {
+    Pid,
+    Name,
+    Cpu,
+    Memory,
+    Threads,
+    User,
+}
+
+pub struct ProcessesUIState {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub sort_column: ProcessSortColumn,
+    pub sort_ascending: bool,
+    pub filter: String,
 }
 
 impl AppState {
@@ -78,6 +99,14 @@ impl AppState {
             command_history,
             command_input: String::new(),
             selected_section: None,
+
+            processes_state: ProcessesUIState {
+                selected_index: 0,
+                scroll_offset: 0,
+                sort_column: ProcessSortColumn::Cpu,
+                sort_ascending: false,
+                filter: String::new(),
+            },
         })
     }
 
@@ -153,6 +182,81 @@ impl AppState {
             return Ok(true);
         }
 
+        // Handle tab-specific hotkeys first
+        if self.tab_manager.current() == TabType::Processes {
+            match key.code {
+                KeyCode::Up => {
+                    if self.processes_state.selected_index > 0 {
+                        self.processes_state.selected_index -= 1;
+                        if self.processes_state.selected_index < self.processes_state.scroll_offset {
+                            self.processes_state.scroll_offset = self.processes_state.selected_index;
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    if self.processes_state.selected_index + 1 < process_count {
+                        self.processes_state.selected_index += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if self.processes_state.selected_index >= 10 {
+                        self.processes_state.selected_index -= 10;
+                    } else {
+                        self.processes_state.selected_index = 0;
+                    }
+                    self.processes_state.scroll_offset = self.processes_state.selected_index;
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    let process_count = self.process_data.read().as_ref().map(|d| d.processes.len()).unwrap_or(0);
+                    if self.processes_state.selected_index + 10 < process_count {
+                        self.processes_state.selected_index += 10;
+                    } else if process_count > 0 {
+                        self.processes_state.selected_index = process_count - 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    self.processes_state.sort_column = ProcessSortColumn::Pid;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    self.processes_state.sort_column = ProcessSortColumn::Name;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('c') => {
+                    self.processes_state.sort_column = ProcessSortColumn::Cpu;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('m') => {
+                    self.processes_state.sort_column = ProcessSortColumn::Memory;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    self.processes_state.sort_column = ProcessSortColumn::Threads;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('u') => {
+                    self.processes_state.sort_column = ProcessSortColumn::User;
+                    self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('/') => {
+                    // Enter filter mode (will be handled in UI)
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         // Handle global hotkeys
         match key.code {
             KeyCode::F(2) => {
@@ -175,7 +279,7 @@ impl AppState {
             KeyCode::Char('9') => self.tab_manager.select(TabType::DiskAnalyzer),
             KeyCode::Char('0') => self.tab_manager.select(TabType::Settings),
             KeyCode::Up => {
-                // Navigate command history with arrow keys
+                // Navigate command history with arrow keys (only when not on Processes tab)
                 self.command_history.previous();
                 if let Some(cmd) = self.command_history.get_selected() {
                     self.command_input = cmd.clone();
