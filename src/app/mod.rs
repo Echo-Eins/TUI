@@ -12,6 +12,8 @@ use crossterm::event::Event as CrosstermEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use std::env;
+
 pub struct App {
     pub state: AppState,
     pub config_manager: Option<Arc<ConfigManager>>,
@@ -19,8 +21,10 @@ pub struct App {
 
 impl App {
     pub async fn new() -> Result<Self> {
-        let config_path = PathBuf::from("config.toml");
-        let config = Config::load(&config_path)?;
+        let mut config_path = env::current_exe()?;
+        config_path.set_file_name("config.toml");
+
+        let config = Config::load_or_default(&config_path)?;
 
         // Create config manager with hot reload
         let config_manager = ConfigManager::new(config.clone(), config_path);

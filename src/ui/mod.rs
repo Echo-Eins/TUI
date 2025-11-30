@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs as RatatuiTabs},
+    widgets::{Block, Borders, Clear, Paragraph, Tabs as RatatuiTabs},
     Frame,
 };
 
@@ -14,6 +14,9 @@ use crate::app::{App, TabType};
 use theme::Theme;
 
 pub fn render(f: &mut Frame, app: &App) {
+    // Clear the entire frame to avoid stale renders on some terminals
+    f.render_widget(Clear, f.size());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

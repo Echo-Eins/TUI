@@ -5,6 +5,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+// Embedded default configuration that can be written next to the executable
+// when an external config file is missing. This prevents the application from
+// exiting immediately when launched from a location that doesn't include
+// `config.toml` (for example, by double-clicking the compiled binary).
+const DEFAULT_CONFIG: &str = include_str!("../../config.toml");
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub general: GeneralConfig,
@@ -188,21 +194,42 @@ impl Config {
         let content = fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
 
-        let config: Config = toml::from_str(&content)
-            .with_context(|| "Failed to parse config file")?;
+        let config: Config =
+            toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
         Ok(config)
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .with_context(|| "Failed to serialize config")?;
+        let content = toml::to_string_pretty(self).with_context(|| "Failed to serialize config")?;
 
         fs::write(path.as_ref(), content)
             .with_context(|| format!("Failed to write config file: {:?}", path.as_ref()))?;
 
         Ok(())
     }
+    pub fn load_or_default<P: AsRef<Path>>(path: P) -> Result<Self> {
+        match Self::load(path.as_ref()) {
+            Ok(config) => Ok(config),
+            Err(load_err) => {
+                log::warn!(
+                    "Falling back to bundled default config: {}. A new config will be written to {:?} if possible.",
+                    load_err,
+                    path.as_ref()
+                );
+
+                let default_config: Config = toml::from_str(DEFAULT_CONFIG)
+                    .context("Failed to parse bundled default config")?;
+
+                if let Err(save_err) = default_config.save(path.as_ref()) {
+                    log::warn!("Failed to write default config: {}", save_err);
+                }
+
+                Ok(default_config)
+            }
+        }
+    }
+
 }
 
 pub struct ConfigManager {
@@ -223,22 +250,17 @@ impl ConfigManager {
     }
 
     pub fn watch(self: Arc<Self>) -> Result<()> {
-        use notify::{Watcher, RecursiveMode, RecommendedWatcher, Event};
+        use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
         use std::sync::mpsc::channel;
 
         let (tx, rx) = channel::<Result<Event, notify::Error>>();
 
-        let mut watcher = RecommendedWatcher::new(
-            tx,
-            notify::Config::default(),
-        )
-        .context("Failed to create file watcher")?;
+        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
+            .context("Failed to create file watcher")?;
 
-        watcher.watch(
-            self.config_path.as_ref(),
-            RecursiveMode::NonRecursive,
-        )
-        .context("Failed to watch config file")?;
+        watcher
+            .watch(self.config_path.as_ref(), RecursiveMode::NonRecursive)
+            .context("Failed to watch config file")?;
 
         let config = Arc::clone(&self.config);
         let config_path = self.config_path.clone();

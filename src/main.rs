@@ -33,7 +33,8 @@ async fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
+    terminal.clear()?;
+    
     // Create app
     let app = App::new().await?;
     let tick_rate_ms = app.state.config.read().general.refresh_rate_ms;
