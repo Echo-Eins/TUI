@@ -20,7 +20,7 @@ mod events;
 mod utils;
 
 use app::{App, AppState};
-use events::EventHandler;
+use events::{EventHandler, AppEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,10 +36,11 @@ async fn main() -> Result<()> {
 
     // Create app
     let app = App::new().await?;
+    let tick_rate_ms = app.state.config.read().general.refresh_rate_ms;
     let app_state = Arc::new(RwLock::new(app));
 
     // Create event handler
-    let event_handler = EventHandler::new();
+    let event_handler = EventHandler::new(tick_rate_ms);
 
     // Run the application
     let res = run_app(&mut terminal, app_state.clone(), event_handler).await;
@@ -75,10 +76,16 @@ async fn run_app(
         }
 
         // Handle events
-        if let Some(event) = event_handler.next().await {
-            let mut app = app_state.write().await;
-            if !app.handle_event(event).await? {
-                break;
+        match event_handler.next().await {
+            AppEvent::Input(event) => {
+                let mut app = app_state.write().await;
+                if !app.handle_event(event).await? {
+                    break;
+                }
+            }
+            AppEvent::Tick => {
+                // Just continue to next iteration to redraw UI
+                continue;
             }
         }
     }
