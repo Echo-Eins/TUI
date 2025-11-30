@@ -7,13 +7,27 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::utils::format::{create_progress_bar, format_percentage, format_bytes};
 use crate::ui::theme::Theme;
+use crate::utils::format::{create_progress_bar, format_bytes, format_percentage};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cpu_data = app.state.cpu_data.read();
+    let cpu_error = app.state.cpu_error.read();
 
-    if let Some(data) = cpu_data.as_ref() {
+    if let Some(message) = cpu_error.as_ref() {
+        let config = app.state.config.read();
+        let theme = Theme::from_config(&config);
+        let block = Block::default()
+            .title("CPU Monitor")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.warning_color));
+
+        let text = Paragraph::new(format!("CPU monitor unavailable: {}", message))
+            .block(block)
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(text, area);
+    } else if let Some(data) = cpu_data.as_ref() {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -40,11 +54,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(3),  // Overall usage
-            Constraint::Min(8),     // Core usage
-            Constraint::Length(5),  // Frequency & Power
-            Constraint::Length(9),  // Top Processes
+            Constraint::Length(3), // Header
+            Constraint::Length(3), // Overall usage
+            Constraint::Min(8),    // Core usage
+            Constraint::Length(5), // Frequency & Power
+            Constraint::Length(9), // Top Processes
         ])
         .split(area);
 
@@ -63,27 +77,37 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.cpu_color));
 
-    let header_text = Paragraph::new(header)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_text = Paragraph::new(header).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_text, chunks[0]);
 
     // Overall usage
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title("Overall Usage"))
-        .gauge_style(Style::default().fg(theme.cpu_color).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Overall Usage"),
+        )
+        .gauge_style(
+            Style::default()
+                .fg(theme.cpu_color)
+                .add_modifier(Modifier::BOLD),
+        )
         .percent(data.overall_usage as u16)
-        .label(format!("{}% - Cores: {}/{}",
-            data.overall_usage as u16,
-            data.core_count,
-            data.thread_count
+        .label(format!(
+            "{}% - Cores: {}/{}",
+            data.overall_usage as u16, data.core_count, data.thread_count
         ));
 
     f.render_widget(gauge, chunks[1]);
 
     // Core usage
-    let core_text: Vec<Line> = data.core_usage
+    let core_text: Vec<Line> = data
+        .core_usage
         .chunks(2)
         .map(|chunk| {
             let spans: Vec<Span> = chunk
@@ -119,24 +143,33 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
             Span::raw("  Avg Frequency: "),
             Span::styled(
                 format!("{:.2} GHz", data.frequency.avg_frequency),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  │  Max Frequency: "),
             Span::styled(
                 format!("{:.2} GHz", data.frequency.max_frequency),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::raw("  Base Clock: "),
             Span::styled(
                 format!("{:.2} GHz", data.frequency.base_clock),
-                Style::default().fg(Color::White)
+                Style::default().fg(Color::White),
             ),
             Span::raw("  │  Power: "),
             Span::styled(
-                format!("{:.0}W/{:.0}W", data.power.current_power, data.power.max_power),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                format!(
+                    "{:.0}W/{:.0}W",
+                    data.power.current_power, data.power.max_power
+                ),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
@@ -153,7 +186,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
     f.render_widget(freq_paragraph, chunks[3]);
 
     // Top Processes
-    let rows: Vec<Row> = data.top_processes
+    let rows: Vec<Row> = data
+        .top_processes
         .iter()
         .map(|p| {
             Row::new(vec![
@@ -178,14 +212,17 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         ],
     )
     .header(
-        Row::new(vec!["PID", "Name", "CPU%", "Threads", "Memory"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        Row::new(vec!["PID", "Name", "CPU%", "Threads", "Memory"]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
     .block(
         Block::default()
             .title("Top Processes")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.cpu_color))
+            .border_style(Style::default().fg(theme.cpu_color)),
     );
 
     f.render_widget(table, chunks[4]);

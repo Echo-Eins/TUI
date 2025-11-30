@@ -7,15 +7,29 @@ use ratatui::{
 };
 use std::cmp::Ordering;
 
-use crate::app::{App, state::ProcessSortColumn};
+use crate::app::{state::ProcessSortColumn, App};
 use crate::monitors::processes::ProcessEntry;
-use crate::utils::format::format_bytes;
 use crate::ui::theme::Theme;
+use crate::utils::format::format_bytes;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let process_data = app.state.process_data.read();
+    let process_error = app.state.process_error.read();
 
-    if let Some(data) = process_data.as_ref() {
+    if let Some(message) = process_error.as_ref() {
+        let config = app.state.config.read();
+        let theme = Theme::from_config(&config);
+        let block = Block::default()
+            .title("Process Monitor")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.warning_color));
+
+        let text = Paragraph::new(format!("Process monitor unavailable: {}", message))
+            .block(block)
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(text, area);
+    } else if let Some(data) = process_data.as_ref() {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -38,13 +52,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, app: &App, theme: &Theme) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::ProcessData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // Header with stats
-            Constraint::Min(10),         // Process table
-            Constraint::Length(10),      // Details panel
+            Constraint::Length(3),  // Header with stats
+            Constraint::Min(10),    // Process table
+            Constraint::Length(10), // Details panel
         ])
         .split(area);
 
@@ -58,12 +78,18 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, a
     render_details_panel(f, chunks[2], data, app, theme);
 }
 
-fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, app: &App, theme: &Theme) {
+fn render_compact(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::ProcessData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // Header
-            Constraint::Min(8),          // Process table (compact)
+            Constraint::Length(3), // Header
+            Constraint::Min(8),    // Process table (compact)
         ])
         .split(area);
 
@@ -79,18 +105,31 @@ fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData,
     let total_memory: u64 = data.processes.iter().map(|p| p.memory).sum();
     let total_threads: usize = data.processes.iter().map(|p| p.threads).sum();
 
-    let header_text = vec![
-        Line::from(vec![
-            Span::styled("Total Processes: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", total_processes), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("Total Memory: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(total_memory), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("Total Threads: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", total_threads), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
+    let header_text = vec![Line::from(vec![
+        Span::styled("Total Processes: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{}", total_processes),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Total Memory: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format_bytes(total_memory),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Total Threads: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{}", total_threads),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
 
     let block = Block::default()
         .title("Process Monitor")
@@ -101,7 +140,13 @@ fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData,
     f.render_widget(paragraph, area);
 }
 
-fn render_process_table(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, app: &App, theme: &Theme) {
+fn render_process_table(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::ProcessData,
+    app: &App,
+    theme: &Theme,
+) {
     // Sort and filter processes
     let mut processes = data.processes.clone();
 
@@ -109,54 +154,99 @@ fn render_process_table(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
     if !app.state.processes_state.filter.is_empty() {
         let filter = app.state.processes_state.filter.to_lowercase();
         processes.retain(|p| {
-            p.name.to_lowercase().contains(&filter) ||
-            p.user.to_lowercase().contains(&filter) ||
-            p.pid.to_string().contains(&filter)
+            p.name.to_lowercase().contains(&filter)
+                || p.user.to_lowercase().contains(&filter)
+                || p.pid.to_string().contains(&filter)
         });
     }
 
     // Apply sorting
-    sort_processes(&mut processes, app.state.processes_state.sort_column, app.state.processes_state.sort_ascending);
+    sort_processes(
+        &mut processes,
+        app.state.processes_state.sort_column,
+        app.state.processes_state.sort_ascending,
+    );
 
     // Create table header with sort indicators
-    let sort_indicator = if app.state.processes_state.sort_ascending { "↑" } else { "↓" };
+    let sort_indicator = if app.state.processes_state.sort_ascending {
+        "↑"
+    } else {
+        "↓"
+    };
 
     let mut headers = vec![
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::Pid {
-            format!("PID {}", sort_indicator)
-        } else {
-            "PID".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::Name {
-            format!("Name {}", sort_indicator)
-        } else {
-            "Name".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::Cpu {
-            format!("CPU% {}", sort_indicator)
-        } else {
-            "CPU%".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::Memory {
-            format!("Memory {}", sort_indicator)
-        } else {
-            "Memory".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::Threads {
-            format!("Threads {}", sort_indicator)
-        } else {
-            "Threads".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-
-        Cell::from(if app.state.processes_state.sort_column == ProcessSortColumn::User {
-            format!("User {}", sort_indicator)
-        } else {
-            "User".to_string()
-        }).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::Pid {
+                format!("PID {}", sort_indicator)
+            } else {
+                "PID".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::Name {
+                format!("Name {}", sort_indicator)
+            } else {
+                "Name".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::Cpu {
+                format!("CPU% {}", sort_indicator)
+            } else {
+                "CPU%".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::Memory {
+                format!("Memory {}", sort_indicator)
+            } else {
+                "Memory".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::Threads {
+                format!("Threads {}", sort_indicator)
+            } else {
+                "Threads".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from(
+            if app.state.processes_state.sort_column == ProcessSortColumn::User {
+                format!("User {}", sort_indicator)
+            } else {
+                "User".to_string()
+            },
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
 
     let header = Row::new(headers).height(1);
@@ -184,16 +274,14 @@ fn render_process_table(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
         .collect();
 
     // Hotkeys hint
-    let hotkeys = vec![
-        Line::from(vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
-            Span::raw(": Navigate  "),
-            Span::styled("p/n/c/m/t/u", Style::default().fg(Color::Cyan)),
-            Span::raw(": Sort by PID/Name/CPU/Memory/Threads/User  "),
-            Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
-            Span::raw(": Page Up/Down"),
-        ]),
-    ];
+    let hotkeys = vec![Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
+        Span::styled("p/n/c/m/t/u", Style::default().fg(Color::Cyan)),
+        Span::raw(": Sort by PID/Name/CPU/Memory/Threads/User  "),
+        Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
+        Span::raw(": Page Up/Down"),
+    ])];
 
     let block = Block::default()
         .title("Processes")
@@ -202,12 +290,12 @@ fn render_process_table(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
 
     // Calculate constraints for table columns
     let widths = [
-        Constraint::Length(8),   // PID
-        Constraint::Min(20),     // Name
-        Constraint::Length(8),   // CPU%
-        Constraint::Length(12),  // Memory
-        Constraint::Length(10),  // Threads
-        Constraint::Min(15),     // User
+        Constraint::Length(8),  // PID
+        Constraint::Min(20),    // Name
+        Constraint::Length(8),  // CPU%
+        Constraint::Length(12), // Memory
+        Constraint::Length(10), // Threads
+        Constraint::Min(15),    // User
     ];
 
     let table = Table::new(rows, widths)
@@ -231,37 +319,58 @@ fn render_process_table(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
     }
 }
 
-fn render_details_panel(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, app: &App, theme: &Theme) {
+fn render_details_panel(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::ProcessData,
+    app: &App,
+    theme: &Theme,
+) {
     // Sort and filter processes (same as in table)
     let mut processes = data.processes.clone();
 
     if !app.state.processes_state.filter.is_empty() {
         let filter = app.state.processes_state.filter.to_lowercase();
         processes.retain(|p| {
-            p.name.to_lowercase().contains(&filter) ||
-            p.user.to_lowercase().contains(&filter) ||
-            p.pid.to_string().contains(&filter)
+            p.name.to_lowercase().contains(&filter)
+                || p.user.to_lowercase().contains(&filter)
+                || p.pid.to_string().contains(&filter)
         });
     }
 
-    sort_processes(&mut processes, app.state.processes_state.sort_column, app.state.processes_state.sort_ascending);
+    sort_processes(
+        &mut processes,
+        app.state.processes_state.sort_column,
+        app.state.processes_state.sort_ascending,
+    );
 
     // Get selected process
     if let Some(process) = processes.get(app.state.processes_state.selected_index) {
         let mut details = Vec::new();
 
-        details.push(Line::from(vec![
-            Span::styled("Process Details", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
+        details.push(Line::from(vec![Span::styled(
+            "Process Details",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         details.push(Line::from(""));
 
         details.push(Line::from(vec![
             Span::styled("PID: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", process.pid), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}", process.pid),
+                Style::default().fg(Color::White),
+            ),
             Span::raw("  "),
             Span::styled("Name: ", Style::default().fg(Color::Gray)),
-            Span::styled(&process.name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &process.name,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
 
         details.push(Line::from(vec![
@@ -269,26 +378,44 @@ fn render_details_panel(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
             Span::styled(&process.user, Style::default().fg(Color::White)),
             Span::raw("  "),
             Span::styled("Threads: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", process.threads), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}", process.threads),
+                Style::default().fg(Color::White),
+            ),
             Span::raw("  "),
             Span::styled("Handles: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", process.handle_count), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}", process.handle_count),
+                Style::default().fg(Color::White),
+            ),
         ]));
 
         details.push(Line::from(vec![
             Span::styled("CPU: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2}%", process.cpu_usage), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("{:.2}%", process.cpu_usage),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("  "),
             Span::styled("Memory: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(process.memory), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format_bytes(process.memory),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
 
         details.push(Line::from(vec![
             Span::styled("I/O Read: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(process.io_read_bytes), Style::default().fg(Color::Blue)),
+            Span::styled(
+                format_bytes(process.io_read_bytes),
+                Style::default().fg(Color::Blue),
+            ),
             Span::raw("  "),
             Span::styled("I/O Write: ", Style::default().fg(Color::Gray)),
-            Span::styled(format_bytes(process.io_write_bytes), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format_bytes(process.io_write_bytes),
+                Style::default().fg(Color::Magenta),
+            ),
         ]));
 
         if let Some(start_time) = &process.start_time {
@@ -300,12 +427,14 @@ fn render_details_panel(f: &mut Frame, area: Rect, data: &crate::monitors::Proce
 
         if let Some(cmd) = &process.command_line {
             details.push(Line::from(""));
-            details.push(Line::from(vec![
-                Span::styled("Command Line:", Style::default().fg(Color::Gray)),
-            ]));
-            details.push(Line::from(vec![
-                Span::styled(cmd, Style::default().fg(Color::White)),
-            ]));
+            details.push(Line::from(vec![Span::styled(
+                "Command Line:",
+                Style::default().fg(Color::Gray),
+            )]));
+            details.push(Line::from(vec![Span::styled(
+                cmd,
+                Style::default().fg(Color::White),
+            )]));
         }
 
         let block = Block::default()
@@ -337,12 +466,19 @@ fn sort_processes(processes: &mut Vec<ProcessEntry>, column: ProcessSortColumn, 
         let cmp = match column {
             ProcessSortColumn::Pid => a.pid.cmp(&b.pid),
             ProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            ProcessSortColumn::Cpu => a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(Ordering::Equal),
+            ProcessSortColumn::Cpu => a
+                .cpu_usage
+                .partial_cmp(&b.cpu_usage)
+                .unwrap_or(Ordering::Equal),
             ProcessSortColumn::Memory => a.memory.cmp(&b.memory),
             ProcessSortColumn::Threads => a.threads.cmp(&b.threads),
             ProcessSortColumn::User => a.user.to_lowercase().cmp(&b.user.to_lowercase()),
         };
 
-        if ascending { cmp } else { cmp.reverse() }
+        if ascending {
+            cmp
+        } else {
+            cmp.reverse()
+        }
     });
 }

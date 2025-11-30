@@ -6,13 +6,27 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, state::OllamaView};
+use crate::app::{state::OllamaView, App};
 use crate::ui::theme::Theme;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let ollama_data = app.state.ollama_data.read();
+    let ollama_error = app.state.ollama_error.read();
 
-    if let Some(data) = ollama_data.as_ref() {
+    if let Some(message) = ollama_error.as_ref() {
+        let config = app.state.config.read();
+        let theme = Theme::from_config(&config);
+        let block = Block::default()
+            .title("Ollama Manager")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.warning_color));
+
+        let text = Paragraph::new(format!("Ollama monitor unavailable: {}", message))
+            .block(block)
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(text, area);
+    } else if let Some(data) = ollama_data.as_ref() {
         if !data.available {
             render_unavailable(f, area);
             return;
@@ -47,15 +61,20 @@ fn render_unavailable(f: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(Color::Red));
 
     let text = vec![
-        Line::from(vec![
-            Span::styled("Ollama Not Available", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Ollama Not Available",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
+        Line::from(vec![Span::styled(
+            "Ollama is not installed or not in PATH.",
+            Style::default().fg(Color::Gray),
+        )]),
         Line::from(vec![
-            Span::styled("Ollama is not installed or not in PATH.", Style::default().fg(Color::Gray)),
-        ]),
-        Line::from(vec![
-            Span::styled("Please install Ollama from: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "Please install Ollama from: ",
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled("https://ollama.ai", Style::default().fg(Color::Cyan)),
         ]),
     ];
@@ -64,15 +83,21 @@ fn render_unavailable(f: &mut Frame, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // Header
-            Constraint::Min(10),         // Main content (models/running)
-            Constraint::Length(8),       // Running models / VRAM panel
-            Constraint::Length(5),       // Activity log
-            Constraint::Length(3),       // Command input / Help
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Main content (models/running)
+            Constraint::Length(8), // Running models / VRAM panel
+            Constraint::Length(5), // Activity log
+            Constraint::Length(3), // Command input / Help
         ])
         .split(area);
 
@@ -99,13 +124,19 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData
     }
 }
 
-fn render_compact(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_compact(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // Header
-            Constraint::Min(10),         // Main content
-            Constraint::Length(3),       // Help
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Main content
+            Constraint::Length(3), // Help
         ])
         .split(area);
 
@@ -122,7 +153,13 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaD
     render_help(f, chunks[2], theme);
 }
 
-fn render_header(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_header(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let model_count = data.models.len();
     let running_count = data.running_models.len();
 
@@ -131,18 +168,31 @@ fn render_header(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaDa
         OllamaView::Running => "Running Models",
     };
 
-    let header_text = vec![
-        Line::from(vec![
-            Span::styled("View: ", Style::default().fg(Color::Gray)),
-            Span::styled(view_text, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("Total Models: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", model_count), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("Running: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", running_count), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
+    let header_text = vec![Line::from(vec![
+        Span::styled("View: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            view_text,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Total Models: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{}", model_count),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Running: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{}", running_count),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
 
     let block = Block::default()
         .title("Ollama Manager")
@@ -153,16 +203,35 @@ fn render_header(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaDa
     f.render_widget(paragraph, area);
 }
 
-fn render_models_table(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_models_table(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let headers = vec![
-        Cell::from("Name").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Size").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Modified").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Name").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Size").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Modified").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
 
     let header = Row::new(headers).height(1);
 
-    let rows: Vec<Row> = data.models
+    let rows: Vec<Row> = data
+        .models
         .iter()
         .enumerate()
         .map(|(i, model)| {
@@ -181,22 +250,20 @@ fn render_models_table(f: &mut Frame, area: Rect, data: &crate::integrations::Ol
         })
         .collect();
 
-    let hotkeys = vec![
-        Line::from(vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
-            Span::raw(": Navigate  "),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw(": Switch View  "),
-            Span::styled("r", Style::default().fg(Color::Cyan)),
-            Span::raw(": Run  "),
-            Span::styled("d", Style::default().fg(Color::Cyan)),
-            Span::raw(": Delete  "),
-            Span::styled("p", Style::default().fg(Color::Cyan)),
-            Span::raw(": Pull  "),
-            Span::styled("c", Style::default().fg(Color::Cyan)),
-            Span::raw(": Command"),
-        ]),
-    ];
+    let hotkeys = vec![Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
+        Span::styled("v", Style::default().fg(Color::Cyan)),
+        Span::raw(": Switch View  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": Run  "),
+        Span::styled("d", Style::default().fg(Color::Cyan)),
+        Span::raw(": Delete  "),
+        Span::styled("p", Style::default().fg(Color::Cyan)),
+        Span::raw(": Pull  "),
+        Span::styled("c", Style::default().fg(Color::Cyan)),
+        Span::raw(": Command"),
+    ])];
 
     let block = Block::default()
         .title("Available Models")
@@ -204,9 +271,9 @@ fn render_models_table(f: &mut Frame, area: Rect, data: &crate::integrations::Ol
         .border_style(Style::default().fg(Color::Magenta));
 
     let widths = [
-        Constraint::Min(30),     // Name
-        Constraint::Length(12),  // Size
-        Constraint::Min(15),     // Modified
+        Constraint::Min(30),    // Name
+        Constraint::Length(12), // Size
+        Constraint::Min(15),    // Modified
     ];
 
     let table = Table::new(rows, widths)
@@ -230,17 +297,40 @@ fn render_models_table(f: &mut Frame, area: Rect, data: &crate::integrations::Ol
     }
 }
 
-fn render_running_models_table(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_running_models_table(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let headers = vec![
-        Cell::from("Name").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Size").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Processor").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Until").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Name").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Size").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Processor").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Until").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
 
     let header = Row::new(headers).height(1);
 
-    let rows: Vec<Row> = data.running_models
+    let rows: Vec<Row> = data
+        .running_models
         .iter()
         .enumerate()
         .map(|(i, model)| {
@@ -262,18 +352,16 @@ fn render_running_models_table(f: &mut Frame, area: Rect, data: &crate::integrat
         })
         .collect();
 
-    let hotkeys = vec![
-        Line::from(vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
-            Span::raw(": Navigate  "),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw(": Switch View  "),
-            Span::styled("s", Style::default().fg(Color::Cyan)),
-            Span::raw(": Stop  "),
-            Span::styled("l", Style::default().fg(Color::Cyan)),
-            Span::raw(": Refresh"),
-        ]),
-    ];
+    let hotkeys = vec![Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
+        Span::styled("v", Style::default().fg(Color::Cyan)),
+        Span::raw(": Switch View  "),
+        Span::styled("s", Style::default().fg(Color::Cyan)),
+        Span::raw(": Stop  "),
+        Span::styled("l", Style::default().fg(Color::Cyan)),
+        Span::raw(": Refresh"),
+    ])];
 
     let block = Block::default()
         .title("Running Models")
@@ -281,10 +369,10 @@ fn render_running_models_table(f: &mut Frame, area: Rect, data: &crate::integrat
         .border_style(Style::default().fg(Color::Green));
 
     let widths = [
-        Constraint::Min(25),     // Name
-        Constraint::Length(12),  // Size
-        Constraint::Length(15),  // Processor
-        Constraint::Min(20),     // Until
+        Constraint::Min(25),    // Name
+        Constraint::Length(12), // Size
+        Constraint::Length(15), // Processor
+        Constraint::Min(20),    // Until
     ];
 
     let table = Table::new(rows, widths)
@@ -308,12 +396,18 @@ fn render_running_models_table(f: &mut Frame, area: Rect, data: &crate::integrat
     }
 }
 
-fn render_vram_panel(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, app: &App, theme: &Theme) {
+fn render_vram_panel(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50),  // VRAM gauge
-            Constraint::Percentage(50),  // Running models summary
+            Constraint::Percentage(50), // VRAM gauge
+            Constraint::Percentage(50), // Running models summary
         ])
         .split(area);
 
@@ -330,9 +424,17 @@ fn render_vram_panel(f: &mut Frame, area: Rect, data: &crate::integrations::Olla
         (0, 0, 0.0)
     };
 
-    let vram_text = format!("{:.2}% ({} MB / {} MB)", vram_percent, vram_used, vram_total);
+    let vram_text = format!(
+        "{:.2}% ({} MB / {} MB)",
+        vram_percent, vram_used, vram_total
+    );
     let gauge = Gauge::default()
-        .block(Block::default().title("VRAM Usage").borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
+        .block(
+            Block::default()
+                .title("VRAM Usage")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
         .percent(vram_percent as u16)
         .label(vram_text);
@@ -343,14 +445,22 @@ fn render_vram_panel(f: &mut Frame, area: Rect, data: &crate::integrations::Olla
     let mut summary = Vec::new();
     summary.push(Line::from(vec![
         Span::styled("Active Models: ", Style::default().fg(Color::Gray)),
-        Span::styled(format!("{}", data.running_models.len()), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}", data.running_models.len()),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
 
     let total_size: u64 = data.running_models.iter().map(|m| m.size_bytes).sum();
     let size_gb = total_size as f64 / (1024.0 * 1024.0 * 1024.0);
     summary.push(Line::from(vec![
         Span::styled("Total Size: ", Style::default().fg(Color::Gray)),
-        Span::styled(format!("{:.2} GB", size_gb), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("{:.2} GB", size_gb),
+            Style::default().fg(Color::Cyan),
+        ),
     ]));
 
     if !data.running_models.is_empty() {
@@ -374,13 +484,23 @@ fn render_vram_panel(f: &mut Frame, area: Rect, data: &crate::integrations::Olla
     f.render_widget(paragraph, chunks[1]);
 }
 
-fn render_activity_log(f: &mut Frame, area: Rect, data: &crate::integrations::OllamaData, theme: &Theme) {
-    let log_entries: Vec<Line> = data.activity_log
+fn render_activity_log(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::integrations::OllamaData,
+    theme: &Theme,
+) {
+    let log_entries: Vec<Line> = data
+        .activity_log
         .iter()
         .rev()
         .take(3)
         .map(|entry| {
-            let color = if entry.success { Color::Green } else { Color::Red };
+            let color = if entry.success {
+                Color::Green
+            } else {
+                Color::Red
+            };
             let icon = if entry.success { "✓" } else { "✗" };
 
             Line::from(vec![
@@ -394,9 +514,10 @@ fn render_activity_log(f: &mut Frame, area: Rect, data: &crate::integrations::Ol
         .collect();
 
     let text = if log_entries.is_empty() {
-        vec![Line::from(vec![
-            Span::styled("No recent activity", Style::default().fg(Color::Gray)),
-        ])]
+        vec![Line::from(vec![Span::styled(
+            "No recent activity",
+            Style::default().fg(Color::Gray),
+        )])]
     } else {
         log_entries
     };
@@ -411,13 +532,24 @@ fn render_activity_log(f: &mut Frame, area: Rect, data: &crate::integrations::Ol
 }
 
 fn render_command_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let text = vec![
-        Line::from(vec![
-            Span::styled("ollama ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::styled(&app.state.ollama_state.command_input, Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
-        ]),
-    ];
+    let text = vec![Line::from(vec![
+        Span::styled(
+            "ollama ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            &app.state.ollama_state.command_input,
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            "_",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::SLOW_BLINK),
+        ),
+    ])];
 
     let block = Block::default()
         .title("Command Input (Enter: Execute, Esc: Cancel)")
@@ -429,25 +561,58 @@ fn render_command_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
-    let help_text = vec![
-        Line::from(vec![
-            Span::styled("Quick Actions: ", Style::default().fg(Color::Gray)),
-            Span::styled("R", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Run  "),
-            Span::styled("S", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Stop  "),
-            Span::styled("D", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Delete  "),
-            Span::styled("P", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Pull  "),
-            Span::styled("L", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Refresh  "),
-            Span::styled("C", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":Command  "),
-            Span::styled("V", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(":View"),
-        ]),
-    ];
+    let help_text = vec![Line::from(vec![
+        Span::styled("Quick Actions: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            "R",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Run  "),
+        Span::styled(
+            "S",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Stop  "),
+        Span::styled(
+            "D",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Delete  "),
+        Span::styled(
+            "P",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Pull  "),
+        Span::styled(
+            "L",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Refresh  "),
+        Span::styled(
+            "C",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":Command  "),
+        Span::styled(
+            "V",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":View"),
+    ])];
 
     let block = Block::default()
         .borders(Borders::ALL)
