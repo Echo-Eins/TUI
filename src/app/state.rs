@@ -18,15 +18,23 @@ pub struct AppState {
 
     // Monitor data
     pub cpu_data: Arc<RwLock<Option<CpuData>>>,
+    pub cpu_error: Arc<RwLock<Option<String>>>,
     pub gpu_data: Arc<RwLock<Option<GpuData>>>,
+    pub gpu_error: Arc<RwLock<Option<String>>>,
     pub ram_data: Arc<RwLock<Option<RamData>>>,
+    pub ram_error: Arc<RwLock<Option<String>>>,
     pub disk_data: Arc<RwLock<Option<DiskData>>>,
+    pub disk_error: Arc<RwLock<Option<String>>>,
     pub network_data: Arc<RwLock<Option<NetworkData>>>,
+    pub network_error: Arc<RwLock<Option<String>>>,
     pub process_data: Arc<RwLock<Option<ProcessData>>>,
+    pub process_error: Arc<RwLock<Option<String>>>,
     pub service_data: Arc<RwLock<Option<ServiceData>>>,
+    pub service_error: Arc<RwLock<Option<String>>>,
 
     // Ollama integration
     pub ollama_data: Arc<RwLock<Option<OllamaData>>>,
+    pub ollama_error: Arc<RwLock<Option<String>>>,
 
     // UI state
     pub command_menu_active: bool,
@@ -106,28 +114,45 @@ impl AppState {
         let command_history = CommandHistory::new(config.ui.command_history.max_entries);
 
         let cpu_data = Arc::new(RwLock::new(None));
+        let cpu_error = Arc::new(RwLock::new(None));
         let gpu_data = Arc::new(RwLock::new(None));
+        let gpu_error = Arc::new(RwLock::new(None));
         let ram_data = Arc::new(RwLock::new(None));
+        let ram_error = Arc::new(RwLock::new(None));
         let disk_data = Arc::new(RwLock::new(None));
+        let disk_error = Arc::new(RwLock::new(None));
         let network_data = Arc::new(RwLock::new(None));
+        let network_error = Arc::new(RwLock::new(None));
         let process_data = Arc::new(RwLock::new(None));
+        let process_error = Arc::new(RwLock::new(None));
         let service_data = Arc::new(RwLock::new(None));
+        let service_error = Arc::new(RwLock::new(None));
 
         let ollama_data = Arc::new(RwLock::new(None));
+        let ollama_error = Arc::new(RwLock::new(None));
 
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
             Arc::clone(&cpu_data),
+            Arc::clone(&cpu_error),
             Arc::clone(&gpu_data),
+            Arc::clone(&gpu_error),
             Arc::clone(&ram_data),
+            Arc::clone(&ram_error),
             Arc::clone(&disk_data),
+            Arc::clone(&disk_error),
             Arc::clone(&network_data),
+            Arc::clone(&network_error),
             Arc::clone(&process_data),
+            Arc::clone(&process_error),
             Arc::clone(&service_data),
+            Arc::clone(&service_error),
             Arc::clone(&ollama_data),
+            Arc::clone(&ollama_error),
             config.powershell.executable.clone(),
             config.powershell.timeout_seconds,
             config.powershell.cache_ttl_seconds,
+            config.powershell.use_cache,
         );
 
         Ok(Self {
@@ -136,14 +161,22 @@ impl AppState {
             compact_mode: false,
 
             cpu_data,
+            cpu_error,
             gpu_data,
+            gpu_error,
             ram_data,
+            ram_error,
             disk_data,
+            disk_error,
             network_data,
+            network_error,
             process_data,
+            process_error,
             service_data,
+            service_error,
 
             ollama_data,
+            ollama_error,
 
             command_menu_active: false,
             command_history,
@@ -633,6 +666,7 @@ impl AppState {
             self.config.read().powershell.executable.clone(),
             self.config.read().powershell.timeout_seconds,
             self.config.read().powershell.cache_ttl_seconds,
+            self.config.read().powershell.use_cache,
         );
 
         match ps.execute(&self.command_input).await {

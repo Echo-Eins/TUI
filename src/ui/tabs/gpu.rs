@@ -7,13 +7,27 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::utils::format::format_bytes;
 use crate::ui::theme::Theme;
+use crate::utils::format::format_bytes;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let gpu_data = app.state.gpu_data.read();
+    let gpu_error = app.state.gpu_error.read();
 
-    if let Some(data) = gpu_data.as_ref() {
+    if let Some(message) = gpu_error.as_ref() {
+        let config = app.state.config.read();
+        let theme = Theme::from_config(&config);
+        let block = Block::default()
+            .title("GPU Monitor")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.warning_color));
+
+        let text = Paragraph::new(format!("GPU monitor unavailable: {}", message))
+            .block(block)
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(text, area);
+    } else if let Some(data) = gpu_data.as_ref() {
         let config = app.state.config.read();
         let theme = Theme::from_config(&config);
 
@@ -40,36 +54,40 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(3),  // Overall usage
-            Constraint::Length(7),  // Performance metrics
-            Constraint::Length(5),  // VRAM usage
-            Constraint::Length(7),  // GPU Processes
+            Constraint::Length(3), // Header
+            Constraint::Length(3), // Overall usage
+            Constraint::Length(7), // Performance metrics
+            Constraint::Length(5), // VRAM usage
+            Constraint::Length(7), // GPU Processes
         ])
         .split(area);
 
     // Header
     let header = format!(
         "GPU: {}  Driver: {}  Temp: {:.1}°C",
-        data.name,
-        data.driver_version,
-        data.temperature
+        data.name, data.driver_version, data.temperature
     );
 
     let header_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.gpu_color));
 
-    let header_text = Paragraph::new(header)
-        .block(header_block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header_text = Paragraph::new(header).block(header_block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_widget(header_text, chunks[0]);
 
     // Overall GPU usage
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("GPU Usage"))
-        .gauge_style(Style::default().fg(theme.gpu_color).add_modifier(Modifier::BOLD))
+        .gauge_style(
+            Style::default()
+                .fg(theme.gpu_color)
+                .add_modifier(Modifier::BOLD),
+        )
         .percent(data.utilization as u16)
         .label(format!("{}%", data.utilization as u16));
 
@@ -81,36 +99,46 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
             Span::raw("  GPU Clock: "),
             Span::styled(
                 format!("{} MHz", data.clock_speed),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  │  Memory Clock: "),
             Span::styled(
                 format!("{} MHz", data.memory_clock),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::raw("  Power Draw: "),
             Span::styled(
                 format!("{:.0}W/{:.0}W", data.power_usage, data.power_limit),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  │  Fan Speed: "),
             Span::styled(
                 format!("{:.0}%", data.fan_speed),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::raw("  Temperature: "),
             Span::styled(
                 format!("{:.1}°C", data.temperature),
-                Style::default().fg(theme.get_temp_color(data.temperature))
+                Style::default().fg(theme.get_temp_color(data.temperature)),
             ),
             Span::raw("  │  Utilization: "),
             Span::styled(
                 format!("{:.0}%", data.utilization),
-                Style::default().fg(theme.gpu_color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.gpu_color)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
@@ -134,12 +162,15 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
     };
 
     let vram_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("VRAM Usage ({} Total)", format_bytes(data.memory_total)))
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "VRAM Usage ({} Total)",
+            format_bytes(data.memory_total)
+        )))
+        .gauge_style(
+            Style::default()
+                .fg(theme.success_color)
+                .add_modifier(Modifier::BOLD),
         )
-        .gauge_style(Style::default().fg(theme.success_color).add_modifier(Modifier::BOLD))
         .percent(vram_used_pct)
         .label(format!(
             "{} / {} ({}%)",
@@ -152,7 +183,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
 
     // GPU Processes
     if !data.processes.is_empty() {
-        let rows: Vec<Row> = data.processes
+        let rows: Vec<Row> = data
+            .processes
             .iter()
             .map(|p| {
                 Row::new(vec![
@@ -177,14 +209,17 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
             ],
         )
         .header(
-            Row::new(vec!["PID", "Name", "GPU%", "VRAM", "Type"])
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            Row::new(vec!["PID", "Name", "GPU%", "VRAM", "Type"]).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         .block(
             Block::default()
                 .title("GPU Processes")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.gpu_color))
+                .border_style(Style::default().fg(theme.gpu_color)),
         );
 
         f.render_widget(table, chunks[4]);
@@ -205,7 +240,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme: &Theme) {
     let compact_text = format!(
         "GPU: {} │ {}% │ {}/{} │ {:.1}°C │ {:.0}W/{:.0}W",
-        data.name.split_whitespace().take(2).collect::<Vec<_>>().join(" "),
+        data.name
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" "),
         data.utilization as u16,
         format_bytes(data.memory_used),
         format_bytes(data.memory_total),
