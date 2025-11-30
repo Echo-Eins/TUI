@@ -16,14 +16,25 @@ pub fn spawn_monitor_tasks(
     disk_data: Arc<RwLock<MonitorState<DiskData>>>,
     network_data: Arc<RwLock<MonitorState<NetworkData>>>,
     process_data: Arc<RwLock<MonitorState<ProcessData>>>,
-    ps_executable: String,
-    timeout: u64,
-    cache_ttl: u64,
+    powershell_config: crate::app::config::PowerShellConfig,
+    monitors_config: crate::app::config::MonitorsConfig,
 ) {
+    let cpu_config = monitors_config.cpu.clone();
+    let gpu_config = monitors_config.gpu.clone();
+    let ram_config = monitors_config.ram.clone();
+    let disk_config = monitors_config.disk.clone();
+    let network_config = monitors_config.network.clone();
     // CPU monitor task
     {
         let cpu_data = Arc::clone(&cpu_data);
-        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
+        let cpu_config = cpu_config.clone();
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
+        let refresh_interval = Duration::from_millis(cpu_config.refresh_interval_ms);
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);
@@ -56,7 +67,7 @@ pub fn spawn_monitor_tasks(
                                 }
                             }
 
-                            sleep(Duration::from_millis(1000)).await;
+                            sleep(refresh_interval).await;
                         }
                     }
                     Err(e) => {
@@ -77,12 +88,19 @@ pub fn spawn_monitor_tasks(
     // GPU monitor task
     {
         let gpu_data = Arc::clone(&gpu_data);
-        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
+        let gpu_config = gpu_config.clone();
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
+        let refresh_interval = Duration::from_millis(gpu_config.refresh_interval_ms);
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);
             loop {
-                match GpuMonitor::new(ps.clone()) {
+                match GpuMonitor::new(ps.clone(), gpu_config.use_nvml) {
                     Ok(monitor) => {
                         info!("GPU monitor initialized successfully");
 
@@ -110,7 +128,7 @@ pub fn spawn_monitor_tasks(
                                 }
                             }
 
-                            sleep(Duration::from_millis(1000)).await;
+                            sleep(refresh_interval).await;
                         }
                     }
                     Err(e) => {
@@ -131,7 +149,14 @@ pub fn spawn_monitor_tasks(
     // RAM monitor task
     {
         let ram_data = Arc::clone(&ram_data);
-        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
+        let ram_config = ram_config.clone();
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
+        let refresh_interval = Duration::from_millis(ram_config.refresh_interval_ms);
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);
@@ -164,7 +189,7 @@ pub fn spawn_monitor_tasks(
                                 }
                             }
 
-                            sleep(Duration::from_millis(1000)).await;
+                            sleep(refresh_interval).await;
                         }
                     }
                     Err(e) => {
@@ -185,7 +210,14 @@ pub fn spawn_monitor_tasks(
     // Disk monitor task
     {
         let disk_data = Arc::clone(&disk_data);
-        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
+        let disk_config = disk_config.clone();
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
+        let refresh_interval = Duration::from_millis(disk_config.refresh_interval_ms);
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);
@@ -218,7 +250,7 @@ pub fn spawn_monitor_tasks(
                                 }
                             }
 
-                            sleep(Duration::from_millis(2000)).await;
+                            sleep(refresh_interval).await;
                         }
                     }
                     Err(e) => {
@@ -239,7 +271,14 @@ pub fn spawn_monitor_tasks(
     // Network monitor task
     {
         let network_data = Arc::clone(&network_data);
-        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
+        let network_config = network_config.clone();
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
+        let refresh_interval = Duration::from_millis(network_config.refresh_interval_ms);
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);
@@ -285,7 +324,7 @@ pub fn spawn_monitor_tasks(
                                 }
                             }
 
-                            sleep(Duration::from_millis(1000)).await;
+                            sleep(refresh_interval).await;
                         }
                     }
                     Err(e) => {
@@ -306,7 +345,12 @@ pub fn spawn_monitor_tasks(
     // Process monitor task
     {
         let process_data = Arc::clone(&process_data);
-        let ps = PowerShellExecutor::new(ps_executable, timeout, cache_ttl);
+        let ps = PowerShellExecutor::new(
+            powershell_config.executable.clone(),
+            powershell_config.timeout_seconds,
+            powershell_config.cache_ttl_seconds,
+            powershell_config.use_cache,
+        );
         tokio::spawn(async move {
             let mut init_backoff = Duration::from_secs(1);
             let mut collect_backoff = Duration::from_secs(1);

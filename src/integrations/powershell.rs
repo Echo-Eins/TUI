@@ -16,21 +16,38 @@ pub struct PowerShellExecutor {
     timeout: Duration,
     cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
     cache_ttl: Duration,
+    use_cache: bool,
 }
 
 impl PowerShellExecutor {
-    pub fn new(executable: String, timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+    pub fn new(
+        executable: String,
+        timeout_seconds: u64,
+        cache_ttl_seconds: u64,
+        use_cache: bool,
+    ) -> Self {
         Self {
             executable,
             timeout: Duration::from_secs(timeout_seconds),
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: Duration::from_secs(cache_ttl_seconds),
+            use_cache,
         }
     }
 
     pub async fn execute(&self, command: &str) -> Result<String> {
+        self.execute_inner(command, true).await
+    }
+
+    pub async fn execute_uncached(&self, command: &str) -> Result<String> {
+        self.execute_inner(command, false).await
+    }
+
+    async fn execute_inner(&self, command: &str, allow_cache: bool) -> Result<String> {
+        let should_use_cache = self.use_cache && allow_cache && self.cache_ttl > Duration::ZERO;
+
         // Check cache
-        {
+        if should_use_cache {
             let cache = self.cache.read();
             if let Some(entry) = cache.get(command) {
                 if entry.timestamp.elapsed() < self.cache_ttl {
@@ -62,7 +79,7 @@ impl PowerShellExecutor {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
         // Update cache
-        {
+        if should_use_cache {
             let mut cache = self.cache.write();
             cache.insert(
                 command.to_string(),
@@ -88,6 +105,7 @@ impl Clone for PowerShellExecutor {
             timeout: self.timeout,
             cache: Arc::clone(&self.cache),
             cache_ttl: self.cache_ttl,
+            use_cache: self.use_cache,
         }
     }
 }
