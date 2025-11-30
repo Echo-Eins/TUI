@@ -11,6 +11,27 @@ pub struct RamData {
     pub free: u64,
     pub speed: String,
     pub type_name: String,
+
+    // Memory Breakdown
+    pub in_use: u64,
+    pub standby: u64,
+    pub modified: u64,
+
+    // Committed Memory
+    pub committed: u64,
+    pub commit_limit: u64,
+    pub commit_percent: f64,
+
+    // Top Memory Consumers
+    pub top_processes: Vec<ProcessMemoryInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessMemoryInfo {
+    pub pid: u32,
+    pub name: String,
+    pub working_set: u64,
+    pub private_bytes: u64,
 }
 
 pub struct RamMonitor {
@@ -25,19 +46,31 @@ impl RamMonitor {
     pub async fn collect_data(&self) -> Result<RamData> {
         let memory_info = self.get_memory_info().await?;
         let physical_memory = self.get_physical_memory_info().await?;
+        let detailed_memory = self.get_detailed_memory_breakdown().await?;
+        let committed_memory = self.get_committed_memory().await?;
+        let top_processes = self.get_top_memory_consumers().await?;
 
         Ok(RamData {
             total: memory_info.TotalVisibleMemorySize * 1024,
             used: (memory_info.TotalVisibleMemorySize - memory_info.FreePhysicalMemory) * 1024,
             available: memory_info.FreePhysicalMemory * 1024,
-            cached: if memory_info.TotalVisibleMemorySize > memory_info.FreePhysicalMemory {
-                ((memory_info.TotalVisibleMemorySize - memory_info.FreePhysicalMemory) as f64 * 0.3) as u64 * 1024
-            } else {
-                0
-            },
-            free: memory_info.FreePhysicalMemory * 1024,
+            cached: detailed_memory.cached(),
+            free: detailed_memory.free(),
             speed: physical_memory.speed,
             type_name: physical_memory.memory_type,
+
+            // Memory Breakdown
+            in_use: detailed_memory.in_use(),
+            standby: detailed_memory.standby(),
+            modified: detailed_memory.modified(),
+
+            // Committed Memory
+            committed: committed_memory.committed(),
+            commit_limit: committed_memory.commit_limit(),
+            commit_percent: committed_memory.commit_percent(),
+
+            // Top Memory Consumers
+            top_processes,
         })
     }
 
@@ -75,6 +108,129 @@ impl RamMonitor {
             memory_type: info.MemoryType,
         })
     }
+
+    async fn get_detailed_memory_breakdown(&self) -> Result<DetailedMemory> {
+        let script = r#"
+            $counters = @(
+                '\Memory\Available Bytes',
+                '\Memory\Cache Bytes',
+                '\Memory\Standby Cache Normal Priority Bytes',
+                '\Memory\Standby Cache Reserve Bytes',
+                '\Memory\Standby Cache Core Bytes',
+                '\Memory\Free & Zero Page List Bytes',
+                '\Memory\Modified Page List Bytes'
+            )
+
+            $os = Get-CimInstance Win32_OperatingSystem
+            $total = $os.TotalVisibleMemorySize * 1024
+
+            try {
+                $perfData = Get-Counter -Counter $counters -ErrorAction SilentlyContinue
+
+                $available = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Available Bytes*'}).CookedValue
+                $cached = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Cache Bytes*'}).CookedValue
+                $standbyNormal = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Normal*'}).CookedValue
+                $standbyReserve = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Reserve*'}).CookedValue
+                $standbyCore = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Core*'}).CookedValue
+                $free = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Free & Zero*'}).CookedValue
+                $modified = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Modified Page*'}).CookedValue
+
+                $standby = $standbyNormal + $standbyReserve + $standbyCore
+                $inUse = $total - $available
+
+                [PSCustomObject]@{
+                    InUse = [uint64]$inUse
+                    Available = [uint64]$available
+                    Cached = [uint64]$cached
+                    Standby = [uint64]$standby
+                    Free = [uint64]$free
+                    Modified = [uint64]$modified
+                }
+            } catch {
+                # Fallback to basic memory info
+                [PSCustomObject]@{
+                    InUse = [uint64]($total - $available)
+                    Available = [uint64]$available
+                    Cached = [uint64]($cached)
+                    Standby = [uint64]0
+                    Free = [uint64]($os.FreePhysicalMemory * 1024)
+                    Modified = [uint64]0
+                }
+            } | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        serde_json::from_str(&output).context("Failed to parse detailed memory info")
+    }
+
+    async fn get_committed_memory(&self) -> Result<CommittedMemory> {
+        let script = r#"
+            $counters = @(
+                '\Memory\Committed Bytes',
+                '\Memory\Commit Limit'
+            )
+
+            try {
+                $perfData = Get-Counter -Counter $counters -ErrorAction SilentlyContinue
+
+                $committed = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Committed Bytes*'}).CookedValue
+                $commitLimit = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Commit Limit*'}).CookedValue
+
+                $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
+
+                [PSCustomObject]@{
+                    Committed = [uint64]$committed
+                    CommitLimit = [uint64]$commitLimit
+                    CommitPercent = [double]$commitPercent
+                }
+            } catch {
+                $os = Get-CimInstance Win32_OperatingSystem
+                $pageFile = Get-CimInstance Win32_PageFileUsage | Select-Object -First 1
+
+                $committed = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) * 1024
+                $commitLimit = ($os.TotalVisibleMemorySize * 1024) + ($pageFile.AllocatedBaseSize * 1024 * 1024)
+                $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
+
+                [PSCustomObject]@{
+                    Committed = [uint64]$committed
+                    CommitLimit = [uint64]$commitLimit
+                    CommitPercent = [double]$commitPercent
+                }
+            } | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        serde_json::from_str(&output).context("Failed to parse committed memory info")
+    }
+
+    async fn get_top_memory_consumers(&self) -> Result<Vec<ProcessMemoryInfo>> {
+        let script = r#"
+            Get-Process |
+                Sort-Object WorkingSet64 -Descending |
+                Select-Object -First 10 |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Pid = $_.Id
+                        Name = $_.ProcessName
+                        WorkingSet = [uint64]$_.WorkingSet64
+                        PrivateBytes = [uint64]$_.PrivateMemorySize64
+                    }
+                } | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        // Handle both single object and array responses
+        let processes: Vec<ProcessMemoryInfo> = if output.trim().starts_with('[') {
+            serde_json::from_str(&output).context("Failed to parse top processes")?
+        } else {
+            let single: ProcessMemoryInfo = serde_json::from_str(&output)
+                .context("Failed to parse single process")?;
+            vec![single]
+        };
+
+        Ok(processes)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,4 +249,35 @@ struct PhysicalMemory {
 struct PhysicalMemoryInfo {
     speed: String,
     memory_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DetailedMemory {
+    InUse: u64,
+    Available: u64,
+    Cached: u64,
+    Standby: u64,
+    Free: u64,
+    Modified: u64,
+}
+
+impl DetailedMemory {
+    fn in_use(&self) -> u64 { self.InUse }
+    fn cached(&self) -> u64 { self.Cached }
+    fn standby(&self) -> u64 { self.Standby }
+    fn free(&self) -> u64 { self.Free }
+    fn modified(&self) -> u64 { self.Modified }
+}
+
+#[derive(Debug, Deserialize)]
+struct CommittedMemory {
+    Committed: u64,
+    CommitLimit: u64,
+    CommitPercent: f64,
+}
+
+impl CommittedMemory {
+    fn committed(&self) -> u64 { self.Committed }
+    fn commit_limit(&self) -> u64 { self.CommitLimit }
+    fn commit_percent(&self) -> f64 { self.CommitPercent }
 }
