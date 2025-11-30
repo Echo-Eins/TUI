@@ -43,6 +43,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
             Constraint::Length(3),  // Header
             Constraint::Length(3),  // Overall usage
             Constraint::Length(3),  // Committed memory
+            Constraint::Length(3),  // Pagefile gauge
             Constraint::Length(9),  // Memory breakdown
             Constraint::Min(8),     // Top processes
         ])
@@ -94,11 +95,14 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
 
     f.render_widget(commit_gauge, chunks[2]);
 
+    // Pagefile gauge
+    render_pagefile_gauge(f, chunks[3], data, theme);
+
     // Memory breakdown
-    render_memory_breakdown(f, chunks[3], data, theme);
+    render_memory_breakdown(f, chunks[4], data, theme);
 
     // Top processes
-    render_top_processes(f, chunks[4], data, theme);
+    render_top_processes(f, chunks[5], data, theme);
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
@@ -126,7 +130,7 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
     let usage_percent = ((data.used as f64 / data.total as f64) * 100.0) as f32;
     let commit_percent = data.commit_percent as f32;
 
-    let info_text = vec![
+    let mut info_text = vec![
         Line::from(vec![
             Span::raw("Usage:     "),
             Span::styled(
@@ -143,6 +147,23 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
         ]),
     ];
 
+    // Add pagefile info if configured
+    if data.total_pagefile_size > 0 {
+        let pagefile_percent = if data.total_pagefile_size > 0 {
+            ((data.total_pagefile_used as f64 / data.total_pagefile_size as f64) * 100.0) as f32
+        } else {
+            0.0
+        };
+
+        info_text.push(Line::from(vec![
+            Span::raw("Pagefile:  "),
+            Span::styled(
+                format!("{}%  {}", pagefile_percent as u16, create_progress_bar(pagefile_percent, 20)),
+                Style::default().fg(Color::Magenta)
+            ),
+        ]));
+    }
+
     let info_block = Block::default()
         .borders(Borders::ALL)
         .title("Memory Info");
@@ -155,7 +176,7 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
 }
 
 fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
-    let breakdown_text = vec![
+    let mut breakdown_text = vec![
         Line::from(vec![
             Span::raw("  In Use:     "),
             Span::styled(
@@ -224,6 +245,31 @@ fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::Ra
         ]),
     ];
 
+    // Add pagefile details if configured
+    if !data.pagefiles.is_empty() {
+        breakdown_text.push(Line::from(""));  // Empty line for spacing
+        for (i, pf) in data.pagefiles.iter().enumerate() {
+            let pf_name = if data.pagefiles.len() > 1 {
+                format!("  PF{}:       ", i + 1)
+            } else {
+                "  Pagefile:  ".to_string()
+            };
+
+            breakdown_text.push(Line::from(vec![
+                Span::raw(pf_name),
+                Span::styled(
+                    format!("{:>12}  ", format_bytes(pf.current_usage)),
+                    Style::default().fg(Color::Magenta)
+                ),
+                Span::raw(create_progress_bar(pf.usage_percent as f32, 30)),
+                Span::styled(
+                    format!(" / {}", format_bytes(pf.total_size)),
+                    Style::default().fg(Color::Gray)
+                ),
+            ]));
+        }
+    }
+
     let breakdown_block = Block::default()
         .borders(Borders::ALL)
         .title("Memory Breakdown")
@@ -234,6 +280,65 @@ fn render_memory_breakdown(f: &mut Frame, area: Rect, data: &crate::monitors::Ra
         .style(Style::default().fg(Color::White));
 
     f.render_widget(breakdown_para, area);
+}
+
+fn render_pagefile_gauge(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
+    if data.total_pagefile_size == 0 {
+        // No pagefile configured
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Pagefile")
+            .border_style(Style::default().fg(Color::Gray));
+
+        let text = Paragraph::new("No pagefile configured")
+            .block(block)
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(text, area);
+    } else if data.pagefiles.len() == 1 {
+        // Single pagefile
+        let pf = &data.pagefiles[0];
+        let pagefile_percent = pf.usage_percent.min(100.0) as u16;
+
+        let gauge = Gauge::default()
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Pagefile: {}", pf.name))
+                .border_style(Style::default().fg(theme.disk_color))
+            )
+            .gauge_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            .percent(pagefile_percent)
+            .label(format!("{}% - {} / {}",
+                pagefile_percent,
+                format_bytes(pf.current_usage),
+                format_bytes(pf.total_size)
+            ));
+
+        f.render_widget(gauge, area);
+    } else {
+        // Multiple pagefiles - show total
+        let total_percent = if data.total_pagefile_size > 0 {
+            ((data.total_pagefile_used as f64 / data.total_pagefile_size as f64) * 100.0).min(100.0) as u16
+        } else {
+            0
+        };
+
+        let gauge = Gauge::default()
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Pagefile (Total: {} files)", data.pagefiles.len()))
+                .border_style(Style::default().fg(theme.disk_color))
+            )
+            .gauge_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            .percent(total_percent)
+            .label(format!("{}% - {} / {}",
+                total_percent,
+                format_bytes(data.total_pagefile_used),
+                format_bytes(data.total_pagefile_size)
+            ));
+
+        f.render_widget(gauge, area);
+    }
 }
 
 fn render_top_processes(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {

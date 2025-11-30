@@ -24,6 +24,11 @@ pub struct RamData {
 
     // Top Memory Consumers
     pub top_processes: Vec<ProcessMemoryInfo>,
+
+    // Pagefile Information
+    pub pagefiles: Vec<PagefileInfo>,
+    pub total_pagefile_size: u64,
+    pub total_pagefile_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +37,15 @@ pub struct ProcessMemoryInfo {
     pub name: String,
     pub working_set: u64,
     pub private_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PagefileInfo {
+    pub name: String,
+    pub total_size: u64,
+    pub current_usage: u64,
+    pub peak_usage: u64,
+    pub usage_percent: f64,
 }
 
 pub struct RamMonitor {
@@ -49,6 +63,10 @@ impl RamMonitor {
         let detailed_memory = self.get_detailed_memory_breakdown().await?;
         let committed_memory = self.get_committed_memory().await?;
         let top_processes = self.get_top_memory_consumers().await?;
+        let pagefiles = self.get_pagefile_info().await?;
+
+        let total_pagefile_size: u64 = pagefiles.iter().map(|pf| pf.total_size).sum();
+        let total_pagefile_used: u64 = pagefiles.iter().map(|pf| pf.current_usage).sum();
 
         Ok(RamData {
             total: memory_info.TotalVisibleMemorySize * 1024,
@@ -71,6 +89,11 @@ impl RamMonitor {
 
             // Top Memory Consumers
             top_processes,
+
+            // Pagefile Information
+            pagefiles,
+            total_pagefile_size,
+            total_pagefile_used,
         })
     }
 
@@ -230,6 +253,51 @@ impl RamMonitor {
         };
 
         Ok(processes)
+    }
+
+    async fn get_pagefile_info(&self) -> Result<Vec<PagefileInfo>> {
+        let script = r#"
+            $pagefiles = Get-CimInstance Win32_PageFileUsage
+
+            if ($pagefiles) {
+                $result = @()
+                foreach ($pf in $pagefiles) {
+                    $totalSize = [uint64]($pf.AllocatedBaseSize * 1024 * 1024)
+                    $currentUsage = [uint64]($pf.CurrentUsage * 1024 * 1024)
+                    $peakUsage = [uint64]($pf.PeakUsage * 1024 * 1024)
+                    $usagePercent = if ($totalSize -gt 0) { ($currentUsage / $totalSize) * 100 } else { 0 }
+
+                    $result += [PSCustomObject]@{
+                        Name = $pf.Name
+                        TotalSize = $totalSize
+                        CurrentUsage = $currentUsage
+                        PeakUsage = $peakUsage
+                        UsagePercent = [double]$usagePercent
+                    }
+                }
+                $result | ConvertTo-Json
+            } else {
+                # No pagefile configured, return empty array
+                "[]"
+            }
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        // Handle empty array, single object, and array responses
+        if output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        let pagefiles: Vec<PagefileInfo> = if output.trim().starts_with('[') {
+            serde_json::from_str(&output).context("Failed to parse pagefiles")?
+        } else {
+            let single: PagefileInfo = serde_json::from_str(&output)
+                .context("Failed to parse single pagefile")?;
+            vec![single]
+        };
+
+        Ok(pagefiles)
     }
 }
 
