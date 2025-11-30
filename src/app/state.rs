@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use super::{Config, TabManager, TabType, monitors_task};
-use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData};
+use crate::monitors::{CpuData, GpuData, RamData, DiskData, NetworkData, ProcessData, ServiceData};
 use crate::integrations::{PowerShellExecutor, ollama::OllamaData};
 use crate::utils::command_history::CommandHistory;
 
@@ -20,6 +20,7 @@ pub struct AppState {
     pub disk_data: Arc<RwLock<Option<DiskData>>>,
     pub network_data: Arc<RwLock<Option<NetworkData>>>,
     pub process_data: Arc<RwLock<Option<ProcessData>>>,
+    pub service_data: Arc<RwLock<Option<ServiceData>>>,
 
     // Ollama integration
     pub ollama_data: Arc<RwLock<Option<OllamaData>>>,
@@ -32,6 +33,9 @@ pub struct AppState {
 
     // Processes UI state
     pub processes_state: ProcessesUIState,
+
+    // Services UI state
+    pub services_state: ServicesUIState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +56,29 @@ pub struct ProcessesUIState {
     pub filter: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ServiceSortColumn {
+    Name,
+    DisplayName,
+    Status,
+    StartType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceStatusFilter {
+    All,
+    Running,
+    Stopped,
+}
+
+pub struct ServicesUIState {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub sort_column: ServiceSortColumn,
+    pub sort_ascending: bool,
+    pub status_filter: ServiceStatusFilter,
+}
+
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
         let tab_manager = TabManager::new(
@@ -67,6 +94,7 @@ impl AppState {
         let disk_data = Arc::new(RwLock::new(None));
         let network_data = Arc::new(RwLock::new(None));
         let process_data = Arc::new(RwLock::new(None));
+        let service_data = Arc::new(RwLock::new(None));
 
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
@@ -76,6 +104,7 @@ impl AppState {
             Arc::clone(&disk_data),
             Arc::clone(&network_data),
             Arc::clone(&process_data),
+            Arc::clone(&service_data),
             config.powershell.executable.clone(),
             config.powershell.timeout_seconds,
             config.powershell.cache_ttl_seconds,
@@ -92,6 +121,7 @@ impl AppState {
             disk_data,
             network_data,
             process_data,
+            service_data,
 
             ollama_data: Arc::new(RwLock::new(None)),
 
@@ -106,6 +136,14 @@ impl AppState {
                 sort_column: ProcessSortColumn::Cpu,
                 sort_ascending: false,
                 filter: String::new(),
+            },
+
+            services_state: ServicesUIState {
+                selected_index: 0,
+                scroll_offset: 0,
+                sort_column: ServiceSortColumn::Name,
+                sort_ascending: true,
+                status_filter: ServiceStatusFilter::All,
             },
         })
     }
@@ -251,6 +289,76 @@ impl AppState {
                 }
                 KeyCode::Char('/') => {
                     // Enter filter mode (will be handled in UI)
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        // Services tab hotkeys
+        if self.tab_manager.current() == TabType::Services {
+            match key.code {
+                KeyCode::Up => {
+                    if self.services_state.selected_index > 0 {
+                        self.services_state.selected_index -= 1;
+                        if self.services_state.selected_index < self.services_state.scroll_offset {
+                            self.services_state.scroll_offset = self.services_state.selected_index;
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    let service_count = self.service_data.read().as_ref().map(|d| d.services.len()).unwrap_or(0);
+                    if self.services_state.selected_index + 1 < service_count {
+                        self.services_state.selected_index += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if self.services_state.selected_index >= 10 {
+                        self.services_state.selected_index -= 10;
+                    } else {
+                        self.services_state.selected_index = 0;
+                    }
+                    self.services_state.scroll_offset = self.services_state.selected_index;
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    let service_count = self.service_data.read().as_ref().map(|d| d.services.len()).unwrap_or(0);
+                    if self.services_state.selected_index + 10 < service_count {
+                        self.services_state.selected_index += 10;
+                    } else if service_count > 0 {
+                        self.services_state.selected_index = service_count - 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    self.services_state.sort_column = ServiceSortColumn::Name;
+                    self.services_state.sort_ascending = !self.services_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('d') => {
+                    self.services_state.sort_column = ServiceSortColumn::DisplayName;
+                    self.services_state.sort_ascending = !self.services_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('s') => {
+                    self.services_state.sort_column = ServiceSortColumn::Status;
+                    self.services_state.sort_ascending = !self.services_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    self.services_state.sort_column = ServiceSortColumn::StartType;
+                    self.services_state.sort_ascending = !self.services_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('f') => {
+                    // Cycle through filter options
+                    self.services_state.status_filter = match self.services_state.status_filter {
+                        ServiceStatusFilter::All => ServiceStatusFilter::Running,
+                        ServiceStatusFilter::Running => ServiceStatusFilter::Stopped,
+                        ServiceStatusFilter::Stopped => ServiceStatusFilter::All,
+                    };
                     return Ok(true);
                 }
                 _ => {}

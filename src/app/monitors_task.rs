@@ -14,6 +14,7 @@ pub fn spawn_monitor_tasks(
     disk_data: Arc<RwLock<Option<DiskData>>>,
     network_data: Arc<RwLock<Option<NetworkData>>>,
     process_data: Arc<RwLock<Option<ProcessData>>>,
+    service_data: Arc<RwLock<Option<ServiceData>>>,
     ps_executable: String,
     timeout: u64,
     cache_ttl: u64,
@@ -113,7 +114,7 @@ pub fn spawn_monitor_tasks(
     // Process monitor task
     {
         let process_data = Arc::clone(&process_data);
-        let ps = PowerShellExecutor::new(ps_executable, timeout, cache_ttl);
+        let ps = PowerShellExecutor::new(ps_executable.clone(), timeout, cache_ttl);
         tokio::spawn(async move {
             let monitor = ProcessMonitor::new(ps).unwrap();
             loop {
@@ -121,6 +122,21 @@ pub fn spawn_monitor_tasks(
                     *process_data.write() = Some(data);
                 }
                 sleep(Duration::from_millis(2000)).await;
+            }
+        });
+    }
+
+    // Service monitor task
+    {
+        let service_data = Arc::clone(&service_data);
+        let ps = PowerShellExecutor::new(ps_executable, timeout, cache_ttl);
+        tokio::spawn(async move {
+            let monitor = ServiceMonitor::new(ps).unwrap();
+            loop {
+                if let Ok(data) = monitor.collect_data().await {
+                    *service_data.write() = Some(data);
+                }
+                sleep(Duration::from_millis(3000)).await;
             }
         });
     }
