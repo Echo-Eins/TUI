@@ -1,11 +1,44 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::PowerShellExecutor;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskData {
     pub physical_disks: Vec<PhysicalDiskInfo>,
     pub logical_drives: Vec<DriveInfo>,
+    pub io_stats: Vec<DiskIOStats>,
+    pub process_activity: Vec<DiskProcessActivity>,
+    pub io_history: Vec<DiskIOHistory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIOStats {
+    pub disk_number: u32,
+    pub read_speed: f64,       // MB/s
+    pub write_speed: f64,      // MB/s
+    pub read_iops: f64,        // Operations per second
+    pub write_iops: f64,       // Operations per second
+    pub queue_depth: f64,      // Average queue length
+    pub avg_response_time: f64,// Milliseconds
+    pub active_time: f64,      // Percentage
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskProcessActivity {
+    pub process_name: String,
+    pub pid: u32,
+    pub io_bytes_per_sec: f64, // Total I/O bytes per second
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIOHistory {
+    pub disk_number: u32,
+    pub read_history: VecDeque<f64>,   // Last 60 samples of read speed
+    pub write_history: VecDeque<f64>,  // Last 60 samples of write speed
+    pub iops_history: VecDeque<f64>,   // Last 60 samples of total IOPS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,20 +77,61 @@ pub struct DriveInfo {
 
 pub struct DiskMonitor {
     ps: PowerShellExecutor,
+    io_history_map: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u32, DiskIOHistory>>>,
 }
 
 impl DiskMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self { ps })
+        Ok(Self {
+            ps,
+            io_history_map: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        })
     }
 
     pub async fn collect_data(&self) -> Result<DiskData> {
         let physical_disks = self.get_physical_disks().await?;
         let logical_drives = self.get_logical_drives().await?;
+        let io_stats = self.get_io_stats().await?;
+        let process_activity = self.get_process_activity().await?;
+
+        // Update history
+        let mut history_map = self.io_history_map.lock();
+        for stat in &io_stats {
+            let history = history_map
+                .entry(stat.disk_number)
+                .or_insert_with(|| DiskIOHistory {
+                    disk_number: stat.disk_number,
+                    read_history: VecDeque::with_capacity(60),
+                    write_history: VecDeque::with_capacity(60),
+                    iops_history: VecDeque::with_capacity(60),
+                });
+
+            // Add new data points
+            history.read_history.push_back(stat.read_speed);
+            history.write_history.push_back(stat.write_speed);
+            history.iops_history.push_back(stat.read_iops + stat.write_iops);
+
+            // Keep only last 60 samples
+            if history.read_history.len() > 60 {
+                history.read_history.pop_front();
+            }
+            if history.write_history.len() > 60 {
+                history.write_history.pop_front();
+            }
+            if history.iops_history.len() > 60 {
+                history.iops_history.pop_front();
+            }
+        }
+
+        let io_history: Vec<DiskIOHistory> = history_map.values().cloned().collect();
+        drop(history_map);
 
         Ok(DiskData {
             physical_disks,
             logical_drives,
+            io_stats,
+            process_activity,
+            io_history,
         })
     }
 
@@ -244,6 +318,215 @@ impl DiskMonitor {
             })
             .collect())
     }
+
+    async fn get_io_stats(&self) -> Result<Vec<DiskIOStats>> {
+        let script = r#"
+            $disks = Get-PhysicalDisk
+            $result = @()
+
+            foreach ($disk in $disks) {
+                try {
+                    # Get I/O performance counters for this disk
+                    $diskId = $disk.DeviceId
+
+                    # PhysicalDisk counters
+                    $readBytesPath = "\PhysicalDisk($diskId *)\Disk Read Bytes/sec"
+                    $writeBytesPath = "\PhysicalDisk($diskId *)\Disk Write Bytes/sec"
+                    $readOpsPath = "\PhysicalDisk($diskId *)\Disk Reads/sec"
+                    $writeOpsPath = "\PhysicalDisk($diskId *)\Disk Writes/sec"
+                    $queuePath = "\PhysicalDisk($diskId *)\Current Disk Queue Length"
+                    $avgSecPath = "\PhysicalDisk($diskId *)\Avg. Disk sec/Transfer"
+                    $activeTimePath = "\PhysicalDisk($diskId *)\% Disk Time"
+
+                    # Try to get performance counters
+                    $counters = @()
+                    try {
+                        $counters = Get-Counter -Counter @(
+                            $readBytesPath,
+                            $writeBytesPath,
+                            $readOpsPath,
+                            $writeOpsPath,
+                            $queuePath,
+                            $avgSecPath,
+                            $activeTimePath
+                        ) -ErrorAction SilentlyContinue
+                    } catch {}
+
+                    $readSpeed = 0.0
+                    $writeSpeed = 0.0
+                    $readIOPS = 0.0
+                    $writeIOPS = 0.0
+                    $queueDepth = 0.0
+                    $avgResponseTime = 0.0
+                    $activeTime = 0.0
+
+                    if ($counters -and $counters.CounterSamples) {
+                        foreach ($sample in $counters.CounterSamples) {
+                            if ($sample.Path -like "*Read Bytes/sec*") {
+                                $readSpeed = [math]::Round($sample.CookedValue / 1MB, 2)
+                            }
+                            elseif ($sample.Path -like "*Write Bytes/sec*") {
+                                $writeSpeed = [math]::Round($sample.CookedValue / 1MB, 2)
+                            }
+                            elseif ($sample.Path -like "*Reads/sec*") {
+                                $readIOPS = [math]::Round($sample.CookedValue, 2)
+                            }
+                            elseif ($sample.Path -like "*Writes/sec*") {
+                                $writeIOPS = [math]::Round($sample.CookedValue, 2)
+                            }
+                            elseif ($sample.Path -like "*Queue Length*") {
+                                $queueDepth = [math]::Round($sample.CookedValue, 2)
+                            }
+                            elseif ($sample.Path -like "*sec/Transfer*") {
+                                $avgResponseTime = [math]::Round($sample.CookedValue * 1000, 2)
+                            }
+                            elseif ($sample.Path -like "*% Disk Time*") {
+                                $activeTime = [math]::Round($sample.CookedValue, 2)
+                            }
+                        }
+                    }
+
+                    $result += [PSCustomObject]@{
+                        DiskNumber = $diskId
+                        ReadSpeed = $readSpeed
+                        WriteSpeed = $writeSpeed
+                        ReadIOPS = $readIOPS
+                        WriteIOPS = $writeIOPS
+                        QueueDepth = $queueDepth
+                        AvgResponseTime = $avgResponseTime
+                        ActiveTime = $activeTime
+                    }
+                } catch {
+                    # If performance counters fail, return zeros for this disk
+                    $result += [PSCustomObject]@{
+                        DiskNumber = $disk.DeviceId
+                        ReadSpeed = 0.0
+                        WriteSpeed = 0.0
+                        ReadIOPS = 0.0
+                        WriteIOPS = 0.0
+                        QueueDepth = 0.0
+                        AvgResponseTime = 0.0
+                        ActiveTime = 0.0
+                    }
+                }
+            }
+
+            $result | ConvertTo-Json -Depth 2
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        if output.trim().is_empty() || output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        let stats: Vec<IOStatsSample> = if output.trim().starts_with('[') {
+            serde_json::from_str(&output).context("Failed to parse I/O stats")?
+        } else {
+            let single: IOStatsSample = serde_json::from_str(&output)
+                .context("Failed to parse single I/O stat")?;
+            vec![single]
+        };
+
+        Ok(stats
+            .into_iter()
+            .map(|s| DiskIOStats {
+                disk_number: s.DiskNumber,
+                read_speed: s.ReadSpeed.unwrap_or(0.0),
+                write_speed: s.WriteSpeed.unwrap_or(0.0),
+                read_iops: s.ReadIOPS.unwrap_or(0.0),
+                write_iops: s.WriteIOPS.unwrap_or(0.0),
+                queue_depth: s.QueueDepth.unwrap_or(0.0),
+                avg_response_time: s.AvgResponseTime.unwrap_or(0.0),
+                active_time: s.ActiveTime.unwrap_or(0.0),
+            })
+            .collect())
+    }
+
+    async fn get_process_activity(&self) -> Result<Vec<DiskProcessActivity>> {
+        let script = r#"
+            # Get top 10 processes by I/O activity
+            $processes = Get-Counter '\Process(*)\IO Data Bytes/sec' -ErrorAction SilentlyContinue
+
+            $result = @()
+
+            if ($processes -and $processes.CounterSamples) {
+                $sorted = $processes.CounterSamples |
+                    Where-Object { $_.CookedValue -gt 0 } |
+                    Sort-Object -Property CookedValue -Descending |
+                    Select-Object -First 10
+
+                foreach ($sample in $sorted) {
+                    # Extract process name from path
+                    if ($sample.Path -match '\\Process\(([^)]+)\)') {
+                        $processName = $matches[1]
+
+                        # Try to get PID and more details
+                        try {
+                            $proc = Get-Process -Name $processName -ErrorAction SilentlyContinue | Select-Object -First 1
+
+                            if ($proc) {
+                                # Try to get read/write breakdown (may not be available for all processes)
+                                $readBytes = 0.0
+                                $writeBytes = 0.0
+
+                                try {
+                                    $readCounter = Get-Counter "\Process($processName)\IO Read Bytes/sec" -ErrorAction SilentlyContinue
+                                    if ($readCounter) {
+                                        $readBytes = $readCounter.CounterSamples[0].CookedValue
+                                    }
+                                } catch {}
+
+                                try {
+                                    $writeCounter = Get-Counter "\Process($processName)\IO Write Bytes/sec" -ErrorAction SilentlyContinue
+                                    if ($writeCounter) {
+                                        $writeBytes = $writeCounter.CounterSamples[0].CookedValue
+                                    }
+                                } catch {}
+
+                                $result += [PSCustomObject]@{
+                                    ProcessName = $processName
+                                    PID = $proc.Id
+                                    IOBytesPerSec = [math]::Round($sample.CookedValue, 2)
+                                    ReadBytesPerSec = [math]::Round($readBytes, 2)
+                                    WriteBytesPerSec = [math]::Round($writeBytes, 2)
+                                }
+                            }
+                        } catch {
+                            # If we can't get process details, skip it
+                        }
+                    }
+                }
+            }
+
+            $result | ConvertTo-Json -Depth 2
+        "#;
+
+        let output = self.ps.execute(script).await?;
+
+        if output.trim().is_empty() || output.trim() == "[]" {
+            return Ok(Vec::new());
+        }
+
+        let activities: Vec<ProcessActivitySample> = if output.trim().starts_with('[') {
+            serde_json::from_str(&output).context("Failed to parse process activity")?
+        } else {
+            let single: ProcessActivitySample = serde_json::from_str(&output)
+                .context("Failed to parse single process activity")?;
+            vec![single]
+        };
+
+        Ok(activities
+            .into_iter()
+            .map(|a| DiskProcessActivity {
+                process_name: a.ProcessName,
+                pid: a.PID,
+                io_bytes_per_sec: a.IOBytesPerSec.unwrap_or(0.0),
+                read_bytes_per_sec: a.ReadBytesPerSec.unwrap_or(0.0),
+                write_bytes_per_sec: a.WriteBytesPerSec.unwrap_or(0.0),
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,4 +556,25 @@ struct PhysicalDiskSample {
     TBW: Option<u64>,
     WearLevel: Option<f32>,
     Partitions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IOStatsSample {
+    DiskNumber: u32,
+    ReadSpeed: Option<f64>,
+    WriteSpeed: Option<f64>,
+    ReadIOPS: Option<f64>,
+    WriteIOPS: Option<f64>,
+    QueueDepth: Option<f64>,
+    AvgResponseTime: Option<f64>,
+    ActiveTime: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessActivitySample {
+    ProcessName: String,
+    PID: u32,
+    IOBytesPerSec: Option<f64>,
+    ReadBytesPerSec: Option<f64>,
+    WriteBytesPerSec: Option<f64>,
 }

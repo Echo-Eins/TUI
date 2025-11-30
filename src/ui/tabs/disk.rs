@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph, Row, Table, Sparkline},
     Frame,
 };
 
@@ -125,7 +125,8 @@ fn render_physical_disk(
         .constraints([
             Constraint::Length(3),  // Header with model and health
             Constraint::Length(3),  // Overall usage
-            Constraint::Min(5),     // Details and partitions
+            Constraint::Length(8),  // I/O graphs
+            Constraint::Min(8),     // Details, partitions, and process table
         ])
         .split(area);
 
@@ -181,8 +182,165 @@ fn render_physical_disk(
 
     f.render_widget(gauge, chunks[1]);
 
-    // Details
-    render_disk_details(f, chunks[2], disk, all_data, theme);
+    // I/O Statistics and Graphs
+    render_io_stats(f, chunks[2], disk, all_data, theme);
+
+    // Details, partitions, and process table
+    render_disk_details(f, chunks[3], disk, all_data, theme);
+}
+
+fn render_io_stats(
+    f: &mut Frame,
+    area: Rect,
+    disk: &crate::monitors::PhysicalDiskInfo,
+    all_data: &crate::monitors::DiskData,
+    theme: &Theme,
+) {
+    // Find I/O stats for this disk
+    let io_stat = all_data.io_stats.iter()
+        .find(|s| s.disk_number == disk.disk_number);
+
+    // Find I/O history for this disk
+    let io_history = all_data.io_history.iter()
+        .find(|h| h.disk_number == disk.disk_number);
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(40),  // I/O metrics text
+            Constraint::Percentage(60),  // Graphs
+        ])
+        .split(area);
+
+    // Left side: I/O metrics
+    let mut metrics_lines = vec![];
+
+    if let Some(stat) = io_stat {
+        metrics_lines.push(Line::from(vec![
+            Span::styled("I/O Activity", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]));
+
+        metrics_lines.push(Line::from(vec![
+            Span::raw(format!("  Read:  {:.2} MB/s  ", stat.read_speed)),
+            Span::styled(format!("{:.0} IOPS", stat.read_iops), Style::default().fg(Color::Green)),
+        ]));
+
+        metrics_lines.push(Line::from(vec![
+            Span::raw(format!("  Write: {:.2} MB/s  ", stat.write_speed)),
+            Span::styled(format!("{:.0} IOPS", stat.write_iops), Style::default().fg(Color::Cyan)),
+        ]));
+
+        metrics_lines.push(Line::from(vec![
+            Span::raw(format!("  Queue Depth: ")),
+            Span::styled(format!("{:.1}", stat.queue_depth), Style::default().fg(Color::Magenta)),
+        ]));
+
+        metrics_lines.push(Line::from(vec![
+            Span::raw(format!("  Avg Response: ")),
+            Span::styled(format!("{:.2} ms", stat.avg_response_time), Style::default().fg(Color::Yellow)),
+        ]));
+
+        metrics_lines.push(Line::from(vec![
+            Span::raw(format!("  Active Time: ")),
+            Span::styled(format!("{:.1}%", stat.active_time), Style::default().fg(get_usage_color(stat.active_time as f32))),
+        ]));
+    } else {
+        metrics_lines.push(Line::from("No I/O statistics available"));
+    }
+
+    let metrics_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.disk_color))
+        .title("I/O Statistics");
+
+    let metrics_para = Paragraph::new(metrics_lines)
+        .block(metrics_block)
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(metrics_para, chunks[0]);
+
+    // Right side: Graphs
+    render_io_graphs(f, chunks[1], io_history, theme);
+}
+
+fn render_io_graphs(
+    f: &mut Frame,
+    area: Rect,
+    io_history: Option<&crate::monitors::DiskIOHistory>,
+    theme: &Theme,
+) {
+    if let Some(history) = io_history {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+            ])
+            .split(area);
+
+        // Read speed graph
+        if !history.read_history.is_empty() {
+            let data: Vec<u64> = history.read_history.iter().map(|&v| v as u64).collect();
+            let max_value = data.iter().max().copied().unwrap_or(1).max(1);
+
+            let sparkline = Sparkline::default()
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Read (max {:.1} MB/s)", max_value))
+                    .border_style(Style::default().fg(Color::Green)))
+                .data(&data)
+                .style(Style::default().fg(Color::Green))
+                .max(max_value);
+
+            f.render_widget(sparkline, chunks[0]);
+        }
+
+        // Write speed graph
+        if !history.write_history.is_empty() {
+            let data: Vec<u64> = history.write_history.iter().map(|&v| v as u64).collect();
+            let max_value = data.iter().max().copied().unwrap_or(1).max(1);
+
+            let sparkline = Sparkline::default()
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Write (max {:.1} MB/s)", max_value))
+                    .border_style(Style::default().fg(Color::Cyan)))
+                .data(&data)
+                .style(Style::default().fg(Color::Cyan))
+                .max(max_value);
+
+            f.render_widget(sparkline, chunks[1]);
+        }
+
+        // IOPS graph
+        if !history.iops_history.is_empty() {
+            let data: Vec<u64> = history.iops_history.iter().map(|&v| v as u64).collect();
+            let max_value = data.iter().max().copied().unwrap_or(1).max(1);
+
+            let sparkline = Sparkline::default()
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Total IOPS (max {})", max_value))
+                    .border_style(Style::default().fg(Color::Yellow)))
+                .data(&data)
+                .style(Style::default().fg(Color::Yellow))
+                .max(max_value);
+
+            f.render_widget(sparkline, chunks[2]);
+        }
+    } else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("I/O Graphs")
+            .border_style(Style::default().fg(theme.disk_color));
+
+        let text = Paragraph::new("Building graph history...")
+            .block(block)
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(text, area);
+    }
 }
 
 fn render_disk_details(
@@ -192,6 +350,15 @@ fn render_disk_details(
     all_data: &crate::monitors::DiskData,
     theme: &Theme,
 ) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),  // Details and partitions
+            Constraint::Percentage(50),  // Process table
+        ])
+        .split(area);
+
+    // Left side: Details and partitions
     let mut detail_lines = vec![];
 
     // Health and operational status
@@ -249,8 +416,8 @@ fn render_disk_details(
                         Style::default().fg(Color::Cyan)
                     ),
                     Span::raw("  "),
-                    Span::raw(create_progress_bar(usage_pct, 20)),
-                    Span::raw(format!("  {} / {}", format_bytes(drive.used), format_bytes(drive.total))),
+                    Span::raw(create_progress_bar(usage_pct, 15)),
+                    Span::raw(format!("  {:.0}%", usage_pct)),
                 ]));
             }
         }
@@ -258,14 +425,80 @@ fn render_disk_details(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Details")
+        .title("Details & Partitions")
         .border_style(Style::default().fg(theme.disk_color));
 
     let para = Paragraph::new(detail_lines)
         .block(block)
         .style(Style::default().fg(Color::White));
 
-    f.render_widget(para, area);
+    f.render_widget(para, chunks[0]);
+
+    // Right side: Process table
+    render_process_table(f, chunks[1], all_data, theme);
+}
+
+fn render_process_table(
+    f: &mut Frame,
+    area: Rect,
+    all_data: &crate::monitors::DiskData,
+    theme: &Theme,
+) {
+    if all_data.process_activity.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Top Processes by Disk I/O")
+            .border_style(Style::default().fg(theme.disk_color));
+
+        let text = Paragraph::new("No process activity detected")
+            .block(block)
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(text, area);
+        return;
+    }
+
+    // Create table rows
+    let header = Row::new(vec!["Process", "PID", "I/O/s"])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .bottom_margin(1);
+
+    let rows: Vec<Row> = all_data.process_activity.iter().take(6).map(|proc| {
+        let io_formatted = if proc.io_bytes_per_sec > 1_000_000.0 {
+            format!("{:.1} MB/s", proc.io_bytes_per_sec / 1_000_000.0)
+        } else if proc.io_bytes_per_sec > 1_000.0 {
+            format!("{:.1} KB/s", proc.io_bytes_per_sec / 1_000.0)
+        } else {
+            format!("{:.0} B/s", proc.io_bytes_per_sec)
+        };
+
+        Row::new(vec![
+            format!("{:20}", if proc.process_name.len() > 20 {
+                format!("{}...", &proc.process_name[..17])
+            } else {
+                proc.process_name.clone()
+            }),
+            format!("{:6}", proc.pid),
+            io_formatted,
+        ])
+        .style(Style::default().fg(Color::White))
+    }).collect();
+
+    let widths = [
+        Constraint::Percentage(50),
+        Constraint::Percentage(20),
+        Constraint::Percentage(30),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Top Processes by Disk I/O")
+            .border_style(Style::default().fg(theme.disk_color)))
+        .column_spacing(1);
+
+    f.render_widget(table, area);
 }
 
 fn get_health_indicator(health_status: &str) -> &'static str {
