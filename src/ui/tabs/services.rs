@@ -194,6 +194,34 @@ fn render_service_table(
         app.state.services_state.sort_column,
         app.state.services_state.sort_ascending,
     );
+    let selected_index = if services.is_empty() {
+        0
+    } else {
+        app.state
+            .services_state
+            .selected_index
+            .min(services.len().saturating_sub(1))
+    };
+
+    let content_height = area.height.saturating_sub(2);
+    let footer_height = if area.height > 2 { 1 } else { 0 };
+    let header_height = 1u16;
+    let visible_rows = content_height
+        .saturating_sub(header_height + footer_height) as usize;
+
+    let mut scroll_offset = app.state.services_state.scroll_offset;
+    if selected_index < scroll_offset {
+        scroll_offset = selected_index;
+    } else if visible_rows > 0 && selected_index >= scroll_offset + visible_rows {
+        scroll_offset = selected_index + 1 - visible_rows;
+    }
+    if visible_rows == 0 {
+        scroll_offset = 0;
+    } else if services.len() > visible_rows {
+        scroll_offset = scroll_offset.min(services.len() - visible_rows);
+    } else {
+        scroll_offset = 0;
+    }
 
     // Create table header with sort indicators
     let sort_indicator = if app.state.services_state.sort_ascending {
@@ -259,8 +287,10 @@ fn render_service_table(
     let rows: Vec<Row> = services
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows.max(0))
         .map(|(i, service)| {
-            let is_selected = i == app.state.services_state.selected_index;
+            let is_selected = i == selected_index;
             let base_style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
@@ -368,8 +398,17 @@ fn render_details_panel(
         app.state.services_state.sort_ascending,
     );
 
+    let selected_index = if services.is_empty() {
+        0
+    } else {
+        app.state
+            .services_state
+            .selected_index
+            .min(services.len().saturating_sub(1))
+    };
+
     // Get selected service
-    if let Some(service) = services.get(app.state.services_state.selected_index) {
+    if let Some(service) = services.get(selected_index) {
         let mut details = Vec::new();
 
         details.push(Line::from(vec![Span::styled(
@@ -555,3 +594,5 @@ fn sort_services(services: &mut Vec<ServiceEntry>, column: ServiceSortColumn, as
         }
     });
 }
+
+
