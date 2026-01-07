@@ -7,7 +7,7 @@ compact_mode = false
 theme = "dark"
 
 [tabs]
-enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services"]
+enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services", "disk_analyzer"]
 default = "cpu"
 
 [monitors.cpu]
@@ -64,8 +64,9 @@ show_vram_usage = true
 
 [integrations.everything]
 enabled = true
-es_executable = "C:\\Program Files\\Everything\\es.exe"
+es_executable = "D:\\Coding\\everything\\Everything 1.5a\\es.exe"
 max_depth = 10
+refresh_interval_ms = 5000
 
 [ui]
 mouse_support = true
@@ -106,7 +107,7 @@ settings = "0"
 
 [powershell]
 executable = "powershell.exe"
-timeout_seconds = 10
+timeout_seconds = 30
 use_cache = true
 cache_ttl_seconds = 2
 

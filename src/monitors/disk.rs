@@ -217,6 +217,8 @@ const LOGICAL_DRIVES_SCRIPT: &str = r#"
 const IO_STATS_SCRIPT: &str = r#"
     if (-not (Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
         "[]"
+    } elseif (-not (Get-Command Get-Counter -ErrorAction SilentlyContinue)) {
+        "[]"
     } else {
         $disks = Get-PhysicalDisk -ErrorAction SilentlyContinue
         $result = @()
@@ -309,10 +311,13 @@ const IO_STATS_SCRIPT: &str = r#"
 "#;
 
 const PROCESS_ACTIVITY_SCRIPT: &str = r#"
-    try {
-        $processes = Get-Counter '\Process(*)\IO Data Bytes/sec' -ErrorAction Stop
+    if (-not (Get-Command Get-Counter -ErrorAction SilentlyContinue)) {
+        "[]"
+    } else {
+        try {
+            $processes = Get-Counter '\Process(*)\IO Data Bytes/sec' -ErrorAction Stop
 
-        $result = @()
+            $result = @()
 
         if ($processes -and $processes.CounterSamples) {
             $sorted = $processes.CounterSamples |
@@ -359,9 +364,10 @@ const PROCESS_ACTIVITY_SCRIPT: &str = r#"
             }
         }
 
-        $result | ConvertTo-Json -Depth 2
-    } catch {
-        "[]"
+            $result | ConvertTo-Json -Depth 2
+        } catch {
+            "[]"
+        }
     }
 "#;
 

@@ -27,6 +27,8 @@ async fn main() -> Result<()> {
     // Initialize logger
     env_logger::init();
 
+    set_console_utf8();
+
     // Setup terminal with proper error handling
     if let Err(e) = setup_terminal().await {
         eprintln!("Failed to setup terminal: {}", e);
@@ -35,6 +37,23 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(windows)]
+fn set_console_utf8() {
+    use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+
+    unsafe {
+        if SetConsoleOutputCP(65001) == 0 {
+            log::warn!("Failed to set console output codepage to UTF-8");
+        }
+        if SetConsoleCP(65001) == 0 {
+            log::warn!("Failed to set console input codepage to UTF-8");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_console_utf8() {}
 
 async fn setup_terminal() -> Result<()> {
     enable_raw_mode()?;

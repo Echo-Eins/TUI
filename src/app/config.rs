@@ -147,6 +147,8 @@ pub struct EverythingConfig {
     pub enabled: bool,
     pub es_executable: String,
     pub max_depth: usize,
+    #[serde(default = "default_everything_refresh_interval_ms")]
+    pub refresh_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -202,6 +204,10 @@ pub struct PowerShellConfig {
     pub timeout_seconds: u64,
     pub use_cache: bool,
     pub cache_ttl_seconds: u64,
+}
+
+fn default_everything_refresh_interval_ms() -> u64 {
+    5000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

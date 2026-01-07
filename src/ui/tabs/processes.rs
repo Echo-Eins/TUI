@@ -172,6 +172,35 @@ fn render_process_table(
         app.state.processes_state.sort_ascending,
     );
 
+    let selected_index = if processes.is_empty() {
+        0
+    } else {
+        app.state
+            .processes_state
+            .selected_index
+            .min(processes.len().saturating_sub(1))
+    };
+
+    let content_height = area.height.saturating_sub(2);
+    let footer_height = if area.height > 2 { 1 } else { 0 };
+    let header_height = 1u16;
+    let visible_rows = content_height
+        .saturating_sub(header_height + footer_height) as usize;
+
+    let mut scroll_offset = app.state.processes_state.scroll_offset;
+    if selected_index < scroll_offset {
+        scroll_offset = selected_index;
+    } else if visible_rows > 0 && selected_index >= scroll_offset + visible_rows {
+        scroll_offset = selected_index + 1 - visible_rows;
+    }
+    if visible_rows == 0 {
+        scroll_offset = 0;
+    } else if processes.len() > visible_rows {
+        scroll_offset = scroll_offset.min(processes.len() - visible_rows);
+    } else {
+        scroll_offset = 0;
+    }
+
     // Create table header with sort indicators
     let sort_indicator = if app.state.processes_state.sort_ascending {
         "↑"
@@ -260,8 +289,10 @@ fn render_process_table(
     let rows: Vec<Row> = processes
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows.max(0))
         .map(|(i, process)| {
-            let style = if i == app.state.processes_state.selected_index {
+            let style = if i == selected_index {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default().fg(Color::White)
@@ -349,8 +380,17 @@ fn render_details_panel(
         app.state.processes_state.sort_ascending,
     );
 
+    let selected_index = if processes.is_empty() {
+        0
+    } else {
+        app.state
+            .processes_state
+            .selected_index
+            .min(processes.len().saturating_sub(1))
+    };
+
     // Get selected process
-    if let Some(process) = processes.get(app.state.processes_state.selected_index) {
+    if let Some(process) = processes.get(selected_index) {
         let mut details = Vec::new();
 
         details.push(Line::from(vec![Span::styled(

@@ -44,6 +44,8 @@ sysinfo = "0.30"
 
 # Regex for parsing
 regex = "1.10"
+encoding_rs = "0.8"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Globalization"] }
 
 # Color manipulation
 colorsys = "0.6"

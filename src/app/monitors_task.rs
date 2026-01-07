@@ -57,6 +57,8 @@ pub fn spawn_monitor_tasks(
     ram_error: Arc<RwLock<Option<String>>>,
     disk_data: Arc<RwLock<Option<DiskData>>>,
     disk_error: Arc<RwLock<Option<String>>>,
+    disk_analyzer_data: Arc<RwLock<Option<DiskAnalyzerData>>>,
+    disk_analyzer_error: Arc<RwLock<Option<String>>>,
     network_data: Arc<RwLock<Option<NetworkData>>>,
     network_error: Arc<RwLock<Option<String>>>,
     process_data: Arc<RwLock<Option<ProcessData>>>,
@@ -165,7 +167,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *cpu_data.write() = Some(data);
@@ -255,7 +257,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *gpu_data.write() = Some(data);
@@ -345,7 +347,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *ram_data.write() = Some(data);
@@ -435,7 +437,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *disk_data.write() = Some(data);
@@ -444,6 +446,113 @@ pub fn spawn_monitor_tasks(
                         Err(e) => {
                             log::error!("Disk monitor error: {}", e);
                             *disk_error.write() = Some(e.to_string());
+                        }
+                    }
+                }
+
+                sleep(refresh_duration(refresh_interval_ms)).await;
+            }
+        });
+    }
+
+    // Disk analyzer monitor task
+    {
+        let config = Arc::clone(&config);
+        let disk_analyzer_data = Arc::clone(&disk_analyzer_data);
+        let disk_analyzer_error = Arc::clone(&disk_analyzer_error);
+        let ps_available = powershell_ready || cfg!(target_os = "linux");
+        let unavailable_reason = ps_unavailable_reason.clone();
+        tokio::spawn(async move {
+            let mut monitor: Option<DiskAnalyzerMonitor> = None;
+            let mut last_settings: Option<(PsSettings, String, usize, u64)> = None;
+            let mut last_cache_ttl: Option<u64> = None;
+
+            loop {
+                let (
+                    enabled,
+                    refresh_interval_ms,
+                    settings,
+                    cache_ttl_config,
+                    use_cache_config,
+                    es_executable,
+                    max_depth,
+                ) = {
+                    let cfg = config.read();
+                    (
+                        cfg.integrations.everything.enabled,
+                        cfg.integrations.everything.refresh_interval_ms,
+                        build_ps_settings(&cfg, cfg.integrations.everything.refresh_interval_ms),
+                        cfg.powershell.cache_ttl_seconds,
+                        cfg.powershell.use_cache,
+                        cfg.integrations.everything.es_executable.clone(),
+                        cfg.integrations.everything.max_depth,
+                    )
+                };
+
+                if !enabled {
+                    *disk_analyzer_data.write() = None;
+                    *disk_analyzer_error.write() =
+                        Some("Everything integration disabled in config".to_string());
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !ps_available {
+                    let message = unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "PowerShell is required for disk analyzer".to_string());
+                    log::warn!("Disk analyzer running in degraded mode: {}", message);
+                    *disk_analyzer_error.write() = Some(message);
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                let settings_key = (settings.clone(), es_executable.clone(), max_depth, refresh_interval_ms);
+                if last_settings.as_ref() != Some(&settings_key) {
+                    if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
+                        if last_cache_ttl != Some(settings.cache_ttl_seconds) {
+                            log::info!(
+                                "Disk analyzer cache TTL clamped to {}s to match refresh interval",
+                                settings.cache_ttl_seconds
+                            );
+                            last_cache_ttl = Some(settings.cache_ttl_seconds);
+                        }
+                    }
+
+                    let ps = PowerShellExecutor::new(
+                        settings.executable.clone(),
+                        settings.timeout_seconds,
+                        settings.cache_ttl_seconds,
+                        settings.use_cache,
+                    );
+                    match DiskAnalyzerMonitor::new(
+                        ps,
+                        es_executable.clone(),
+                        max_depth,
+                        settings.timeout_seconds,
+                    ) {
+                        Ok(m) => {
+                            monitor = Some(m);
+                            last_settings = Some(settings_key);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to start disk analyzer: {}", e);
+                            *disk_analyzer_error.write() = Some(e.to_string());
+                            sleep(refresh_duration(refresh_interval_ms)).await;
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(ref mut monitor) = monitor {
+                    match monitor.collect_data().await {
+                        Ok(data) => {
+                            *disk_analyzer_data.write() = Some(data);
+                            *disk_analyzer_error.write() = None;
+                        }
+                        Err(e) => {
+                            log::error!("Disk analyzer error: {}", e);
+                            *disk_analyzer_error.write() = Some(e.to_string());
                         }
                     }
                 }
@@ -625,7 +734,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *process_data.write() = Some(data);
@@ -715,7 +824,7 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref monitor) = monitor {
+                if let Some(ref mut monitor) = monitor {
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *service_data.write() = Some(data);

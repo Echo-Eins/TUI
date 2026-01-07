@@ -76,11 +76,29 @@ const MEMORY_INFO_SCRIPT: &str = r#"
 
 const PHYSICAL_MEMORY_SCRIPT: &str = r#"
     try {
-        $mem = Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | Select-Object -First 1
-        if ($mem) {
-            [PSCustomObject]@{
-                Speed = "$($mem.Speed) MHz"
-                MemoryType = switch ($mem.MemoryType) {
+        $modules = Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop
+        if (-not $modules) {
+            [PSCustomObject]@{ Speed = "Unknown"; MemoryType = "Unknown"; Modules = @() } | ConvertTo-Json
+            return
+        }
+
+        $list = foreach ($mem in $modules) {
+            $memType = switch ([int]$mem.SMBIOSMemoryType) {
+                20 { "DDR" }
+                21 { "DDR2" }
+                24 { "DDR3" }
+                26 { "DDR4" }
+                27 { "LPDDR" }
+                28 { "LPDDR2" }
+                29 { "LPDDR3" }
+                30 { "LPDDR4" }
+                34 { "DDR5" }
+                35 { "LPDDR5" }
+                default { $null }
+            }
+
+            if (-not $memType) {
+                $memType = switch ([int]$mem.MemoryType) {
                     20 { "DDR" }
                     21 { "DDR2" }
                     24 { "DDR3" }
@@ -88,18 +106,38 @@ const PHYSICAL_MEMORY_SCRIPT: &str = r#"
                     34 { "DDR5" }
                     default { "Unknown" }
                 }
-            } | ConvertTo-Json
-        } else {
+            }
+
+            $speed = $null
+            if ($mem.ConfiguredClockSpeed) {
+                $speed = [uint32]$mem.ConfiguredClockSpeed
+            } elseif ($mem.Speed) {
+                $speed = [uint32]$mem.Speed
+            }
+
             [PSCustomObject]@{
-                Speed = "Unknown"
-                MemoryType = "Unknown"
-            } | ConvertTo-Json
+                Slot = $mem.DeviceLocator
+                Manufacturer = ($mem.Manufacturer -as [string]).Trim()
+                PartNumber = ($mem.PartNumber -as [string]).Trim()
+                Capacity = [uint64]$mem.Capacity
+                Speed = $speed
+                MemoryType = $memType
+            }
         }
-    } catch {
+
+        $types = $list | ForEach-Object { $_.MemoryType } | Where-Object { $_ -and $_ -ne 'Unknown' } | Sort-Object -Unique
+        $typeSummary = if ($types.Count -eq 0) { "Unknown" } elseif ($types.Count -eq 1) { $types[0] } else { "Mixed (" + ($types -join "/") + ")" }
+
+        $speeds = $list | ForEach-Object { $_.Speed } | Where-Object { $_ -ne $null } | Sort-Object -Unique
+        $speedSummary = if ($speeds.Count -eq 0) { "Unknown" } elseif ($speeds.Count -eq 1) { "$($speeds[0]) MHz" } else { "$($speeds[0])-$($speeds[-1]) MHz" }
+
         [PSCustomObject]@{
-            Speed = "Unknown"
-            MemoryType = "Unknown"
-        } | ConvertTo-Json
+            Speed = $speedSummary
+            MemoryType = $typeSummary
+            Modules = $list
+        } | ConvertTo-Json -Depth 4
+    } catch {
+        [PSCustomObject]@{ Speed = "Unknown"; MemoryType = "Unknown"; Modules = @() } | ConvertTo-Json
     }
 "#;
 
@@ -345,7 +383,8 @@ impl RamMonitor {
     }
 
     fn parse_physical_memory_info(output: &str) -> Result<PhysicalMemoryInfo> {
-        let info: PhysicalMemory = serde_json::from_str(output)
+        let trimmed = output.trim_start_matches('\u{feff}').trim();
+        let info: PhysicalMemory = serde_json::from_str(trimmed)
             .context("Failed to parse physical memory info")?;
 
         Ok(PhysicalMemoryInfo {

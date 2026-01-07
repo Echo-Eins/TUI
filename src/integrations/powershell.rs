@@ -11,9 +11,11 @@ use tokio::time::timeout;
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_LOG_CHARS: usize = 4096;
+const PS_ENCODING_PREFIX: &str =
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n$OutputEncoding = [System.Text.Encoding]::UTF8\n";
 
 struct LimitedOutput {
-    text: String,
+    bytes: Vec<u8>,
     truncated: bool,
 }
 
@@ -82,8 +84,7 @@ where
         }
     }
 
-    let text = String::from_utf8_lossy(&buf).to_string();
-    Ok(LimitedOutput { text, truncated })
+    Ok(LimitedOutput { bytes: buf, truncated })
 }
 
 #[derive(Clone)]
@@ -119,22 +120,25 @@ impl PowerShellExecutor {
     }
 
     pub async fn execute(&self, command: &str) -> Result<String> {
+        let cache_key = command.to_string();
         // Check cache
         if self.cache_enabled {
             let cache = self.cache.read();
-            if let Some(entry) = cache.get(command) {
+            if let Some(entry) = cache.get(&cache_key) {
                 if entry.timestamp.elapsed() < self.cache_ttl {
                     return Ok(entry.value.clone());
                 }
             }
         }
 
+        let command = format!("{}{}", PS_ENCODING_PREFIX, command);
+
         log::debug!(
             "Executing PowerShell command: {}",
-            sanitize_for_log(command)
+            sanitize_for_log(&command)
         );
 
-        let encoded_command = encode_powershell_command(command);
+        let encoded_command = encode_powershell_command(&command);
         let mut child = TokioCommand::new(&self.executable)
             .args(&[
                 "-NoProfile",
@@ -187,18 +191,21 @@ impl PowerShellExecutor {
             log::warn!("PowerShell stderr truncated to {} bytes", MAX_OUTPUT_BYTES);
         }
 
-        if !stderr.text.trim().is_empty() {
+        let stdout_text = decode_output(&stdout.bytes);
+        let stderr_text = decode_output(&stderr.bytes);
+
+        if !stderr_text.trim().is_empty() {
             log::debug!(
                 "PowerShell stderr: {}",
-                sanitize_for_log(stderr.text.trim())
+                sanitize_for_log(stderr_text.trim())
             );
         }
 
         if !status.success() {
-            let message = if stderr.text.trim().is_empty() {
+            let message = if stderr_text.trim().is_empty() {
                 "PowerShell command failed with empty stderr".to_string()
             } else {
-                stderr.text.trim().to_string()
+                stderr_text.trim().to_string()
             };
             let code = status
                 .code()
@@ -207,13 +214,13 @@ impl PowerShellExecutor {
             anyhow::bail!("PowerShell command failed (exit {}): {}", code, message);
         }
 
-        let stdout = stdout.text;
+        let stdout = stdout_text;
 
         // Update cache
         if self.cache_enabled {
             let mut cache = self.cache.write();
             cache.insert(
-                command.to_string(),
+                cache_key,
                 CacheEntry {
                     value: stdout.clone(),
                     timestamp: Instant::now(),
@@ -237,6 +244,7 @@ impl PowerShellExecutor {
         let escaped_separator = separator.replace('\'', "''");
 
         let mut script = String::new();
+        script.push_str(PS_ENCODING_PREFIX);
         script.push_str("$ErrorActionPreference = 'Continue'\n");
         script.push_str("$ProgressPreference = 'SilentlyContinue'\n");
         script.push_str("$WarningPreference = 'SilentlyContinue'\n");
@@ -324,6 +332,92 @@ impl Clone for PowerShellExecutor {
 pub struct PowerShellEnvironmentStatus {
     pub available: bool,
     pub missing_modules: Vec<String>,
+}
+
+fn decode_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_utf16(bytes, true);
+    }
+
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return decode_utf16(bytes, false);
+    }
+
+    if bytes.iter().skip(1).take(8).any(|b| *b == 0) {
+        let decoded = decode_utf16(bytes, true);
+        if !decoded.is_empty() {
+            return decoded;
+        }
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(decoded) = decode_with_system_codepage(bytes) {
+            return decoded;
+        }
+    }
+
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+fn decode_utf16(bytes: &[u8], le: bool) -> String {
+    let mut u16_buf = Vec::with_capacity(bytes.len() / 2);
+    let mut idx = 0;
+    while idx + 1 < bytes.len() {
+        let pair = [bytes[idx], bytes[idx + 1]];
+        let value = if le {
+            u16::from_le_bytes(pair)
+        } else {
+            u16::from_be_bytes(pair)
+        };
+        u16_buf.push(value);
+        idx += 2;
+    }
+    String::from_utf16_lossy(&u16_buf)
+}
+
+#[cfg(windows)]
+fn decode_with_system_codepage(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+
+    let console_cp = unsafe { GetConsoleOutputCP() };
+    let oem_cp = unsafe { GetOEMCP() };
+    let ansi_cp = unsafe { GetACP() };
+
+    for cp in [console_cp, oem_cp, ansi_cp] {
+        if let Some(encoding) = encoding_for_codepage(cp) {
+            let (text, _, _) = encoding.decode(bytes);
+            if !text.is_empty() {
+                return Some(text.into_owned());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn encoding_for_codepage(codepage: u32) -> Option<&'static encoding_rs::Encoding> {
+    match codepage {
+        65001 => Some(encoding_rs::UTF_8),
+        866 => Some(encoding_rs::IBM866),
+        1251 => Some(encoding_rs::WINDOWS_1251),
+        1252 => Some(encoding_rs::WINDOWS_1252),
+        932 => Some(encoding_rs::SHIFT_JIS),
+        936 => Some(encoding_rs::GBK),
+        949 => Some(encoding_rs::EUC_KR),
+        950 => Some(encoding_rs::BIG5),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

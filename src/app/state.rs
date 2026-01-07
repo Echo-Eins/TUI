@@ -5,10 +5,13 @@ use crossterm::event::{
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{monitors_task, Config, TabManager, TabType};
 use crate::integrations::{OllamaData, PowerShellExecutor};
-use crate::monitors::{CpuData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData};
+use crate::monitors::{
+    CpuData, DiskAnalyzerData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData,
+};
 use crate::utils::command_history::CommandHistory;
 
 pub struct AppState {
@@ -25,6 +28,8 @@ pub struct AppState {
     pub ram_error: Arc<RwLock<Option<String>>>,
     pub disk_data: Arc<RwLock<Option<DiskData>>>,
     pub disk_error: Arc<RwLock<Option<String>>>,
+    pub disk_analyzer_data: Arc<RwLock<Option<DiskAnalyzerData>>>,
+    pub disk_analyzer_error: Arc<RwLock<Option<String>>>,
     pub network_data: Arc<RwLock<Option<NetworkData>>>,
     pub network_error: Arc<RwLock<Option<String>>>,
     pub process_data: Arc<RwLock<Option<ProcessData>>>,
@@ -42,6 +47,8 @@ pub struct AppState {
     pub command_input: String,
     #[allow(dead_code)]
     pub selected_section: Option<String>,
+    pub last_nav_input: Option<Instant>,
+    pub last_sort_input: Option<Instant>,
 
     // Processes UI state
     pub processes_state: ProcessesUIState,
@@ -109,6 +116,28 @@ pub struct OllamaUIState {
 }
 
 impl AppState {
+    fn allow_nav(&mut self) -> bool {
+        Self::allow_with_throttle(&mut self.last_nav_input, Duration::from_millis(120))
+    }
+
+    fn allow_sort_toggle(&mut self) -> bool {
+        Self::allow_with_throttle(&mut self.last_sort_input, Duration::from_millis(200))
+    }
+
+    fn allow_with_throttle(
+        last_input: &mut Option<Instant>,
+        min_delay: Duration,
+    ) -> bool {
+        let now = Instant::now();
+        if let Some(last) = last_input {
+            if now.duration_since(*last) < min_delay {
+                return false;
+            }
+        }
+        *last_input = Some(now);
+        true
+    }
+
     pub async fn new(config: Config) -> Result<Self> {
         let tab_manager = TabManager::new(config.tabs.enabled.clone(), &config.tabs.default);
 
@@ -124,6 +153,8 @@ impl AppState {
         let ram_error = Arc::new(RwLock::new(None));
         let disk_data = Arc::new(RwLock::new(None));
         let disk_error = Arc::new(RwLock::new(None));
+        let disk_analyzer_data = Arc::new(RwLock::new(None));
+        let disk_analyzer_error = Arc::new(RwLock::new(None));
         let network_data = Arc::new(RwLock::new(None));
         let network_error = Arc::new(RwLock::new(None));
         let process_data = Arc::new(RwLock::new(None));
@@ -145,6 +176,8 @@ impl AppState {
             Arc::clone(&ram_error),
             Arc::clone(&disk_data),
             Arc::clone(&disk_error),
+            Arc::clone(&disk_analyzer_data),
+            Arc::clone(&disk_analyzer_error),
             Arc::clone(&network_data),
             Arc::clone(&network_error),
             Arc::clone(&process_data),
@@ -168,6 +201,8 @@ impl AppState {
             ram_error,
             disk_data,
             disk_error,
+            disk_analyzer_data,
+            disk_analyzer_error,
             network_data,
             network_error,
             process_data,
@@ -182,6 +217,8 @@ impl AppState {
             command_history,
             command_input: String::new(),
             selected_section: None,
+            last_nav_input: None,
+            last_sort_input: None,
 
             processes_state: ProcessesUIState {
                 selected_index: 0,
@@ -288,6 +325,9 @@ impl AppState {
         if self.tab_manager.current() == TabType::Processes {
             match key.code {
                 KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     if self.processes_state.selected_index > 0 {
                         self.processes_state.selected_index -= 1;
                         if self.processes_state.selected_index < self.processes_state.scroll_offset
@@ -299,6 +339,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     let process_count = self
                         .process_data
                         .read()
@@ -311,6 +354,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     if self.processes_state.selected_index >= 10 {
                         self.processes_state.selected_index -= 10;
                     } else {
@@ -320,6 +366,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     let process_count = self
                         .process_data
                         .read()
@@ -334,31 +383,49 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Char('p') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::Pid;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('n') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::Name;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('c') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::Cpu;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('m') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::Memory;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('t') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::Threads;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('u') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.processes_state.sort_column = ProcessSortColumn::User;
                     self.processes_state.sort_ascending = !self.processes_state.sort_ascending;
                     return Ok(true);
@@ -375,6 +442,9 @@ impl AppState {
         if self.tab_manager.current() == TabType::Services {
             match key.code {
                 KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     if self.services_state.selected_index > 0 {
                         self.services_state.selected_index -= 1;
                         if self.services_state.selected_index < self.services_state.scroll_offset {
@@ -384,6 +454,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     let service_count = self
                         .service_data
                         .read()
@@ -396,6 +469,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     if self.services_state.selected_index >= 10 {
                         self.services_state.selected_index -= 10;
                     } else {
@@ -405,6 +481,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     let service_count = self
                         .service_data
                         .read()
@@ -419,21 +498,33 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Char('n') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.services_state.sort_column = ServiceSortColumn::Name;
                     self.services_state.sort_ascending = !self.services_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('d') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.services_state.sort_column = ServiceSortColumn::DisplayName;
                     self.services_state.sort_ascending = !self.services_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('s') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.services_state.sort_column = ServiceSortColumn::Status;
                     self.services_state.sort_ascending = !self.services_state.sort_ascending;
                     return Ok(true);
                 }
                 KeyCode::Char('t') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
                     self.services_state.sort_column = ServiceSortColumn::StartType;
                     self.services_state.sort_ascending = !self.services_state.sort_ascending;
                     return Ok(true);
@@ -478,6 +569,9 @@ impl AppState {
 
             match key.code {
                 KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     match self.ollama_state.current_view {
                         OllamaView::Models => {
                             if self.ollama_state.selected_model_index > 0 {
@@ -493,6 +587,9 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
                     match self.ollama_state.current_view {
                         OllamaView::Models => {
                             let model_count = self
@@ -514,6 +611,58 @@ impl AppState {
                                 .unwrap_or(0);
                             if self.ollama_state.selected_running_index + 1 < running_count {
                                 self.ollama_state.selected_running_index += 1;
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    match self.ollama_state.current_view {
+                        OllamaView::Models => {
+                            self.ollama_state.selected_model_index =
+                                self.ollama_state.selected_model_index.saturating_sub(step);
+                        }
+                        OllamaView::Running => {
+                            self.ollama_state.selected_running_index =
+                                self.ollama_state.selected_running_index.saturating_sub(step);
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    match self.ollama_state.current_view {
+                        OllamaView::Models => {
+                            let model_count = self
+                                .ollama_data
+                                .read()
+                                .as_ref()
+                                .map(|d| d.models.len())
+                                .unwrap_or(0);
+                            if model_count > 0 {
+                                let next = self.ollama_state.selected_model_index + step;
+                                self.ollama_state.selected_model_index =
+                                    next.min(model_count.saturating_sub(1));
+                            }
+                        }
+                        OllamaView::Running => {
+                            let running_count = self
+                                .ollama_data
+                                .read()
+                                .as_ref()
+                                .map(|d| d.running_models.len())
+                                .unwrap_or(0);
+                            if running_count > 0 {
+                                let next = self.ollama_state.selected_running_index + step;
+                                self.ollama_state.selected_running_index =
+                                    next.min(running_count.saturating_sub(1));
                             }
                         }
                     }

@@ -84,7 +84,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
     f.render_widget(header_text, chunks[0]);
 
     // Overall usage gauge
-    let usage_percent = ((data.used as f64 / data.total as f64) * 100.0) as u16;
+    let usage_percent = if data.total > 0 {
+        ((data.used as f64 / data.total as f64) * 100.0).min(100.0) as u16
+    } else {
+        0
+    };
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("Memory Usage"))
         .gauge_style(
@@ -163,7 +167,11 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
     f.render_widget(header_text, chunks[0]);
 
     // Compact memory info
-    let usage_percent = ((data.used as f64 / data.total as f64) * 100.0) as f32;
+    let usage_percent = if data.total > 0 {
+        ((data.used as f64 / data.total as f64) * 100.0).min(100.0) as f32
+    } else {
+        0.0
+    };
     let commit_percent = data.commit_percent as f32;
 
     let mut info_text = vec![

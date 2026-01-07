@@ -21,8 +21,23 @@ pub struct App {
 
 impl App {
     pub async fn new() -> Result<Self> {
-        let mut config_path = env::current_exe()?;
-        config_path.set_file_name("config.toml");
+        let exe_config_path = {
+            let mut path = env::current_exe()?;
+            path.set_file_name("config.toml");
+            path
+        };
+
+        let config_path = match env::current_dir() {
+            Ok(cwd) => {
+                let candidate = cwd.join("config.toml");
+                if candidate.exists() {
+                    candidate
+                } else {
+                    exe_config_path.clone()
+                }
+            }
+            Err(_) => exe_config_path.clone(),
+        };
 
         let config = Config::load_or_default(&config_path)?;
 

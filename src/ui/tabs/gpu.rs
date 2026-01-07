@@ -81,6 +81,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
     f.render_widget(header_text, chunks[0]);
 
     // Overall GPU usage
+    let utilization_pct = data.utilization.clamp(0.0, 100.0) as u16;
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("GPU Usage"))
         .gauge_style(
@@ -88,8 +89,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
                 .fg(theme.gpu_color)
                 .add_modifier(Modifier::BOLD),
         )
-        .percent(data.utilization as u16)
-        .label(format!("{}%", data.utilization as u16));
+        .percent(utilization_pct)
+        .label(format!("{}%", utilization_pct));
 
     f.render_widget(gauge, chunks[1]);
 
@@ -156,7 +157,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
 
     // VRAM Usage
     let vram_used_pct = if data.memory_total > 0 {
-        (data.memory_used as f64 / data.memory_total as f64 * 100.0) as u16
+        ((data.memory_used as f64 / data.memory_total as f64) * 100.0)
+            .min(100.0) as u16
     } else {
         0
     };

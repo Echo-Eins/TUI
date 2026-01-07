@@ -230,12 +230,34 @@ fn render_models_table(
 
     let header = Row::new(headers).height(1);
 
+    let selected_index = if data.models.is_empty() {
+        0
+    } else {
+        app.state
+            .ollama_state
+            .selected_model_index
+            .min(data.models.len().saturating_sub(1))
+    };
+
+    let content_height = area.height.saturating_sub(2);
+    let footer_height = if area.height > 2 { 1 } else { 0 };
+    let header_height = 1u16;
+    let visible_rows = content_height
+        .saturating_sub(header_height + footer_height) as usize;
+    let scroll_offset = if visible_rows == 0 {
+        0
+    } else {
+        selected_index.saturating_sub(visible_rows.saturating_sub(1))
+    };
+
     let rows: Vec<Row> = data
         .models
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows.max(0))
         .map(|(i, model)| {
-            let is_selected = i == app.state.ollama_state.selected_model_index;
+            let is_selected = i == selected_index;
             let style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Magenta)
             } else {
@@ -329,12 +351,34 @@ fn render_running_models_table(
 
     let header = Row::new(headers).height(1);
 
+    let selected_index = if data.running_models.is_empty() {
+        0
+    } else {
+        app.state
+            .ollama_state
+            .selected_running_index
+            .min(data.running_models.len().saturating_sub(1))
+    };
+
+    let content_height = area.height.saturating_sub(2);
+    let footer_height = if area.height > 2 { 1 } else { 0 };
+    let header_height = 1u16;
+    let visible_rows = content_height
+        .saturating_sub(header_height + footer_height) as usize;
+    let scroll_offset = if visible_rows == 0 {
+        0
+    } else {
+        selected_index.saturating_sub(visible_rows.saturating_sub(1))
+    };
+
     let rows: Vec<Row> = data
         .running_models
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows.max(0))
         .map(|(i, model)| {
-            let is_selected = i == app.state.ollama_state.selected_running_index;
+            let is_selected = i == selected_index;
             let style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Green)
             } else {

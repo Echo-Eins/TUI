@@ -66,17 +66,35 @@ impl GpuMonitor {
             return Ok(nvidia_data);
         }
 
-        // Fallback to basic info via PowerShell
-        let gpu_info = self.get_gpu_info().await?;
-        Ok(gpu_info)
+        // Fallback to WMI/perf counters
+        self.get_wmi_gpu_data().await
     }
 
     async fn get_nvidia_smi_data(&self) -> Result<GpuData> {
         let script = r#"
-            if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-                $output = nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version --format=csv,noheader,nounits
-                $parts = $output.Split(',').Trim()
+            $nvidiaPath = $null
+            $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+            if ($cmd) {
+                $nvidiaPath = $cmd.Source
+            } elseif (Test-Path 'C:\Windows\System32\nvidia-smi.exe') {
+                $nvidiaPath = 'C:\Windows\System32\nvidia-smi.exe'
+            } elseif (Test-Path 'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe') {
+                $nvidiaPath = 'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+            }
 
+            if (-not $nvidiaPath) {
+                throw "nvidia-smi not found"
+            }
+
+            $raw = & $nvidiaPath --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version --format=csv,noheader,nounits
+            $lines = $raw -split "`n" | Where-Object { $_ -match '\S' }
+            if (-not $lines) {
+                throw "nvidia-smi returned empty output"
+            }
+
+            $rows = foreach ($line in $lines) {
+                $parts = $line.Split(',') | ForEach-Object { $_.Trim() }
+                if ($parts.Count -lt 12) { continue }
                 [PSCustomObject]@{
                     Name = $parts[0]
                     Temperature = [float]$parts[1]
@@ -86,28 +104,41 @@ impl GpuMonitor {
                     MemoryTotal = [uint64]($parts[5]) * 1MB
                     PowerDraw = [float]$parts[6]
                     PowerLimit = [float]$parts[7]
-                    FanSpeed = if ($parts[8] -ne '[N/A]') { [float]$parts[8] } else { 0.0 }
+                    FanSpeed = if ($parts[8] -ne '[N/A]' -and $parts[8] -ne 'N/A') { [float]$parts[8] } else { 0.0 }
                     ClockGraphics = [uint32]$parts[9]
                     ClockMemory = [uint32]$parts[10]
                     DriverVersion = $parts[11]
-                } | ConvertTo-Json
-            } else {
-                throw "nvidia-smi not found"
+                }
             }
+
+            $best = $rows | Sort-Object -Property MemoryTotal -Descending | Select-Object -First 1
+            if (-not $best) {
+                throw "nvidia-smi parsing failed"
+            }
+
+            $best | ConvertTo-Json
         "#;
 
         let output = self.ps.execute(script).await?;
-        let info: NvidiaSmiData = serde_json::from_str(&output)
+        let trimmed = output.trim_start_matches('\u{feff}').trim();
+        let info: NvidiaSmiData = serde_json::from_str(trimmed)
             .context("Failed to parse nvidia-smi data")?;
 
-        // Get top GPU processes
         let processes = self.get_gpu_processes().await.unwrap_or_default();
+
+        let memory_total = info.MemoryTotal;
+        let memory_used = info.MemoryUsed;
+        let memory_used = if memory_total > 0 {
+            memory_used.min(memory_total)
+        } else {
+            memory_used
+        };
 
         Ok(GpuData {
             name: info.Name,
-            utilization: info.UtilizationGpu,
-            memory_used: info.MemoryUsed,
-            memory_total: info.MemoryTotal,
+            utilization: info.UtilizationGpu.clamp(0.0, 100.0),
+            memory_used,
+            memory_total,
             temperature: info.Temperature,
             power_usage: info.PowerDraw,
             power_limit: info.PowerLimit,
@@ -119,41 +150,96 @@ impl GpuMonitor {
         })
     }
 
-    async fn get_gpu_info(&self) -> Result<GpuData> {
+    async fn get_wmi_gpu_data(&self) -> Result<GpuData> {
         let script = r#"
-            $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+            $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+            $gpu = $gpus | Sort-Object AdapterRAM -Descending | Select-Object -First 1
+            if (-not $gpu) {
+                throw "No GPU detected"
+            }
+
+            $engine = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue
+            $util = if ($engine) {
+                ($engine | Measure-Object -Property UtilizationPercentage -Maximum).Maximum
+            } else {
+                0
+            }
+
+            $procMem = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue
+            $memUsed = if ($procMem) {
+                ($procMem | Measure-Object -Property DedicatedUsage -Sum).Sum
+            } else {
+                0
+            }
+
+            $adapterMem = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction SilentlyContinue | Select-Object -First 1
+            $memTotal = if ($adapterMem -and $adapterMem.TotalDedicatedMemory) {
+                [uint64]$adapterMem.TotalDedicatedMemory
+            } else {
+                [uint64]$gpu.AdapterRAM
+            }
+
             [PSCustomObject]@{
                 Name = $gpu.Name
                 DriverVersion = $gpu.DriverVersion
-                AdapterRAM = $gpu.AdapterRAM
+                MemoryTotal = $memTotal
+                MemoryUsed = [uint64]$memUsed
+                Utilization = [float]$util
             } | ConvertTo-Json
         "#;
 
         let output = self.ps.execute(script).await?;
-        let info: GpuInfo = serde_json::from_str(&output)
+        let trimmed = output.trim_start_matches('\u{feff}').trim();
+        let info: GpuInfo = serde_json::from_str(trimmed)
             .context("Failed to parse GPU info")?;
+
+        let processes = self.get_gpu_processes().await.unwrap_or_default();
+
+        let utilization = info.Utilization.unwrap_or(0.0).clamp(0.0, 100.0);
+        let memory_total = info.MemoryTotal.unwrap_or(0);
+        let mut memory_used = info.MemoryUsed.unwrap_or(0);
+        if memory_total > 0 {
+            memory_used = memory_used.min(memory_total);
+        }
 
         Ok(GpuData {
             name: info.Name,
-            utilization: 0.0,
-            memory_used: 0,
-            memory_total: info.AdapterRAM,
-            temperature: 45.0,  // Estimated
+            utilization,
+            memory_used,
+            memory_total,
+            temperature: 0.0,
             power_usage: 0.0,
-            power_limit: 300.0,
+            power_limit: 0.0,
             fan_speed: 0.0,
             clock_speed: 0,
             memory_clock: 0,
             driver_version: info.DriverVersion,
-            processes: vec![],
+            processes,
         })
     }
 
     async fn get_gpu_processes(&self) -> Result<Vec<GpuProcessInfo>> {
+        if let Ok(processes) = self.get_gpu_processes_wmi().await {
+            if !processes.is_empty() {
+                return Ok(processes);
+            }
+        }
+
         let script = r#"
-            if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-                nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits | ForEach-Object {
-                    $parts = $_.Split(',').Trim()
+            $nvidiaPath = $null
+            $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+            if ($cmd) {
+                $nvidiaPath = $cmd.Source
+            } elseif (Test-Path 'C:\Windows\System32\nvidia-smi.exe') {
+                $nvidiaPath = 'C:\Windows\System32\nvidia-smi.exe'
+            } elseif (Test-Path 'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe') {
+                $nvidiaPath = 'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+            }
+
+            if ($nvidiaPath) {
+                & $nvidiaPath --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits | ForEach-Object {
+                    $parts = $_.Split(',') | ForEach-Object { $_.Trim() }
+                    if ($parts.Count -lt 3) { return }
                     [PSCustomObject]@{
                         Pid = [uint32]$parts[0]
                         Name = $parts[1]
@@ -180,6 +266,67 @@ impl GpuMonitor {
                 gpu_usage: 0.0,  // Not available via nvidia-smi compute-apps
                 vram: p.Vram,
                 process_type: "Compute".to_string(),
+            })
+            .collect())
+    }
+
+    async fn get_gpu_processes_wmi(&self) -> Result<Vec<GpuProcessInfo>> {
+        let script = r#"
+            $items = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue
+            if (-not $items) {
+                "[]"
+                return
+            }
+
+            $byPid = @{}
+            foreach ($item in $items) {
+                if ($item.Name -match '^pid_(\d+)_') {
+                    $pid = [int]$matches[1]
+                    if (-not $byPid.ContainsKey($pid)) {
+                        $byPid[$pid] = [uint64]0
+                    }
+                    $byPid[$pid] += [uint64]$item.DedicatedUsage
+                }
+            }
+
+            if ($byPid.Count -eq 0) {
+                "[]"
+                return
+            }
+
+            $procMap = @{}
+            try {
+                Get-Process -Id $byPid.Keys -ErrorAction SilentlyContinue | ForEach-Object {
+                    $procMap[$_.Id] = $_.ProcessName
+                }
+            } catch {}
+
+            $result = foreach ($pid in $byPid.Keys) {
+                [PSCustomObject]@{
+                    Pid = [uint32]$pid
+                    Name = if ($procMap.ContainsKey($pid)) { $procMap[$pid] } else { "PID $pid" }
+                    Vram = [uint64]$byPid[$pid]
+                }
+            } | Sort-Object -Property Vram -Descending | Select-Object -First 10
+
+            $result | ConvertTo-Json
+        "#;
+
+        let output = self.ps.execute(script).await?;
+        let processes: Vec<GpuProcessSample> = parse_json_array(&output)
+            .context("Failed to parse GPU process list")?;
+        if processes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(processes
+            .into_iter()
+            .map(|p| GpuProcessInfo {
+                pid: p.Pid,
+                name: p.Name,
+                gpu_usage: 0.0,
+                vram: p.Vram,
+                process_type: "Graphics".to_string(),
             })
             .collect())
     }
@@ -322,5 +469,7 @@ struct GpuProcessSample {
 struct GpuInfo {
     Name: String,
     DriverVersion: String,
-    AdapterRAM: u64,
+    MemoryTotal: Option<u64>,
+    MemoryUsed: Option<u64>,
+    Utilization: Option<f32>,
 }
