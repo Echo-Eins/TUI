@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
 
@@ -158,7 +158,7 @@ fn render_header(
     area: Rect,
     data: &crate::integrations::OllamaData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let model_count = data.models.len();
     let running_count = data.running_models.len();
@@ -208,7 +208,7 @@ fn render_models_table(
     area: Rect,
     data: &crate::integrations::OllamaData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let headers = vec![
         Cell::from("Name").style(
@@ -302,7 +302,7 @@ fn render_running_models_table(
     area: Rect,
     data: &crate::integrations::OllamaData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let headers = vec![
         Cell::from("Name").style(
@@ -401,7 +401,7 @@ fn render_vram_panel(
     area: Rect,
     data: &crate::integrations::OllamaData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -488,7 +488,7 @@ fn render_activity_log(
     f: &mut Frame,
     area: Rect,
     data: &crate::integrations::OllamaData,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let log_entries: Vec<Line> = data
         .activity_log
@@ -531,7 +531,7 @@ fn render_activity_log(
     f.render_widget(paragraph, area);
 }
 
-fn render_command_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn render_command_input(f: &mut Frame, area: Rect, app: &App, _theme: &Theme) {
     let text = vec![Line::from(vec![
         Span::styled(
             "ollama ",
@@ -560,7 +560,7 @@ fn render_command_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(paragraph, area);
 }
 
-fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
+fn render_help(f: &mut Frame, area: Rect, _theme: &Theme) {
     let help_text = vec![Line::from(vec![
         Span::styled("Quick Actions: ", Style::default().fg(Color::Gray)),
         Span::styled(

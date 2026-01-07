@@ -44,6 +44,10 @@ pub struct MonitorsConfig {
     pub ram: RamMonitorConfig,
     pub disk: DiskMonitorConfig,
     pub network: NetworkMonitorConfig,
+    #[serde(default)]
+    pub processes: ProcessMonitorConfig,
+    #[serde(default)]
+    pub services: ServiceMonitorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -92,6 +96,36 @@ pub struct NetworkMonitorConfig {
     pub graph_duration_seconds: u64,
     pub show_connections: bool,
     pub max_connections: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProcessMonitorConfig {
+    pub enabled: bool,
+    pub refresh_interval_ms: u64,
+}
+
+impl Default for ProcessMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_interval_ms: 2000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServiceMonitorConfig {
+    pub enabled: bool,
+    pub refresh_interval_ms: u64,
+}
+
+impl Default for ServiceMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_interval_ms: 3000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -245,6 +279,7 @@ impl ConfigManager {
         })
     }
 
+    #[allow(dead_code)]
     pub fn get_config(&self) -> Arc<RwLock<Config>> {
         Arc::clone(&self.config)
     }

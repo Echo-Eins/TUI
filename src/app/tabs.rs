@@ -46,6 +46,7 @@ impl TabType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn all() -> Vec<TabType> {
         vec![
             TabType::Cpu,

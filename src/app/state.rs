@@ -40,6 +40,7 @@ pub struct AppState {
     pub command_menu_active: bool,
     pub command_history: CommandHistory,
     pub command_input: String,
+    #[allow(dead_code)]
     pub selected_section: Option<String>,
 
     // Processes UI state
@@ -113,6 +114,8 @@ impl AppState {
 
         let command_history = CommandHistory::new(config.ui.command_history.max_entries);
 
+        let config = Arc::new(RwLock::new(config));
+
         let cpu_data = Arc::new(RwLock::new(None));
         let cpu_error = Arc::new(RwLock::new(None));
         let gpu_data = Arc::new(RwLock::new(None));
@@ -133,6 +136,7 @@ impl AppState {
 
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
+            Arc::clone(&config),
             Arc::clone(&cpu_data),
             Arc::clone(&cpu_error),
             Arc::clone(&gpu_data),
@@ -149,14 +153,10 @@ impl AppState {
             Arc::clone(&service_error),
             Arc::clone(&ollama_data),
             Arc::clone(&ollama_error),
-            config.powershell.executable.clone(),
-            config.powershell.timeout_seconds,
-            config.powershell.cache_ttl_seconds,
-            config.powershell.use_cache,
         );
 
         Ok(Self {
-            config: Arc::new(RwLock::new(config)),
+            config,
             tab_manager,
             compact_mode: false,
 
@@ -541,7 +541,7 @@ impl AppState {
                             let model_name = model.name.clone();
                             tokio::spawn(async move {
                                 use crate::integrations::OllamaClient;
-                                if let Ok(mut client) = OllamaClient::new(None) {
+                                if let Ok(client) = OllamaClient::new(None) {
                                     let _ = client.run_model(&model_name).await;
                                 }
                             });

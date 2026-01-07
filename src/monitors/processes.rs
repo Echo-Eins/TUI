@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
+use crate::utils::parse_json_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessData {
@@ -24,6 +25,7 @@ pub struct ProcessEntry {
 
 pub struct ProcessMonitor {
     ps: PowerShellExecutor,
+    #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
 }
 
@@ -47,6 +49,7 @@ impl ProcessMonitor {
         }
     }
 
+    #[allow(dead_code)]
     async fn collect_data_linux(&self) -> Result<ProcessData> {
         let linux_processes = self.linux_sys.get_processes()?;
 
@@ -77,51 +80,82 @@ impl ProcessMonitor {
 
     async fn get_processes(&self) -> Result<Vec<ProcessEntry>> {
         let script = r#"
-            Get-Process | Select-Object -Property `
-                Id,
-                ProcessName,
-                CPU,
-                Threads,
-                @{Name='Memory';Expression={$_.WorkingSet64}},
-                @{Name='User';Expression={
+            $perf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.IDProcess -ne 0 -and $_.Name -ne '_Total' -and $_.Name -ne 'Idle' }
+
+            $cpuById = @{}
+            foreach ($p in $perf) {
+                $cpuById[$p.IDProcess] = $p.PercentProcessorTime
+            }
+
+            $cimProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+            $cimById = @{}
+            foreach ($proc in $cimProcs) {
+                $cimById[$proc.ProcessId] = $proc
+            }
+
+            Get-Process | ForEach-Object {
+                $cpu = $cpuById[$_.Id]
+                $cim = $cimById[$_.Id]
+
+                $user = 'N/A'
+                if ($cim) {
                     try {
-                        $_.GetOwner().User
-                    } catch {
-                        'N/A'
+                        $owner = Invoke-CimMethod -InputObject $cim -MethodName GetOwner -ErrorAction Stop
+                        if ($owner -and $owner.User) { $user = $owner.User }
+                    } catch {}
+                }
+
+                $path = $null
+                if ($cim -and $cim.ExecutablePath) {
+                    $path = $cim.ExecutablePath
+                } elseif ($_.Path) {
+                    $path = $_.Path
+                }
+
+                $startTime = $null
+                try {
+                    if ($_.StartTime) { $startTime = $_.StartTime.ToString('o') }
+                } catch {}
+
+                $ioRead = 0
+                $ioWrite = 0
+                try {
+                    if ($_.IO) {
+                        $ioRead = $_.IO.ReadTransferCount
+                        $ioWrite = $_.IO.WriteTransferCount
                     }
-                }},
-                Path,
-                StartTime,
-                HandleCount,
-                @{Name='IOReadBytes';Expression={
-                    try {
-                        $_.IO.ReadTransferCount
-                    } catch {
-                        0
-                    }
-                }},
-                @{Name='IOWriteBytes';Expression={
-                    try {
-                        $_.IO.WriteTransferCount
-                    } catch {
-                        0
-                    }
-                }} | ConvertTo-Json
+                } catch {}
+
+                [PSCustomObject]@{
+                    Id = $_.Id
+                    ProcessName = $_.ProcessName
+                    CpuPercent = if ($null -ne $cpu) { [double]$cpu } else { 0.0 }
+                    Threads = if ($_.Threads) { $_.Threads.Count } else { 0 }
+                    Memory = [uint64]$_.WorkingSet64
+                    User = $user
+                    Path = $path
+                    StartTime = $startTime
+                    HandleCount = $_.HandleCount
+                    IOReadBytes = [uint64]$ioRead
+                    IOWriteBytes = [uint64]$ioWrite
+                }
+            } | ConvertTo-Json
         "#;
 
         let output = self.ps.execute(script).await?;
-        if output.trim().is_empty() || output.trim() == "[]" {
+        let processes: Vec<ProcessSample> = parse_json_array(&output)
+            .context("Failed to parse process list")?;
+        if processes.is_empty() {
             return Ok(Vec::new());
         }
-
-        let processes: Vec<ProcessSample> = serde_json::from_str(&output).unwrap_or_default();
 
         Ok(processes
             .into_iter()
             .map(|p| ProcessEntry {
                 pid: p.Id,
                 name: p.ProcessName,
-                cpu_usage: p.CPU.unwrap_or(0.0) as f32,
+                cpu_usage: p.CpuPercent.unwrap_or(0.0) as f32,
                 memory: p.Memory.unwrap_or(0),
                 threads: p.Threads.unwrap_or(1) as usize,
                 user: p.User.unwrap_or_else(|| "N/A".to_string()),
@@ -136,10 +170,11 @@ impl ProcessMonitor {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct ProcessSample {
     Id: u32,
     ProcessName: String,
-    CPU: Option<f64>,
+    CpuPercent: Option<f64>,
     Threads: Option<u32>,
     Memory: Option<u64>,
     User: Option<String>,

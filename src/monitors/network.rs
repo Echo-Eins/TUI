@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
+use crate::utils::parse_json_array;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ pub struct BandwidthConsumer {
     pub upload_speed: f64,    // Mbps
     pub total_bytes_received: u64,
     pub total_bytes_sent: u64,
+    pub estimated: bool,
 }
 
 impl Default for NetworkData {
@@ -78,6 +80,7 @@ impl Default for NetworkData {
 
 pub struct NetworkMonitor {
     ps: PowerShellExecutor,
+    #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
     last_stats: Option<Vec<InterfaceStats>>,
     last_timestamp: Option<std::time::Instant>,
@@ -93,70 +96,18 @@ struct InterfaceStats {
 
 #[derive(Debug, Clone)]
 struct ProcessNetworkStats {
+    #[allow(dead_code)]
     process_name: String,
     bytes_received: u64,
     bytes_sent: u64,
 }
 
-impl NetworkMonitor {
-    pub fn new(ps: PowerShellExecutor) -> Result<Self> {
-        Ok(Self {
-            ps,
-            linux_sys: LinuxSysMonitor::new(),
-            last_stats: None,
-            last_timestamp: None,
-            last_process_stats: None,
-        })
-    }
-
-    pub async fn collect_data(&mut self) -> Result<NetworkData> {
-        #[cfg(target_os = "linux")]
-        {
-            return self.collect_data_linux().await;
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            return self.collect_data_windows().await;
-        }
-    }
-
-    async fn collect_data_linux(&mut self) -> Result<NetworkData> {
-        let interfaces = self.get_interfaces_linux().await?;
-        let connections = self.get_connections_linux().await?;
-        let bandwidth_consumers = Vec::new(); // TODO: Implement for Linux
-
-        // Calculate traffic history
-        let traffic_history = self.calculate_traffic_history(&interfaces);
-
-        Ok(NetworkData {
-            interfaces,
-            connections,
-            traffic_history,
-            bandwidth_consumers,
-        })
-    }
-
-    async fn collect_data_windows(&mut self) -> Result<NetworkData> {
-        let interfaces = self.get_interfaces().await?;
-        let connections = self.get_connections().await?;
-        let bandwidth_consumers = self.get_bandwidth_consumers().await?;
-
-        // Calculate traffic history
-        let traffic_history = self.calculate_traffic_history(&interfaces);
-
-        Ok(NetworkData {
-            interfaces,
-            connections,
-            traffic_history,
-            bandwidth_consumers,
-        })
-    }
-
-    // 5.1: Interface Statistics
-    async fn get_interfaces(&mut self) -> Result<Vec<NetworkInterface>> {
-        let script = r#"
-            $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+const INTERFACES_SCRIPT: &str = r#"
+    if (-not (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue)) {
+        "[]"
+    } else {
+        try {
+            $adapters = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' }
 
             $result = foreach ($adapter in $adapters) {
                 $stats = Get-NetAdapterStatistics -Name $adapter.Name -ErrorAction SilentlyContinue
@@ -187,24 +138,157 @@ impl NetworkMonitor {
             } else {
                 "[]"
             }
-        "#;
+        } catch {
+            "[]"
+        }
+    }
+"#;
 
-        let output = self.ps.execute(script).await
-            .context("Failed to execute Get-NetAdapter")?;
+const CONNECTIONS_SCRIPT: &str = r#"
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        "[]"
+    } else {
+        try {
+            $connections = Get-NetTCPConnection -State Established -ErrorAction Stop |
+                Select-Object -First 10 OwningProcess, LocalAddress, LocalPort, RemoteAddress, RemotePort, State
 
-        if output.trim().is_empty() || output.trim() == "[]" {
-            return Ok(Vec::new());
+            $result = foreach ($conn in $connections) {
+                try {
+                    $process = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+                    $processName = if ($process) { $process.ProcessName } else { "Unknown" }
+                } catch {
+                    $processName = "Unknown"
+                }
+
+                [PSCustomObject]@{
+                    ProcessName = $processName
+                    PID = $conn.OwningProcess
+                    Protocol = "TCP"
+                    LocalAddress = $conn.LocalAddress
+                    LocalPort = $conn.LocalPort
+                    RemoteAddress = $conn.RemoteAddress
+                    RemotePort = $conn.RemotePort
+                    State = $conn.State
+                }
+            }
+
+            if ($result) {
+                $result | ConvertTo-Json -Depth 2
+            } else {
+                "[]"
+            }
+        } catch {
+            "[]"
+        }
+    }
+"#;
+
+const BANDWIDTH_SCRIPT: &str = r#"
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        "[]"
+    } else {
+        try {
+            $netstat = Get-NetTCPConnection -ErrorAction Stop |
+                Where-Object { $_.State -eq 'Established' } |
+                Group-Object -Property OwningProcess |
+                ForEach-Object {
+                    $pid = $_.Name
+                    try {
+                        $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                        if ($process) {
+                            $connCount = $_.Count
+
+                            [PSCustomObject]@{
+                                ProcessName = $process.ProcessName
+                                PID = [int]$pid
+                                ConnectionCount = $connCount
+                            }
+                        }
+                    } catch {
+                    }
+                }
+
+            if ($netstat) {
+                $netstat | Sort-Object -Property ConnectionCount -Descending |
+                    Select-Object -First 10 |
+                    ConvertTo-Json -Depth 2
+            } else {
+                "[]"
+            }
+        } catch {
+            "[]"
+        }
+    }
+"#;
+
+impl NetworkMonitor {
+    pub fn new(ps: PowerShellExecutor) -> Result<Self> {
+        Ok(Self {
+            ps,
+            linux_sys: LinuxSysMonitor::new(),
+            last_stats: None,
+            last_timestamp: None,
+            last_process_stats: None,
+        })
+    }
+
+    pub async fn collect_data(&mut self) -> Result<NetworkData> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.collect_data_linux().await;
         }
 
-        // Handle both single object and array
-        let interfaces_raw: serde_json::Value = serde_json::from_str(&output)
-            .context("Failed to parse network interface data")?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            return self.collect_data_windows().await;
+        }
+    }
 
-        let interfaces_array = if interfaces_raw.is_array() {
-            interfaces_raw.as_array().unwrap().clone()
-        } else {
-            vec![interfaces_raw]
-        };
+    #[allow(dead_code)]
+    async fn collect_data_linux(&mut self) -> Result<NetworkData> {
+        let interfaces = self.get_interfaces_linux().await?;
+        let connections = self.get_connections_linux().await?;
+        let bandwidth_consumers = Vec::new(); // TODO: Implement for Linux
+
+        // Calculate traffic history
+        let traffic_history = self.calculate_traffic_history(&interfaces);
+
+        Ok(NetworkData {
+            interfaces,
+            connections,
+            traffic_history,
+            bandwidth_consumers,
+        })
+    }
+
+    async fn collect_data_windows(&mut self) -> Result<NetworkData> {
+        let outputs = self
+            .ps
+            .execute_batch(&[INTERFACES_SCRIPT, CONNECTIONS_SCRIPT, BANDWIDTH_SCRIPT])
+            .await
+            .context("Failed to execute network monitor batch")?;
+        let interfaces = self.parse_interfaces(&outputs[0])?;
+        let connections = self.parse_connections(&outputs[1])?;
+        let bandwidth_consumers = self.parse_bandwidth_consumers(&outputs[2])?;
+
+        // Calculate traffic history
+        let traffic_history = self.calculate_traffic_history(&interfaces);
+
+        Ok(NetworkData {
+            interfaces,
+            connections,
+            traffic_history,
+            bandwidth_consumers,
+        })
+    }
+
+    // 5.1: Interface Statistics
+    fn parse_interfaces(&mut self, output: &str) -> Result<Vec<NetworkInterface>> {
+        let interfaces_raw: Vec<InterfaceData> = parse_json_array(output)
+            .context("Failed to parse network interface data")?;
+        if interfaces_raw.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let current_time = std::time::Instant::now();
         let time_delta = if let Some(last_time) = self.last_timestamp {
@@ -216,10 +300,7 @@ impl NetworkMonitor {
         let mut interfaces = Vec::new();
         let mut current_stats = Vec::new();
 
-        for iface_val in interfaces_array {
-            let iface: InterfaceData = serde_json::from_value(iface_val)
-                .context("Failed to deserialize interface")?;
-
+        for iface in interfaces_raw {
             let (download_speed, upload_speed, peak_download, peak_upload) =
                 self.calculate_speed(&iface.Name, iface.BytesReceived, iface.BytesSent, time_delta);
 
@@ -305,60 +386,15 @@ impl NetworkMonitor {
     }
 
     // 5.3: Active Connections
-    async fn get_connections(&self) -> Result<Vec<NetworkConnection>> {
-        let script = r#"
-            $connections = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
-                Select-Object -First 10 OwningProcess, LocalAddress, LocalPort, RemoteAddress, RemotePort, State
-
-            $result = foreach ($conn in $connections) {
-                try {
-                    $process = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-                    $processName = if ($process) { $process.ProcessName } else { "Unknown" }
-                } catch {
-                    $processName = "Unknown"
-                }
-
-                [PSCustomObject]@{
-                    ProcessName = $processName
-                    PID = $conn.OwningProcess
-                    Protocol = "TCP"
-                    LocalAddress = $conn.LocalAddress
-                    LocalPort = $conn.LocalPort
-                    RemoteAddress = $conn.RemoteAddress
-                    RemotePort = $conn.RemotePort
-                    State = $conn.State
-                }
-            }
-
-            if ($result) {
-                $result | ConvertTo-Json -Depth 2
-            } else {
-                "[]"
-            }
-        "#;
-
-        let output = self.ps.execute(script).await
-            .context("Failed to execute Get-NetTCPConnection")?;
-
-        if output.trim().is_empty() || output.trim() == "[]" {
+    fn parse_connections(&self, output: &str) -> Result<Vec<NetworkConnection>> {
+        let connections_raw: Vec<ConnectionData> = parse_json_array(output)
+            .context("Failed to parse connection data")?;
+        if connections_raw.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Handle both single object and array
-        let connections_raw: serde_json::Value = serde_json::from_str(&output)
-            .context("Failed to parse connection data")?;
-
-        let connections_array = if connections_raw.is_array() {
-            connections_raw.as_array().unwrap().clone()
-        } else {
-            vec![connections_raw]
-        };
-
         let mut connections = Vec::new();
-        for conn_val in connections_array {
-            let conn: ConnectionData = serde_json::from_value(conn_val)
-                .context("Failed to deserialize connection")?;
-
+        for conn in connections_raw {
             connections.push(NetworkConnection {
                 process_name: conn.ProcessName,
                 pid: conn.PID,
@@ -375,58 +411,12 @@ impl NetworkMonitor {
     }
 
     // 5.4: Bandwidth Consumers - Top processes by network usage
-    async fn get_bandwidth_consumers(&mut self) -> Result<Vec<BandwidthConsumer>> {
-        let script = r#"
-            # Get network connections with process info and bytes transferred
-            $netstat = Get-NetTCPConnection -ErrorAction SilentlyContinue |
-                Where-Object { $_.State -eq 'Established' } |
-                Group-Object -Property OwningProcess |
-                ForEach-Object {
-                    $pid = $_.Name
-                    try {
-                        $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
-                        if ($process) {
-                            # Get network adapter statistics for this process
-                            # Note: Windows doesn't provide per-process network stats directly
-                            # We'll estimate based on connection count and system-wide stats
-                            $connCount = $_.Count
-
-                            [PSCustomObject]@{
-                                ProcessName = $process.ProcessName
-                                PID = [int]$pid
-                                ConnectionCount = $connCount
-                            }
-                        }
-                    } catch {
-                        # Skip if process no longer exists
-                    }
-                }
-
-            if ($netstat) {
-                $netstat | Sort-Object -Property ConnectionCount -Descending |
-                    Select-Object -First 10 |
-                    ConvertTo-Json -Depth 2
-            } else {
-                "[]"
-            }
-        "#;
-
-        let output = self.ps.execute(script).await
-            .context("Failed to execute bandwidth consumers query")?;
-
-        if output.trim().is_empty() || output.trim() == "[]" {
+    fn parse_bandwidth_consumers(&mut self, output: &str) -> Result<Vec<BandwidthConsumer>> {
+        let consumers_raw: Vec<ProcessBandwidthData> = parse_json_array(output)
+            .context("Failed to parse bandwidth consumers data")?;
+        if consumers_raw.is_empty() {
             return Ok(Vec::new());
         }
-
-        // Parse the output
-        let consumers_raw: serde_json::Value = serde_json::from_str(&output)
-            .context("Failed to parse bandwidth consumers data")?;
-
-        let consumers_array = if consumers_raw.is_array() {
-            consumers_raw.as_array().unwrap().clone()
-        } else {
-            vec![consumers_raw]
-        };
 
         let current_time = std::time::Instant::now();
         let time_delta = if let Some(last_time) = self.last_timestamp {
@@ -438,10 +428,7 @@ impl NetworkMonitor {
         let mut bandwidth_consumers = Vec::new();
         let mut current_process_stats = std::collections::HashMap::new();
 
-        for consumer_val in consumers_array {
-            let consumer: ProcessBandwidthData = serde_json::from_value(consumer_val)
-                .context("Failed to deserialize bandwidth consumer")?;
-
+        for consumer in consumers_raw {
             // Estimate bandwidth based on connection count
             // This is a rough approximation since Windows doesn't provide per-process network stats
             let connection_count = consumer.ConnectionCount as f64;
@@ -476,6 +463,7 @@ impl NetworkMonitor {
                 upload_speed,
                 total_bytes_received: estimated_bytes,
                 total_bytes_sent: estimated_bytes,
+                estimated: true,
             });
         }
 
@@ -492,6 +480,7 @@ impl NetworkMonitor {
     }
 
     // Linux-specific implementation
+    #[allow(dead_code)]
     async fn get_interfaces_linux(&mut self) -> Result<Vec<NetworkInterface>> {
         let linux_interfaces = self.linux_sys.get_network_stats()?;
 
@@ -545,6 +534,7 @@ impl NetworkMonitor {
         Ok(interfaces)
     }
 
+    #[allow(dead_code)]
     fn get_ip_info_linux(&self, interface: &str) -> (String, String) {
         use std::process::Command;
 
@@ -592,6 +582,7 @@ impl NetworkMonitor {
         (ipv4, gateway)
     }
 
+    #[allow(dead_code)]
     async fn get_connections_linux(&self) -> Result<Vec<NetworkConnection>> {
         use std::fs;
 
@@ -643,6 +634,7 @@ impl NetworkMonitor {
         Ok(connections)
     }
 
+    #[allow(dead_code)]
     fn parse_hex_address(&self, hex_addr: &str) -> (String, u16) {
         let parts: Vec<&str> = hex_addr.split(':').collect();
         if parts.len() != 2 {
@@ -668,6 +660,7 @@ impl NetworkMonitor {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct InterfaceData {
     Name: String,
     Description: String,
@@ -685,6 +678,7 @@ struct InterfaceData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct ConnectionData {
     ProcessName: String,
     PID: u32,
@@ -697,6 +691,7 @@ struct ConnectionData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct ProcessBandwidthData {
     ProcessName: String,
     PID: u32,

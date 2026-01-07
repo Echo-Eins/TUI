@@ -277,7 +277,7 @@ fn render_traffic_graphs(
     f: &mut Frame,
     area: Rect,
     data: &crate::monitors::NetworkData,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -458,6 +458,7 @@ fn render_bandwidth_consumers(
     data: &crate::monitors::NetworkData,
     theme: &Theme,
 ) {
+    let has_estimated = data.bandwidth_consumers.iter().any(|c| c.estimated);
     let header = Row::new(vec![
         "Process", "PID", "Download", "Upload", "Total RX", "Total TX",
     ])
@@ -473,13 +474,39 @@ fn render_bandwidth_consumers(
         .iter()
         .take(10)
         .map(|consumer| {
+            let name = if consumer.estimated {
+                format!("~{}", consumer.process_name)
+            } else {
+                consumer.process_name.clone()
+            };
+            let download = if consumer.estimated {
+                format!("~{:.2} Mbps", consumer.download_speed)
+            } else {
+                format!("{:.2} Mbps", consumer.download_speed)
+            };
+            let upload = if consumer.estimated {
+                format!("~{:.2} Mbps", consumer.upload_speed)
+            } else {
+                format!("{:.2} Mbps", consumer.upload_speed)
+            };
+            let total_rx = if consumer.estimated {
+                format!("~{}", format_bytes(consumer.total_bytes_received))
+            } else {
+                format_bytes(consumer.total_bytes_received)
+            };
+            let total_tx = if consumer.estimated {
+                format!("~{}", format_bytes(consumer.total_bytes_sent))
+            } else {
+                format_bytes(consumer.total_bytes_sent)
+            };
+
             Row::new(vec![
-                consumer.process_name.clone(),
+                name,
                 format!("{}", consumer.pid),
-                format!("{:.2} Mbps", consumer.download_speed),
-                format!("{:.2} Mbps", consumer.upload_speed),
-                format_bytes(consumer.total_bytes_received),
-                format_bytes(consumer.total_bytes_sent),
+                download,
+                upload,
+                total_rx,
+                total_tx,
             ])
             .style(Style::default().fg(Color::White))
         })
@@ -500,7 +527,8 @@ fn render_bandwidth_consumers(
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    "Bandwidth Consumers (Top {})",
+                    "Bandwidth Consumers{} (Top {})",
+                    if has_estimated { " ~est." } else { "" },
                     data.bandwidth_consumers.len().min(10)
                 ))
                 .border_style(Style::default().fg(theme.network_color)),

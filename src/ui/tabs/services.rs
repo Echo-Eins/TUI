@@ -5,7 +5,6 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
-use std::cmp::Ordering;
 
 use crate::app::{
     state::{ServiceSortColumn, ServiceStatusFilter},
@@ -107,7 +106,7 @@ fn render_header(
     area: Rect,
     data: &crate::monitors::ServiceData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let total_services = data.services.len();
     let running_services = data
@@ -173,7 +172,7 @@ fn render_service_table(
     area: Rect,
     data: &crate::monitors::ServiceData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     // Filter and sort services
     let mut services = data.services.clone();
@@ -348,7 +347,7 @@ fn render_details_panel(
     area: Rect,
     data: &crate::monitors::ServiceData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     // Filter services (same as in table)
     let mut services = data.services.clone();

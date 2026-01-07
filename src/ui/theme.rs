@@ -16,6 +16,7 @@ pub fn parse_color(hex: &str) -> Color {
 
 /// Theme helper that provides colors from the config
 pub struct Theme {
+    #[allow(dead_code)]
     pub background: Color,
     pub foreground: Color,
     pub cpu_color: Color,
@@ -58,6 +59,7 @@ impl Theme {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_usage_color(&self, usage: f32) -> Color {
         if usage < 50.0 {
             self.success_color

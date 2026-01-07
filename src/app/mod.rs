@@ -9,13 +9,13 @@ pub use tabs::{TabType, TabManager};
 
 use anyhow::Result;
 use crossterm::event::Event as CrosstermEvent;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::env;
 
 pub struct App {
     pub state: AppState,
+    #[allow(dead_code)]
     pub config_manager: Option<Arc<ConfigManager>>,
 }
 

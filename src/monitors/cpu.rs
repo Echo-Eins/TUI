@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
+use crate::utils::parse_json_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuData {
@@ -46,8 +47,103 @@ pub struct ProcessInfo {
 
 pub struct CpuMonitor {
     ps: PowerShellExecutor,
+    #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
 }
+
+const CPU_INFO_SCRIPT: &str = r#"
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        if ($cpu) {
+            $cpu | ConvertTo-Json
+        } else {
+            [PSCustomObject]@{
+                Name = "Unknown"
+                MaxClockSpeed = 0
+                CurrentClockSpeed = 0
+                NumberOfCores = 0
+                NumberOfLogicalProcessors = 0
+                TDP = 65
+            } | ConvertTo-Json
+        }
+    } catch {
+        [PSCustomObject]@{
+            Name = "Unknown"
+            MaxClockSpeed = 0
+            CurrentClockSpeed = 0
+            NumberOfCores = 0
+            NumberOfLogicalProcessors = 0
+            TDP = 65
+        } | ConvertTo-Json
+    }
+"#;
+
+const CORE_USAGE_SCRIPT: &str = r#"
+    try {
+        $cores = Get-Counter '\Processor(*)\% Processor Time' -ErrorAction Stop |
+                 Select-Object -ExpandProperty CounterSamples |
+                 Where-Object { $_.InstanceName -ne '_total' }
+        $result = @()
+        foreach ($core in $cores) {
+            $result += [PSCustomObject]@{
+                Core = $core.InstanceName
+                Usage = $core.CookedValue
+            }
+        }
+        ConvertTo-Json @($result)
+    } catch {
+        "[]"
+    }
+"#;
+
+const OVERALL_USAGE_SCRIPT: &str = r#"
+    try {
+        (Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples[0].CookedValue
+    } catch {
+        0
+    }
+"#;
+
+const TOP_PROCESSES_SCRIPT: &str = r#"
+    try {
+        $perf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction Stop |
+            Where-Object { $_.IDProcess -ne 0 -and $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
+            Sort-Object PercentProcessorTime -Descending |
+            Select-Object -First 5
+
+        $result = foreach ($entry in $perf) {
+            $proc = Get-Process -Id $entry.IDProcess -ErrorAction SilentlyContinue
+            [PSCustomObject]@{
+                Id = [uint32]$entry.IDProcess
+                ProcessName = if ($proc) { $proc.ProcessName } else { $entry.Name }
+                CpuPercent = [double]$entry.PercentProcessorTime
+                Threads = if ($proc -and $proc.Threads) { $proc.Threads.Count } else { $null }
+                Memory = if ($proc) { [uint64]$proc.WorkingSet64 } else { 0 }
+            }
+        }
+
+        $result | ConvertTo-Json
+    } catch {
+        "[]"
+    }
+"#;
+
+const TEMPERATURE_SCRIPT: &str = r#"
+    try {
+        $temp = Get-CimInstance -Namespace "root/wmi" -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty CurrentTemperature
+        if ($temp) {
+            # Convert from tenths of Kelvin to Celsius
+            $celsius = ($temp / 10) - 273.15
+            [math]::Round($celsius, 1)
+        } else {
+            # Fallback: estimate based on typical idle temps
+            45.0
+        }
+    } catch {
+        45.0
+    }
+"#;
 
 impl CpuMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
@@ -70,6 +166,7 @@ impl CpuMonitor {
         }
     }
 
+    #[allow(dead_code)]
     async fn collect_data_linux(&self) -> Result<CpuData> {
         let cpu_info = self.linux_sys.get_cpu_info()?;
         let overall_usage = self.linux_sys.get_cpu_usage()?;
@@ -108,25 +205,24 @@ impl CpuMonitor {
     }
 
     async fn collect_data_windows(&self) -> Result<CpuData> {
-        // Get CPU info
-        let cpu_info = self.get_cpu_info().await?;
+        let outputs = self
+            .ps
+            .execute_batch(&[
+                CPU_INFO_SCRIPT,
+                CORE_USAGE_SCRIPT,
+                OVERALL_USAGE_SCRIPT,
+                TOP_PROCESSES_SCRIPT,
+                TEMPERATURE_SCRIPT,
+            ])
+            .await
+            .context("Failed to execute CPU monitor batch")?;
 
-        // Get per-core usage
-        let core_usage = self.get_core_usage().await?;
-
-        // Get overall CPU usage
-        let overall_usage = self.get_overall_usage().await?;
-
-        // Get frequency info
+        let cpu_info = Self::parse_cpu_info(&outputs[0])?;
+        let core_usage = Self::parse_core_usage(&outputs[1])?;
+        let overall_usage = Self::parse_overall_usage(&outputs[2])?;
+        let top_processes = Self::parse_top_processes(&outputs[3])?;
+        let temperature = Self::parse_temperature(&outputs[4]).ok();
         let frequency = self.get_frequency_info(&cpu_info).await?;
-
-        // Get top processes
-        let top_processes = self.get_top_processes().await?;
-
-        // Try to get temperature
-        let temperature = self.get_temperature().await.ok();
-
-        // Get core counts
         let (core_count, thread_count) = self.get_core_counts(&cpu_info)?;
 
         Ok(CpuData {
@@ -145,13 +241,8 @@ impl CpuMonitor {
         })
     }
 
-    async fn get_cpu_info(&self) -> Result<CpuInfo> {
-        let script = r#"
-            Get-CimInstance Win32_Processor | Select-Object -First 1 | ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-        let info: Win32Processor = serde_json::from_str(&output)
+    fn parse_cpu_info(output: &str) -> Result<CpuInfo> {
+        let info: Win32Processor = serde_json::from_str(output)
             .context("Failed to parse CPU info")?;
 
         Ok(CpuInfo {
@@ -164,41 +255,19 @@ impl CpuMonitor {
         })
     }
 
-    async fn get_overall_usage(&self) -> Result<f32> {
-        let script = r#"
-            (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
-        "#;
-
-        let output = self.ps.execute(script).await?;
+    fn parse_overall_usage(output: &str) -> Result<f32> {
         let usage: f32 = output.trim().parse()
             .context("Failed to parse CPU usage")?;
 
         Ok(usage.min(100.0))
     }
 
-    async fn get_core_usage(&self) -> Result<Vec<CoreUsage>> {
-        let script = r#"
-            $cores = Get-Counter '\Processor(*)\% Processor Time' |
-                     Select-Object -ExpandProperty CounterSamples |
-                     Where-Object { $_.InstanceName -ne '_total' }
-            $result = @()
-            foreach ($core in $cores) {
-                $result += [PSCustomObject]@{
-                    Core = $core.InstanceName
-                    Usage = $core.CookedValue
-                }
-            }
-            ConvertTo-Json @($result)
-        "#;
-
-        let output = self.ps.execute(script).await?;
-
-        if output.trim().is_empty() || output.trim() == "[]" {
+    fn parse_core_usage(output: &str) -> Result<Vec<CoreUsage>> {
+        let cores: Vec<CoreSample> = parse_json_array(output)
+            .context("Failed to parse core usage")?;
+        if cores.is_empty() {
             return Ok(Vec::new());
         }
-
-        let cores: Vec<CoreSample> = serde_json::from_str(&output)
-            .unwrap_or_default();
 
         Ok(cores
             .into_iter()
@@ -222,56 +291,26 @@ impl CpuMonitor {
         })
     }
 
-    async fn get_top_processes(&self) -> Result<Vec<ProcessInfo>> {
-        let script = r#"
-            Get-Process |
-            Where-Object { $_.CPU -gt 0 } |
-            Sort-Object CPU -Descending |
-            Select-Object -First 5 Id, ProcessName, CPU, Threads, @{Name='Memory';Expression={$_.WorkingSet64}} |
-            ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-
-        if output.trim().is_empty() || output.trim() == "[]" {
+    fn parse_top_processes(output: &str) -> Result<Vec<ProcessInfo>> {
+        let processes: Vec<ProcessSample> = parse_json_array(output)
+            .context("Failed to parse top processes")?;
+        if processes.is_empty() {
             return Ok(Vec::new());
         }
-
-        let processes: Vec<ProcessSample> = serde_json::from_str(&output)
-            .unwrap_or_default();
 
         Ok(processes
             .into_iter()
             .map(|p| ProcessInfo {
                 pid: p.Id,
                 name: p.ProcessName,
-                cpu_usage: p.CPU.unwrap_or(0.0) as f32 / 10.0, // Normalize
+                cpu_usage: p.CpuPercent.unwrap_or(0.0) as f32,
                 threads: p.Threads.unwrap_or(1) as usize,
                 memory: p.Memory.unwrap_or(0),
             })
             .collect())
     }
 
-    async fn get_temperature(&self) -> Result<f32> {
-        // Try to get temperature from WMI thermal zone
-        let script = r#"
-            try {
-                $temp = Get-CimInstance -Namespace "root/wmi" -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
-                        Select-Object -First 1 -ExpandProperty CurrentTemperature
-                if ($temp) {
-                    # Convert from tenths of Kelvin to Celsius
-                    $celsius = ($temp / 10) - 273.15
-                    [math]::Round($celsius, 1)
-                } else {
-                    # Fallback: estimate based on typical idle temps
-                    45.0
-                }
-            } catch {
-                45.0
-            }
-        "#;
-
-        let output = self.ps.execute(script).await?;
+    fn parse_temperature(output: &str) -> Result<f32> {
         let temp: f32 = output.trim().parse()
             .unwrap_or(45.0);
 
@@ -288,6 +327,7 @@ impl CpuMonitor {
 
 // PowerShell data structures
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct Win32Processor {
     Name: String,
     MaxClockSpeed: u32,
@@ -308,15 +348,17 @@ struct CpuInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct CoreSample {
     Usage: f32,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct ProcessSample {
     Id: u32,
     ProcessName: String,
-    CPU: Option<f64>,
+    CpuPercent: Option<f64>,
     Threads: Option<u32>,
     Memory: Option<u64>,
 }

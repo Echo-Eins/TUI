@@ -1,4 +1,6 @@
 // Radial menu for command history circular selection
+#![allow(dead_code)]
+
 pub struct RadialMenu {
     pub items: Vec<String>,
     pub selected_index: usize,

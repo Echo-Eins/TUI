@@ -50,8 +50,197 @@ pub struct PagefileInfo {
 
 pub struct RamMonitor {
     ps: PowerShellExecutor,
+    #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
 }
+
+const MEMORY_INFO_SCRIPT: &str = r#"
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop |
+            Select-Object TotalVisibleMemorySize, FreePhysicalMemory
+        if ($os) {
+            $os | ConvertTo-Json
+        } else {
+            [PSCustomObject]@{
+                TotalVisibleMemorySize = 0
+                FreePhysicalMemory = 0
+            } | ConvertTo-Json
+        }
+    } catch {
+        [PSCustomObject]@{
+            TotalVisibleMemorySize = 0
+            FreePhysicalMemory = 0
+        } | ConvertTo-Json
+    }
+"#;
+
+const PHYSICAL_MEMORY_SCRIPT: &str = r#"
+    try {
+        $mem = Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | Select-Object -First 1
+        if ($mem) {
+            [PSCustomObject]@{
+                Speed = "$($mem.Speed) MHz"
+                MemoryType = switch ($mem.MemoryType) {
+                    20 { "DDR" }
+                    21 { "DDR2" }
+                    24 { "DDR3" }
+                    26 { "DDR4" }
+                    34 { "DDR5" }
+                    default { "Unknown" }
+                }
+            } | ConvertTo-Json
+        } else {
+            [PSCustomObject]@{
+                Speed = "Unknown"
+                MemoryType = "Unknown"
+            } | ConvertTo-Json
+        }
+    } catch {
+        [PSCustomObject]@{
+            Speed = "Unknown"
+            MemoryType = "Unknown"
+        } | ConvertTo-Json
+    }
+"#;
+
+const DETAILED_MEMORY_SCRIPT: &str = r#"
+    $counters = @(
+        '\Memory\Available Bytes',
+        '\Memory\Cache Bytes',
+        '\Memory\Standby Cache Normal Priority Bytes',
+        '\Memory\Standby Cache Reserve Bytes',
+        '\Memory\Standby Cache Core Bytes',
+        '\Memory\Free & Zero Page List Bytes',
+        '\Memory\Modified Page List Bytes'
+    )
+
+    $available = 0
+    $cached = 0
+    $standbyNormal = 0
+    $standbyReserve = 0
+    $standbyCore = 0
+    $free = 0
+    $modified = 0
+
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $total = if ($os) { $os.TotalVisibleMemorySize * 1024 } else { 0 }
+
+    try {
+        $perfData = Get-Counter -Counter $counters -ErrorAction Stop
+
+        $available = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Available Bytes*'}).CookedValue
+        $cached = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Cache Bytes*'}).CookedValue
+        $standbyNormal = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Normal*'}).CookedValue
+        $standbyReserve = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Reserve*'}).CookedValue
+        $standbyCore = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Core*'}).CookedValue
+        $free = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Free && Zero*'}).CookedValue
+        $modified = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Modified Page*'}).CookedValue
+    } catch {
+    }
+
+    if ($available -eq 0 -and $os) {
+        $available = $os.FreePhysicalMemory * 1024
+    }
+    if ($free -eq 0 -and $os) {
+        $free = $os.FreePhysicalMemory * 1024
+    }
+
+    $standby = $standbyNormal + $standbyReserve + $standbyCore
+    $inUse = if ($total -ge $available) { $total - $available } else { 0 }
+
+    [PSCustomObject]@{
+        InUse = [uint64]$inUse
+        Available = [uint64]$available
+        Cached = [uint64]$cached
+        Standby = [uint64]$standby
+        Free = [uint64]$free
+        Modified = [uint64]$modified
+    } | ConvertTo-Json
+"#;
+
+const COMMITTED_MEMORY_SCRIPT: &str = r#"
+    $counters = @(
+        '\Memory\Committed Bytes',
+        '\Memory\Commit Limit'
+    )
+
+    $committed = 0
+    $commitLimit = 0
+    $commitPercent = 0
+
+    try {
+        $perfData = Get-Counter -Counter $counters -ErrorAction Stop
+
+        $committed = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Committed Bytes*'}).CookedValue
+        $commitLimit = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Commit Limit*'}).CookedValue
+        $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
+    } catch {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $pageFile = Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if ($os) {
+            $committed = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) * 1024
+            $commitLimit = ($os.TotalVisibleMemorySize * 1024)
+            if ($pageFile) {
+                $commitLimit = $commitLimit + ($pageFile.AllocatedBaseSize * 1024 * 1024)
+            }
+            $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
+        }
+    }
+
+    [PSCustomObject]@{
+        Committed = [uint64]$committed
+        CommitLimit = [uint64]$commitLimit
+        CommitPercent = [double]$commitPercent
+    } | ConvertTo-Json
+"#;
+
+const TOP_PROCESSES_SCRIPT: &str = r#"
+    try {
+        Get-Process |
+            Sort-Object WorkingSet64 -Descending |
+            Select-Object -First 10 |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    Pid = $_.Id
+                    Name = $_.ProcessName
+                    WorkingSet = [uint64]$_.WorkingSet64
+                    PrivateBytes = [uint64]$_.PrivateMemorySize64
+                }
+            } | ConvertTo-Json
+    } catch {
+        "[]"
+    }
+"#;
+
+const PAGEFILE_SCRIPT: &str = r#"
+    try {
+        $pagefiles = Get-CimInstance Win32_PageFileUsage -ErrorAction Stop
+
+        if ($pagefiles) {
+            $result = @()
+            foreach ($pf in $pagefiles) {
+                $totalSize = [uint64]($pf.AllocatedBaseSize * 1024 * 1024)
+                $currentUsage = [uint64]($pf.CurrentUsage * 1024 * 1024)
+                $peakUsage = [uint64]($pf.PeakUsage * 1024 * 1024)
+                $usagePercent = if ($totalSize -gt 0) { ($currentUsage / $totalSize) * 100 } else { 0 }
+
+                $result += [PSCustomObject]@{
+                    Name = $pf.Name
+                    TotalSize = $totalSize
+                    CurrentUsage = $currentUsage
+                    PeakUsage = $peakUsage
+                    UsagePercent = [double]$usagePercent
+                }
+            }
+            $result | ConvertTo-Json
+        } else {
+            "[]"
+        }
+    } catch {
+        "[]"
+    }
+"#;
 
 impl RamMonitor {
     pub fn new(ps: PowerShellExecutor) -> Result<Self> {
@@ -73,6 +262,7 @@ impl RamMonitor {
         }
     }
 
+    #[allow(dead_code)]
     async fn collect_data_linux(&self) -> Result<RamData> {
         let mem_info = self.linux_sys.get_memory_info()?;
 
@@ -98,12 +288,25 @@ impl RamMonitor {
     }
 
     async fn collect_data_windows(&self) -> Result<RamData> {
-        let memory_info = self.get_memory_info().await?;
-        let physical_memory = self.get_physical_memory_info().await?;
-        let detailed_memory = self.get_detailed_memory_breakdown().await?;
-        let committed_memory = self.get_committed_memory().await?;
-        let top_processes = self.get_top_memory_consumers().await?;
-        let pagefiles = self.get_pagefile_info().await?;
+        let outputs = self
+            .ps
+            .execute_batch(&[
+                MEMORY_INFO_SCRIPT,
+                PHYSICAL_MEMORY_SCRIPT,
+                DETAILED_MEMORY_SCRIPT,
+                COMMITTED_MEMORY_SCRIPT,
+                TOP_PROCESSES_SCRIPT,
+                PAGEFILE_SCRIPT,
+            ])
+            .await
+            .context("Failed to execute RAM monitor batch")?;
+
+        let memory_info = Self::parse_memory_info(&outputs[0])?;
+        let physical_memory = Self::parse_physical_memory_info(&outputs[1])?;
+        let detailed_memory = Self::parse_detailed_memory_breakdown(&outputs[2])?;
+        let committed_memory = Self::parse_committed_memory(&outputs[3])?;
+        let top_processes = Self::parse_top_memory_consumers(&outputs[4])?;
+        let pagefiles = Self::parse_pagefile_info(&outputs[5])?;
 
         let total_pagefile_size: u64 = pagefiles.iter().map(|pf| pf.total_size).sum();
         let total_pagefile_used: u64 = pagefiles.iter().map(|pf| pf.current_usage).sum();
@@ -137,33 +340,12 @@ impl RamMonitor {
         })
     }
 
-    async fn get_memory_info(&self) -> Result<Win32OperatingSystem> {
-        let script = r#"
-            Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory | ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-        serde_json::from_str(&output).context("Failed to parse memory info")
+    fn parse_memory_info(output: &str) -> Result<Win32OperatingSystem> {
+        serde_json::from_str(output).context("Failed to parse memory info")
     }
 
-    async fn get_physical_memory_info(&self) -> Result<PhysicalMemoryInfo> {
-        let script = r#"
-            $mem = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1
-            [PSCustomObject]@{
-                Speed = "$($mem.Speed) MHz"
-                MemoryType = switch ($mem.MemoryType) {
-                    20 { "DDR" }
-                    21 { "DDR2" }
-                    24 { "DDR3" }
-                    26 { "DDR4" }
-                    34 { "DDR5" }
-                    default { "Unknown" }
-                }
-            } | ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-        let info: PhysicalMemory = serde_json::from_str(&output)
+    fn parse_physical_memory_info(output: &str) -> Result<PhysicalMemoryInfo> {
+        let info: PhysicalMemory = serde_json::from_str(output)
             .context("Failed to parse physical memory info")?;
 
         Ok(PhysicalMemoryInfo {
@@ -172,182 +354,81 @@ impl RamMonitor {
         })
     }
 
-    async fn get_detailed_memory_breakdown(&self) -> Result<DetailedMemory> {
-        let script = r#"
-            $counters = @(
-                '\Memory\Available Bytes',
-                '\Memory\Cache Bytes',
-                '\Memory\Standby Cache Normal Priority Bytes',
-                '\Memory\Standby Cache Reserve Bytes',
-                '\Memory\Standby Cache Core Bytes',
-                '\Memory\Free & Zero Page List Bytes',
-                '\Memory\Modified Page List Bytes'
-            )
-
-            $os = Get-CimInstance Win32_OperatingSystem
-            $total = $os.TotalVisibleMemorySize * 1024
-
-            try {
-                $perfData = Get-Counter -Counter $counters -ErrorAction SilentlyContinue
-
-                $available = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Available Bytes*'}).CookedValue
-                $cached = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Cache Bytes*'}).CookedValue
-                $standbyNormal = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Normal*'}).CookedValue
-                $standbyReserve = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Reserve*'}).CookedValue
-                $standbyCore = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Standby Cache Core*'}).CookedValue
-                $free = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Free & Zero*'}).CookedValue
-                $modified = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Modified Page*'}).CookedValue
-
-                $standby = $standbyNormal + $standbyReserve + $standbyCore
-                $inUse = $total - $available
-
-                [PSCustomObject]@{
-                    InUse = [uint64]$inUse
-                    Available = [uint64]$available
-                    Cached = [uint64]$cached
-                    Standby = [uint64]$standby
-                    Free = [uint64]$free
-                    Modified = [uint64]$modified
-                }
-            } catch {
-                # Fallback to basic memory info
-                [PSCustomObject]@{
-                    InUse = [uint64]($total - $available)
-                    Available = [uint64]$available
-                    Cached = [uint64]($cached)
-                    Standby = [uint64]0
-                    Free = [uint64]($os.FreePhysicalMemory * 1024)
-                    Modified = [uint64]0
-                }
-            } | ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-        serde_json::from_str(&output).context("Failed to parse detailed memory info")
+    fn parse_detailed_memory_breakdown(output: &str) -> Result<DetailedMemory> {
+        serde_json::from_str(output).context("Failed to parse detailed memory info")
     }
 
-    async fn get_committed_memory(&self) -> Result<CommittedMemory> {
-        let script = r#"
-            $counters = @(
-                '\Memory\Committed Bytes',
-                '\Memory\Commit Limit'
-            )
-
-            try {
-                $perfData = Get-Counter -Counter $counters -ErrorAction SilentlyContinue
-
-                $committed = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Committed Bytes*'}).CookedValue
-                $commitLimit = ($perfData.CounterSamples | Where-Object {$_.Path -like '*Commit Limit*'}).CookedValue
-
-                $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
-
-                [PSCustomObject]@{
-                    Committed = [uint64]$committed
-                    CommitLimit = [uint64]$commitLimit
-                    CommitPercent = [double]$commitPercent
-                }
-            } catch {
-                $os = Get-CimInstance Win32_OperatingSystem
-                $pageFile = Get-CimInstance Win32_PageFileUsage | Select-Object -First 1
-
-                $committed = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) * 1024
-                $commitLimit = ($os.TotalVisibleMemorySize * 1024) + ($pageFile.AllocatedBaseSize * 1024 * 1024)
-                $commitPercent = if ($commitLimit -gt 0) { ($committed / $commitLimit) * 100 } else { 0 }
-
-                [PSCustomObject]@{
-                    Committed = [uint64]$committed
-                    CommitLimit = [uint64]$commitLimit
-                    CommitPercent = [double]$commitPercent
-                }
-            } | ConvertTo-Json
-        "#;
-
-        let output = self.ps.execute(script).await?;
-        serde_json::from_str(&output).context("Failed to parse committed memory info")
+    fn parse_committed_memory(output: &str) -> Result<CommittedMemory> {
+        serde_json::from_str(output).context("Failed to parse committed memory info")
     }
 
-    async fn get_top_memory_consumers(&self) -> Result<Vec<ProcessMemoryInfo>> {
-        let script = r#"
-            Get-Process |
-                Sort-Object WorkingSet64 -Descending |
-                Select-Object -First 10 |
-                ForEach-Object {
-                    [PSCustomObject]@{
-                        Pid = $_.Id
-                        Name = $_.ProcessName
-                        WorkingSet = [uint64]$_.WorkingSet64
-                        PrivateBytes = [uint64]$_.PrivateMemorySize64
-                    }
-                } | ConvertTo-Json
-        "#;
+    fn parse_top_memory_consumers(output: &str) -> Result<Vec<ProcessMemoryInfo>> {
+        let trimmed = output.trim_start_matches('\u{feff}').trim();
+        if trimmed.is_empty() || trimmed == "[]" {
+            return Ok(Vec::new());
+        }
+        if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+            return Ok(Vec::new());
+        }
 
-        let output = self.ps.execute(script).await?;
-
-        // Handle both single object and array responses
-        let processes: Vec<ProcessMemoryInfo> = if output.trim().starts_with('[') {
-            serde_json::from_str(&output).context("Failed to parse top processes")?
+        let samples: Vec<ProcessMemorySample> = if trimmed.starts_with('[') {
+            serde_json::from_str(output).context("Failed to parse top processes")?
         } else {
-            let single: ProcessMemoryInfo = serde_json::from_str(&output)
+            let single: ProcessMemorySample = serde_json::from_str(output)
                 .context("Failed to parse single process")?;
             vec![single]
         };
 
-        Ok(processes)
+        Ok(samples
+            .into_iter()
+            .map(|p| ProcessMemoryInfo {
+                pid: p.Pid,
+                name: p.Name,
+                working_set: p.WorkingSet,
+                private_bytes: p.PrivateBytes,
+            })
+            .collect())
     }
 
-    async fn get_pagefile_info(&self) -> Result<Vec<PagefileInfo>> {
-        let script = r#"
-            $pagefiles = Get-CimInstance Win32_PageFileUsage
-
-            if ($pagefiles) {
-                $result = @()
-                foreach ($pf in $pagefiles) {
-                    $totalSize = [uint64]($pf.AllocatedBaseSize * 1024 * 1024)
-                    $currentUsage = [uint64]($pf.CurrentUsage * 1024 * 1024)
-                    $peakUsage = [uint64]($pf.PeakUsage * 1024 * 1024)
-                    $usagePercent = if ($totalSize -gt 0) { ($currentUsage / $totalSize) * 100 } else { 0 }
-
-                    $result += [PSCustomObject]@{
-                        Name = $pf.Name
-                        TotalSize = $totalSize
-                        CurrentUsage = $currentUsage
-                        PeakUsage = $peakUsage
-                        UsagePercent = [double]$usagePercent
-                    }
-                }
-                $result | ConvertTo-Json
-            } else {
-                # No pagefile configured, return empty array
-                "[]"
-            }
-        "#;
-
-        let output = self.ps.execute(script).await?;
-
-        // Handle empty array, single object, and array responses
-        if output.trim() == "[]" {
+    fn parse_pagefile_info(output: &str) -> Result<Vec<PagefileInfo>> {
+        let trimmed = output.trim_start_matches('\u{feff}').trim();
+        if trimmed.is_empty() || trimmed == "[]" {
+            return Ok(Vec::new());
+        }
+        if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
             return Ok(Vec::new());
         }
 
-        let pagefiles: Vec<PagefileInfo> = if output.trim().starts_with('[') {
-            serde_json::from_str(&output).context("Failed to parse pagefiles")?
+        let samples: Vec<PagefileSample> = if trimmed.starts_with('[') {
+            serde_json::from_str(output).context("Failed to parse pagefiles")?
         } else {
-            let single: PagefileInfo = serde_json::from_str(&output)
+            let single: PagefileSample = serde_json::from_str(output)
                 .context("Failed to parse single pagefile")?;
             vec![single]
         };
 
-        Ok(pagefiles)
+        Ok(samples
+            .into_iter()
+            .map(|p| PagefileInfo {
+                name: p.Name,
+                total_size: p.TotalSize,
+                current_usage: p.CurrentUsage,
+                peak_usage: p.PeakUsage,
+                usage_percent: p.UsagePercent,
+            })
+            .collect())
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct Win32OperatingSystem {
     TotalVisibleMemorySize: u64,
     FreePhysicalMemory: u64,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct PhysicalMemory {
     Speed: String,
     MemoryType: String,
@@ -360,8 +441,10 @@ struct PhysicalMemoryInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct DetailedMemory {
     InUse: u64,
+    #[allow(dead_code)]
     Available: u64,
     Cached: u64,
     Standby: u64,
@@ -378,6 +461,7 @@ impl DetailedMemory {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct CommittedMemory {
     Committed: u64,
     CommitLimit: u64,
@@ -388,4 +472,23 @@ impl CommittedMemory {
     fn committed(&self) -> u64 { self.Committed }
     fn commit_limit(&self) -> u64 { self.CommitLimit }
     fn commit_percent(&self) -> f64 { self.CommitPercent }
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct ProcessMemorySample {
+    Pid: u32,
+    Name: String,
+    WorkingSet: u64,
+    PrivateBytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct PagefileSample {
+    Name: String,
+    TotalSize: u64,
+    CurrentUsage: u64,
+    PeakUsage: u64,
+    UsagePercent: f64,
 }

@@ -1,5 +1,5 @@
 pub mod format;
+pub mod json;
 pub mod command_history;
 
-pub use format::*;
-pub use command_history::CommandHistory;
+pub use json::*;

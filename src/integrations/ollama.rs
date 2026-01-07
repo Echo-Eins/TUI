@@ -195,6 +195,7 @@ impl OllamaClient {
         Ok(running)
     }
 
+    #[allow(dead_code)]
     pub async fn show_model(&self, model_name: &str) -> Result<String> {
         let output = Command::new(&self.ollama_path)
             .arg("show")
@@ -253,6 +254,7 @@ impl OllamaClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn pull_model(&self, model_name: &str) -> Result<String> {
         let output = Command::new(&self.ollama_path)
             .arg("pull")
@@ -268,6 +270,7 @@ impl OllamaClient {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    #[allow(dead_code)]
     pub async fn execute_command(&self, command: &str) -> Result<String> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
@@ -306,6 +309,7 @@ impl OllamaClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_log_entry(&mut self, action: String, details: String, success: bool) -> ActivityLogEntry {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

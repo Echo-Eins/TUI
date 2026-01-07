@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::PowerShellExecutor;
+use crate::utils::parse_json_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceData {
@@ -107,34 +108,43 @@ impl ServiceMonitor {
 
     async fn get_services(&self) -> Result<Vec<ServiceEntry>> {
         let script = r#"
-            Get-Service | Select-Object -Property `
-                Name,
-                DisplayName,
-                Status,
-                StartType,
-                @{Name='Description';Expression={
-                    try {
-                        $svc = Get-WmiObject -Class Win32_Service -Filter "Name='$($_.Name)'"
-                        $svc.Description
-                    } catch {
-                        $null
+            try {
+                $cimServices = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue
+                $cimByName = @{}
+                foreach ($svc in $cimServices) {
+                    $cimByName[$svc.Name] = $svc
+                }
+
+                Get-Service -ErrorAction SilentlyContinue | ForEach-Object {
+                    $cim = $cimByName[$_.Name]
+                    $startType = $_.StartType.ToString()
+                    if ($startType -eq 'Automatic' -and $cim -and $cim.DelayedAutoStart) {
+                        $startType = 'AutomaticDelayedStart'
                     }
-                }},
-                CanStop,
-                CanPauseAndContinue,
-                @{Name='DependentServices';Expression={
-                    ($_.DependentServices | ForEach-Object { $_.Name }) -join ','
-                }},
-                ServiceType | ConvertTo-Json
+
+                    [PSCustomObject]@{
+                        Name = $_.Name
+                        DisplayName = $_.DisplayName
+                        Status = $_.Status.ToString()
+                        StartType = $startType
+                        Description = if ($cim) { $cim.Description } else { $null }
+                        CanStop = $_.CanStop
+                        CanPauseAndContinue = $_.CanPauseAndContinue
+                        DependentServices = ($_.DependentServices | ForEach-Object { $_.Name }) -join ','
+                        ServiceType = if ($cim) { $cim.ServiceType } else { $null }
+                    }
+                } | ConvertTo-Json
+            } catch {
+                "[]"
+            }
         "#;
 
         let output = self.ps.execute(script).await?;
-        if output.trim().is_empty() || output.trim() == "[]" {
+        let services: Vec<ServiceSample> = parse_json_array(&output)
+            .context("Failed to parse service data")?;
+        if services.is_empty() {
             return Ok(Vec::new());
         }
-
-        let services: Vec<ServiceSample> = serde_json::from_str(&output)
-            .context("Failed to parse service data")?;
 
         Ok(services
             .into_iter()
@@ -155,24 +165,28 @@ impl ServiceMonitor {
             .collect())
     }
 
+    #[allow(dead_code)]
     pub async fn start_service(&self, service_name: &str) -> Result<()> {
         let script = format!("Start-Service -Name '{}'", service_name);
         self.ps.execute(&script).await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn stop_service(&self, service_name: &str) -> Result<()> {
         let script = format!("Stop-Service -Name '{}'", service_name);
         self.ps.execute(&script).await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn restart_service(&self, service_name: &str) -> Result<()> {
         let script = format!("Restart-Service -Name '{}'", service_name);
         self.ps.execute(&script).await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn set_startup_type(&self, service_name: &str, startup_type: ServiceStartType) -> Result<()> {
         let startup_str = match startup_type {
             ServiceStartType::Automatic => "Automatic",
@@ -188,6 +202,7 @@ impl ServiceMonitor {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct ServiceSample {
     Name: String,
     DisplayName: String,

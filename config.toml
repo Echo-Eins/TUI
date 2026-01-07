@@ -48,6 +48,14 @@ graph_duration_seconds = 60
 show_connections = true
 max_connections = 10
 
+[monitors.processes]
+enabled = true
+refresh_interval_ms = 2000
+
+[monitors.services]
+enabled = true
+refresh_interval_ms = 3000
+
 [integrations.ollama]
 enabled = true
 refresh_interval_ms = 5000

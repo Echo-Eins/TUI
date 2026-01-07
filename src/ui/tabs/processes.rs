@@ -100,7 +100,12 @@ fn render_compact(
     render_process_table(f, chunks[1], data, app, theme);
 }
 
-fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, theme: &Theme) {
+fn render_header(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::ProcessData,
+    _theme: &Theme,
+) {
     let total_processes = data.processes.len();
     let total_memory: u64 = data.processes.iter().map(|p| p.memory).sum();
     let total_threads: usize = data.processes.iter().map(|p| p.threads).sum();
@@ -145,7 +150,7 @@ fn render_process_table(
     area: Rect,
     data: &crate::monitors::ProcessData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     // Sort and filter processes
     let mut processes = data.processes.clone();
@@ -174,7 +179,7 @@ fn render_process_table(
         "↓"
     };
 
-    let mut headers = vec![
+    let headers = vec![
         Cell::from(
             if app.state.processes_state.sort_column == ProcessSortColumn::Pid {
                 format!("PID {}", sort_indicator)
@@ -324,7 +329,7 @@ fn render_details_panel(
     area: Rect,
     data: &crate::monitors::ProcessData,
     app: &App,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     // Sort and filter processes (same as in table)
     let mut processes = data.processes.clone();

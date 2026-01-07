@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::PowerShellExecutor;
+use crate::utils::parse_json_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuData {
@@ -48,6 +49,7 @@ impl GpuMonitor {
         }
     }
 
+    #[allow(dead_code)]
     async fn collect_data_linux(&self) -> Result<GpuData> {
         // Try nvidia-smi directly (for NVIDIA GPUs)
         if let Ok(nvidia_data) = self.get_nvidia_smi_linux().await {
@@ -164,12 +166,11 @@ impl GpuMonitor {
         "#;
 
         let output = self.ps.execute(script).await?;
-        if output.trim().is_empty() || output.trim() == "[]" {
+        let processes: Vec<GpuProcessSample> = parse_json_array(&output)
+            .context("Failed to parse GPU process list")?;
+        if processes.is_empty() {
             return Ok(Vec::new());
         }
-
-        let processes: Vec<GpuProcessSample> = serde_json::from_str(&output)
-            .unwrap_or_default();
 
         Ok(processes
             .into_iter()
@@ -184,6 +185,7 @@ impl GpuMonitor {
     }
 
     // Linux-specific nvidia-smi implementation
+    #[allow(dead_code)]
     async fn get_nvidia_smi_linux(&self) -> Result<GpuData> {
         use std::process::Command;
 
@@ -233,6 +235,7 @@ impl GpuMonitor {
         })
     }
 
+    #[allow(dead_code)]
     async fn get_gpu_processes_linux(&self) -> Result<Vec<GpuProcessInfo>> {
         use std::process::Command;
 
@@ -269,6 +272,7 @@ impl GpuMonitor {
         Ok(processes)
     }
 
+    #[allow(dead_code)]
     fn get_stub_gpu_data(&self) -> GpuData {
         GpuData {
             name: "No GPU detected".to_string(),
@@ -288,10 +292,12 @@ impl GpuMonitor {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct NvidiaSmiData {
     Name: String,
     Temperature: f32,
     UtilizationGpu: f32,
+    #[allow(dead_code)]
     UtilizationMemory: f32,
     MemoryUsed: u64,
     MemoryTotal: u64,
@@ -304,6 +310,7 @@ struct NvidiaSmiData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct GpuProcessSample {
     Pid: u32,
     Name: String,
@@ -311,6 +318,7 @@ struct GpuProcessSample {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct GpuInfo {
     Name: String,
     DriverVersion: String,
