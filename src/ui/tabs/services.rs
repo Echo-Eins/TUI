@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    state::{ServiceSortColumn, ServiceStatusFilter},
+    state::{ServiceSortColumn, ServiceStatusFilter, ServicesPanelFocus},
     App,
 };
 use crate::monitors::services::{ServiceEntry, ServiceStatus};
@@ -172,7 +172,7 @@ fn render_service_table(
     area: Rect,
     data: &crate::monitors::ServiceData,
     app: &App,
-    _theme: &Theme,
+    theme: &Theme,
 ) {
     // Filter and sort services
     let mut services = data.services.clone();
@@ -334,14 +334,23 @@ fn render_service_table(
         Span::raw(": Sort by Name/Display/Status/Type  "),
         Span::styled("f", Style::default().fg(Color::Cyan)),
         Span::raw(": Filter  "),
+        Span::styled("Left/Right", Style::default().fg(Color::Cyan)),
+        Span::raw(": Focus  "),
         Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
         Span::raw(": Page"),
     ])];
 
+    let table_focused = app.state.services_state.focused_panel == ServicesPanelFocus::Table;
+    let border_color = if table_focused {
+        Color::Cyan
+    } else {
+        theme.foreground
+    };
+
     let block = Block::default()
         .title("Services")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(border_color));
 
     // Calculate constraints for table columns
     let widths = [
@@ -377,7 +386,7 @@ fn render_details_panel(
     area: Rect,
     data: &crate::monitors::ServiceData,
     app: &App,
-    _theme: &Theme,
+    theme: &Theme,
 ) {
     // Filter services (same as in table)
     let mut services = data.services.clone();
@@ -515,21 +524,39 @@ fn render_details_panel(
             )]));
         }
 
+        let details_focused =
+            app.state.services_state.focused_panel == ServicesPanelFocus::Details;
+        let border_color = if details_focused {
+            Color::Cyan
+        } else {
+            theme.foreground
+        };
+
         let block = Block::default()
             .title("Service Details")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(border_color));
 
+        let scroll = app.state.services_state.details_scroll.min(u16::MAX as usize) as u16;
         let paragraph = Paragraph::new(details)
             .block(block)
-            .wrap(Wrap { trim: true });
+            .wrap(Wrap { trim: true })
+            .scroll((scroll, 0));
 
         f.render_widget(paragraph, area);
     } else {
+        let details_focused =
+            app.state.services_state.focused_panel == ServicesPanelFocus::Details;
+        let border_color = if details_focused {
+            Color::Cyan
+        } else {
+            theme.foreground
+        };
+
         let block = Block::default()
             .title("Service Details")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(border_color));
 
         let text = Paragraph::new("No service selected")
             .block(block)
@@ -594,5 +621,7 @@ fn sort_services(services: &mut Vec<ServiceEntry>, column: ServiceSortColumn, as
         }
     });
 }
+
+
 
 

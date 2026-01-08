@@ -172,7 +172,8 @@ impl GpuMonitor {
                 0
             }
 
-            $adapterMem = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction SilentlyContinue | Select-Object -First 1
+            $adapterMem = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction SilentlyContinue |
+                Sort-Object TotalDedicatedMemory -Descending | Select-Object -First 1
             $memTotal = if ($adapterMem -and $adapterMem.TotalDedicatedMemory) {
                 [uint64]$adapterMem.TotalDedicatedMemory
             } else {

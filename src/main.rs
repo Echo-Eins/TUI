@@ -8,7 +8,9 @@ use ratatui::{
     backend::CrosstermBackend,
     Terminal,
 };
+use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;  // Use tokio Mutex for async compatibility
 
@@ -24,8 +26,7 @@ use events::{EventHandler, AppEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logger
-    env_logger::init();
+    init_logging();
 
     set_console_utf8();
 
@@ -36,6 +37,37 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_logging() {
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    );
+    builder.format_timestamp_secs();
+
+    let log_path = std::env::var("TUI_PLUS_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "logs/tui-plus.log".to_string());
+
+    if let Some(parent) = Path::new(&log_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                eprintln!("Failed to create log directory {:?}: {}", parent, err);
+            }
+        }
+    }
+
+    match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+        Err(err) => {
+            eprintln!("Failed to open log file {}: {}", log_path, err);
+        }
+    }
+
+    builder.init();
 }
 
 #[cfg(windows)]

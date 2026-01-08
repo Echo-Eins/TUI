@@ -47,6 +47,27 @@ fn build_ps_settings(config: &Config, refresh_interval_ms: u64) -> PsSettings {
         use_cache: effective_use_cache,
     }
 }
+
+fn update_monitor_error(
+    monitor: &str,
+    last_error: &mut Option<String>,
+    error_store: &Arc<RwLock<Option<String>>>,
+    new_error: Option<String>,
+) {
+    if &new_error == last_error {
+        return;
+    }
+
+    match (&*last_error, &new_error) {
+        (None, Some(err)) => log::error!("{} monitor error: {}", monitor, err),
+        (Some(_), Some(err)) => log::warn!("{} monitor error changed: {}", monitor, err),
+        (Some(_), None) => log::info!("{} monitor recovered", monitor),
+        (None, None) => {}
+    }
+
+    *error_store.write() = new_error.clone();
+    *last_error = new_error;
+}
 pub fn spawn_monitor_tasks(
     config: Arc<RwLock<Config>>,
     cpu_data: Arc<RwLock<Option<CpuData>>>,
@@ -106,6 +127,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<CpuMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -121,7 +143,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *cpu_data.write() = None;
-                    *cpu_error.write() = Some("CPU monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "CPU",
+                        &mut last_error,
+                        &cpu_error,
+                        Some("CPU monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -130,8 +157,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for CPU monitor".to_string());
-                    log::warn!("CPU monitor running in degraded mode: {}", message);
-                    *cpu_error.write() = Some(message);
+                    update_monitor_error("CPU", &mut last_error, &cpu_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -159,8 +185,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start CPU monitor: {}", e);
-                            *cpu_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "CPU",
+                                &mut last_error,
+                                &cpu_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -171,11 +201,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *cpu_data.write() = Some(data);
-                            *cpu_error.write() = None;
+                            update_monitor_error("CPU", &mut last_error, &cpu_error, None);
                         }
                         Err(e) => {
-                            log::error!("CPU monitor error: {}", e);
-                            *cpu_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "CPU",
+                                &mut last_error,
+                                &cpu_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -196,6 +230,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<GpuMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -211,7 +246,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *gpu_data.write() = None;
-                    *gpu_error.write() = Some("GPU monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "GPU",
+                        &mut last_error,
+                        &gpu_error,
+                        Some("GPU monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -220,8 +260,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for GPU monitor".to_string());
-                    log::warn!("GPU monitor running in degraded mode: {}", message);
-                    *gpu_error.write() = Some(message);
+                    update_monitor_error("GPU", &mut last_error, &gpu_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -249,8 +288,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start GPU monitor: {}", e);
-                            *gpu_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "GPU",
+                                &mut last_error,
+                                &gpu_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -261,11 +304,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *gpu_data.write() = Some(data);
-                            *gpu_error.write() = None;
+                            update_monitor_error("GPU", &mut last_error, &gpu_error, None);
                         }
                         Err(e) => {
-                            log::error!("GPU monitor error: {}", e);
-                            *gpu_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "GPU",
+                                &mut last_error,
+                                &gpu_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -286,6 +333,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<RamMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -301,7 +349,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *ram_data.write() = None;
-                    *ram_error.write() = Some("RAM monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "RAM",
+                        &mut last_error,
+                        &ram_error,
+                        Some("RAM monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -310,8 +363,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for RAM monitor".to_string());
-                    log::warn!("RAM monitor running in degraded mode: {}", message);
-                    *ram_error.write() = Some(message);
+                    update_monitor_error("RAM", &mut last_error, &ram_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -339,8 +391,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start RAM monitor: {}", e);
-                            *ram_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "RAM",
+                                &mut last_error,
+                                &ram_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -351,11 +407,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *ram_data.write() = Some(data);
-                            *ram_error.write() = None;
+                            update_monitor_error("RAM", &mut last_error, &ram_error, None);
                         }
                         Err(e) => {
-                            log::error!("RAM monitor error: {}", e);
-                            *ram_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "RAM",
+                                &mut last_error,
+                                &ram_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -376,6 +436,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<DiskMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -391,7 +452,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *disk_data.write() = None;
-                    *disk_error.write() = Some("Disk monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "Disk",
+                        &mut last_error,
+                        &disk_error,
+                        Some("Disk monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -400,8 +466,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for disk monitor".to_string());
-                    log::warn!("Disk monitor running in degraded mode: {}", message);
-                    *disk_error.write() = Some(message);
+                    update_monitor_error("Disk", &mut last_error, &disk_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -429,8 +494,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start disk monitor: {}", e);
-                            *disk_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Disk",
+                                &mut last_error,
+                                &disk_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -441,11 +510,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *disk_data.write() = Some(data);
-                            *disk_error.write() = None;
+                            update_monitor_error("Disk", &mut last_error, &disk_error, None);
                         }
                         Err(e) => {
-                            log::error!("Disk monitor error: {}", e);
-                            *disk_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Disk",
+                                &mut last_error,
+                                &disk_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -466,6 +539,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<DiskAnalyzerMonitor> = None;
             let mut last_settings: Option<(PsSettings, String, usize, u64)> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (
@@ -491,8 +565,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *disk_analyzer_data.write() = None;
-                    *disk_analyzer_error.write() =
-                        Some("Everything integration disabled in config".to_string());
+                    update_monitor_error(
+                        "Disk Analyzer",
+                        &mut last_error,
+                        &disk_analyzer_error,
+                        Some("Everything integration disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -501,8 +579,12 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for disk analyzer".to_string());
-                    log::warn!("Disk analyzer running in degraded mode: {}", message);
-                    *disk_analyzer_error.write() = Some(message);
+                    update_monitor_error(
+                        "Disk Analyzer",
+                        &mut last_error,
+                        &disk_analyzer_error,
+                        Some(message),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -536,8 +618,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings_key);
                         }
                         Err(e) => {
-                            log::error!("Failed to start disk analyzer: {}", e);
-                            *disk_analyzer_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Disk Analyzer",
+                                &mut last_error,
+                                &disk_analyzer_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -548,11 +634,20 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *disk_analyzer_data.write() = Some(data);
-                            *disk_analyzer_error.write() = None;
+                            update_monitor_error(
+                                "Disk Analyzer",
+                                &mut last_error,
+                                &disk_analyzer_error,
+                                None,
+                            );
                         }
                         Err(e) => {
-                            log::error!("Disk analyzer error: {}", e);
-                            *disk_analyzer_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Disk Analyzer",
+                                &mut last_error,
+                                &disk_analyzer_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -574,6 +669,7 @@ pub fn spawn_monitor_tasks(
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
             let mut traffic_history = std::collections::VecDeque::with_capacity(60);
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -590,7 +686,12 @@ pub fn spawn_monitor_tasks(
                 if !enabled {
                     traffic_history.clear();
                     *network_data.write() = None;
-                    *network_error.write() = Some("Network monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "Network",
+                        &mut last_error,
+                        &network_error,
+                        Some("Network monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -599,8 +700,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for network monitor".to_string());
-                    log::warn!("Network monitor running in degraded mode: {}", message);
-                    *network_error.write() = Some(message);
+                    update_monitor_error("Network", &mut last_error, &network_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -628,8 +728,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start network monitor: {}", e);
-                            *network_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Network",
+                                &mut last_error,
+                                &network_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -651,9 +755,14 @@ pub fn spawn_monitor_tasks(
                         data.traffic_history = traffic_history.clone();
 
                         *network_data.write() = Some(data);
-                        *network_error.write() = None;
+                        update_monitor_error("Network", &mut last_error, &network_error, None);
                     } else {
-                        *network_error.write() = Some("Failed to collect network data".to_string());
+                        update_monitor_error(
+                            "Network",
+                            &mut last_error,
+                            &network_error,
+                            Some("Failed to collect network data".to_string()),
+                        );
                     }
                 }
 
@@ -673,6 +782,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<ProcessMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -688,7 +798,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *process_data.write() = None;
-                    *process_error.write() = Some("Process monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "Process",
+                        &mut last_error,
+                        &process_error,
+                        Some("Process monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -697,8 +812,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for process monitor".to_string());
-                    log::warn!("Process monitor running in degraded mode: {}", message);
-                    *process_error.write() = Some(message);
+                    update_monitor_error("Process", &mut last_error, &process_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -726,8 +840,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start process monitor: {}", e);
-                            *process_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Process",
+                                &mut last_error,
+                                &process_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -738,11 +856,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *process_data.write() = Some(data);
-                            *process_error.write() = None;
+                            update_monitor_error("Process", &mut last_error, &process_error, None);
                         }
                         Err(e) => {
-                            log::error!("Process monitor error: {}", e);
-                            *process_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Process",
+                                &mut last_error,
+                                &process_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -763,6 +885,7 @@ pub fn spawn_monitor_tasks(
             let mut monitor: Option<ServiceMonitor> = None;
             let mut last_settings: Option<PsSettings> = None;
             let mut last_cache_ttl: Option<u64> = None;
+            let mut last_error: Option<String> = None;
 
             loop {
                 let (enabled, refresh_interval_ms, settings, cache_ttl_config, use_cache_config) = {
@@ -778,7 +901,12 @@ pub fn spawn_monitor_tasks(
 
                 if !enabled {
                     *service_data.write() = None;
-                    *service_error.write() = Some("Service monitor disabled in config".to_string());
+                    update_monitor_error(
+                        "Service",
+                        &mut last_error,
+                        &service_error,
+                        Some("Service monitor disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -787,8 +915,7 @@ pub fn spawn_monitor_tasks(
                     let message = unavailable_reason
                         .clone()
                         .unwrap_or_else(|| "PowerShell is required for service monitor".to_string());
-                    log::warn!("Service monitor running in degraded mode: {}", message);
-                    *service_error.write() = Some(message);
+                    update_monitor_error("Service", &mut last_error, &service_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -816,8 +943,12 @@ pub fn spawn_monitor_tasks(
                             last_settings = Some(settings);
                         }
                         Err(e) => {
-                            log::error!("Failed to start service monitor: {}", e);
-                            *service_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Service",
+                                &mut last_error,
+                                &service_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -828,11 +959,15 @@ pub fn spawn_monitor_tasks(
                     match monitor.collect_data().await {
                         Ok(data) => {
                             *service_data.write() = Some(data);
-                            *service_error.write() = None;
+                            update_monitor_error("Service", &mut last_error, &service_error, None);
                         }
                         Err(e) => {
-                            log::error!("Service monitor error: {}", e);
-                            *service_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Service",
+                                &mut last_error,
+                                &service_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
@@ -849,6 +984,7 @@ pub fn spawn_monitor_tasks(
         let ollama_error = Arc::clone(&ollama_error);
         tokio::spawn(async move {
             let mut client: Option<OllamaClient> = None;
+            let mut last_error: Option<String> = None;
             loop {
                 let (enabled, refresh_interval_ms) = {
                     let cfg = config.read();
@@ -861,7 +997,12 @@ pub fn spawn_monitor_tasks(
                 if !enabled {
                     client = None;
                     *ollama_data.write() = None;
-                    *ollama_error.write() = Some("Ollama integration disabled in config".to_string());
+                    update_monitor_error(
+                        "Ollama",
+                        &mut last_error,
+                        &ollama_error,
+                        Some("Ollama integration disabled in config".to_string()),
+                    );
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -870,8 +1011,12 @@ pub fn spawn_monitor_tasks(
                     match OllamaClient::new(None) {
                         Ok(c) => client = Some(c),
                         Err(e) => {
-                            log::error!("Failed to start Ollama monitor: {}", e);
-                            *ollama_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Ollama",
+                                &mut last_error,
+                                &ollama_error,
+                                Some(e.to_string()),
+                            );
                             sleep(refresh_duration(refresh_interval_ms)).await;
                             continue;
                         }
@@ -882,11 +1027,15 @@ pub fn spawn_monitor_tasks(
                     match client.collect_data().await {
                         Ok(data) => {
                             *ollama_data.write() = Some(data);
-                            *ollama_error.write() = None;
+                            update_monitor_error("Ollama", &mut last_error, &ollama_error, None);
                         }
                         Err(e) => {
-                            log::error!("Ollama monitor error: {}", e);
-                            *ollama_error.write() = Some(e.to_string());
+                            update_monitor_error(
+                                "Ollama",
+                                &mut last_error,
+                                &ollama_error,
+                                Some(e.to_string()),
+                            );
                         }
                     }
                 }
