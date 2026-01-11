@@ -1,0 +1,69 @@
+[package]
+name = "tui-plus"
+version = "1.0.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Advanced system monitoring TUI with PowerShell integration and Ollama management"
+license = "MIT"
+
+[dependencies]
+# TUI framework
+ratatui = "0.26"
+crossterm = { version = "0.27", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+notify = "6.1"
+base64 = "0.22"
+
+# GPU monitoring (NVIDIA only for now)
+nvml-wrapper = { version = "0.9", optional = true }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Date/time
+chrono = "0.4"
+
+# Better synchronization primitives
+parking_lot = "0.12"
+
+# System information
+sysinfo = "0.30"
+
+# Regex for parsing
+regex = "1.10"
+encoding_rs = "0.8"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Globalization"] }
+
+# Color manipulation
+colorsys = "0.6"
+
+[dev-dependencies]
+criterion = "0.5"
+mockall = "0.12"
+
+[features]
+default = ["nvidia"]
+nvidia = ["nvml-wrapper"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
