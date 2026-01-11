@@ -789,29 +789,8 @@ fn render_vram_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ])
         .split(area);
 
-    // VRAM usage gauge (from GPU data if available)
-    let gpu_data = app.state.gpu_data.read();
-    let (vram_used, vram_total, vram_percent) = if let Some(gpu) = gpu_data.as_ref() {
-        let percent = if gpu.memory_total > 0 {
-            (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0
-        } else {
-            0.0
-        };
-        (gpu.memory_used, gpu.memory_total, percent as f32)
-    } else {
-        (0, 0, 0.0)
-    };
-
-    let vram_text = if vram_total > 0 {
-        format!(
-            "{:.2}% ({} / {})",
-            vram_percent,
-            format_bytes_gb(vram_used),
-            format_bytes_gb(vram_total)
-        )
-    } else {
-        "0.00% (0.00 GB / 0.00 GB)".to_string()
-    };
+    // Check if monitors are running
+    let monitors_running = *app.state.monitors_running.read();
     let vram_focused = app.state.ollama_state.focused_panel == OllamaPanelFocus::Vram;
     let vram_border = if vram_focused {
         Color::Cyan
@@ -819,18 +798,55 @@ fn render_vram_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme.foreground
     };
 
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title("VRAM Usage")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(vram_border)),
-        )
-        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-        .percent(vram_percent as u16)
-        .label(vram_text);
+    if !monitors_running {
+        let block = Block::default()
+            .title("VRAM Usage")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
 
-    f.render_widget(gauge, chunks[0]);
+        let text = Paragraph::new("Monitor stopped")
+            .block(block)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+
+        f.render_widget(text, chunks[0]);
+    } else {
+        // VRAM usage gauge (from GPU data if available)
+        let gpu_data = app.state.gpu_data.read();
+        let (vram_used, vram_total, vram_percent) = if let Some(gpu) = gpu_data.as_ref() {
+            let percent = if gpu.memory_total > 0 {
+                (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0
+            } else {
+                0.0
+            };
+            (gpu.memory_used, gpu.memory_total, percent as f32)
+        } else {
+            (0, 0, 0.0)
+        };
+
+        let vram_text = if vram_total > 0 {
+            format!(
+                "{:.2}% ({} / {})",
+                vram_percent,
+                format_bytes_gb(vram_used),
+                format_bytes_gb(vram_total)
+            )
+        } else {
+            "0.00% (0.00 GB / 0.00 GB)".to_string()
+        };
+
+        let gauge = Gauge::default()
+            .block(
+                Block::default()
+                    .title("VRAM Usage")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(vram_border)),
+            )
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+            .percent(vram_percent as u16)
+            .label(vram_text);
+
+        f.render_widget(gauge, chunks[0]);
+    }
 
     // Running models summary
     let running_models = app.state.sorted_ollama_running_models();

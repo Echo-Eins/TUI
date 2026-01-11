@@ -83,39 +83,113 @@ const PHYSICAL_MEMORY_SCRIPT: &str = r#"
         }
 
         $list = foreach ($mem in $modules) {
+            # Determine memory type from SMBIOS
             $memType = switch ([int]$mem.SMBIOSMemoryType) {
-                20 { "DDR" }
-                21 { "DDR2" }
+                0 { $null }
+                1 { "Other" }
+                2 { "Unknown" }
+                3 { "DRAM" }
+                4 { "EDRAM" }
+                5 { "VRAM" }
+                6 { "SRAM" }
+                7 { "RAM" }
+                8 { "ROM" }
+                9 { "Flash" }
+                10 { "EEPROM" }
+                11 { "FEPROM" }
+                12 { "EPROM" }
+                13 { "CDRAM" }
+                14 { "3DRAM" }
+                15 { "SDRAM" }
+                16 { "SGRAM" }
+                17 { "RDRAM" }
+                18 { "DDR" }
+                19 { "DDR2" }
+                20 { "DDR2 FB-DIMM" }
                 24 { "DDR3" }
+                25 { "FBD2" }
                 26 { "DDR4" }
                 27 { "LPDDR" }
                 28 { "LPDDR2" }
                 29 { "LPDDR3" }
                 30 { "LPDDR4" }
+                31 { "Logical non-volatile" }
+                32 { "HBM" }
+                33 { "HBM2" }
                 34 { "DDR5" }
                 35 { "LPDDR5" }
                 default { $null }
             }
 
+            # Determine form factor
             $formFactor = switch ([int]$mem.FormFactor) {
-                12 { "SODIMM" }
+                0 { $null }
+                1 { "Other" }
+                2 { "SIP" }
+                3 { "DIP" }
+                4 { "ZIP" }
+                5 { "SOJ" }
+                6 { "Proprietary" }
+                7 { "SIMM" }
                 8 { "DIMM" }
+                9 { "TSOP" }
+                10 { "PGA" }
+                11 { "RIMM" }
+                12 { "SODIMM" }
+                13 { "SRIMM" }
+                14 { "SMD" }
+                15 { "SSMP" }
+                16 { "QFP" }
+                17 { "TQFP" }
+                18 { "SOIC" }
+                19 { "LCC" }
+                20 { "PLCC" }
+                21 { "BGA" }
+                22 { "FPBGA" }
+                23 { "LGA" }
                 default { $null }
             }
 
-            if (-not $memType) {
+            # Fallback to MemoryType if SMBIOS is not available
+            if (-not $memType -or $memType -eq "Unknown") {
                 $memType = switch ([int]$mem.MemoryType) {
-                    20 { "DDR" }
-                    21 { "DDR2" }
-                    24 { "DDR3" }
-                    26 { "DDR4" }
-                    34 { "DDR5" }
+                    0 { $null }
+                    1 { "Other" }
+                    2 { "Unknown" }
+                    3 { "DRAM" }
+                    4 { "EDRAM" }
+                    5 { "VRAM" }
+                    6 { "SRAM" }
+                    7 { "RAM" }
+                    8 { "ROM" }
+                    9 { "Flash" }
+                    10 { "EEPROM" }
+                    11 { "FEPROM" }
+                    12 { "EPROM" }
+                    13 { "CDRAM" }
+                    14 { "3DRAM" }
+                    15 { "SDRAM" }
+                    16 { "SGRAM" }
+                    17 { "RDRAM" }
+                    18 { "DDR" }
+                    19 { "DDR2" }
+                    20 { "DDR2 FB-DIMM" }
+                    21 { "DDR3" }
+                    22 { "FBD2" }
+                    23 { "DDR4" }
+                    24 { "LPDDR" }
+                    25 { "LPDDR2" }
+                    26 { "LPDDR3" }
+                    27 { "LPDDR4" }
                     default { "Unknown" }
                 }
             }
 
-            if ($formFactor -and $memType -and $memType -ne "Unknown") {
+            # Combine form factor and memory type
+            if ($formFactor -and $memType -and $memType -ne "Unknown" -and $formFactor -ne "Other") {
                 $memType = "$formFactor $memType"
+            } elseif (-not $memType -or $memType -eq "Unknown") {
+                $memType = "Unknown"
             }
 
             $speed = $null
@@ -131,12 +205,12 @@ const PHYSICAL_MEMORY_SCRIPT: &str = r#"
                 PartNumber = ($mem.PartNumber -as [string]).Trim()
                 Capacity = [uint64]$mem.Capacity
                 Speed = $speed
-                MemoryType = $memType
+                MemoryType = if ($memType) { $memType } else { "Unknown" }
             }
         }
 
         $types = $list | ForEach-Object { $_.MemoryType } | Where-Object { $_ -and $_ -ne 'Unknown' } | Sort-Object -Unique
-        $typeSummary = if ($types.Count -eq 0) { "Unknown" } elseif ($types.Count -eq 1) { $types[0] } else { "Mixed (" + ($types -join "/") + ")" }
+        $typeSummary = if ($types.Count -eq 0) { "Unknown" } elseif ($types.Count -eq 1) { $types[0] } else { "Mixed (" + ($types -join ", ") + ")" }
 
         $speeds = $list | ForEach-Object { $_.Speed } | Where-Object { $_ -ne $null } | Sort-Object -Unique
         $speedSummary = if ($speeds.Count -eq 0) { "Unknown" } elseif ($speeds.Count -eq 1) { "$($speeds[0]) MHz" } else { "$($speeds[0])-$($speeds[-1]) MHz" }
