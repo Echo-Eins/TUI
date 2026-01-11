@@ -9,14 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::app::{
     state::{
-        sort_ollama_models, sort_ollama_running, ChatRole, ChatSession, OllamaActivityView,
-        OllamaInputMode, OllamaModelSortColumn, OllamaPanelFocus, OllamaRunningSortColumn,
-        OllamaView,
+        sort_ollama_models, ChatRole, OllamaActivityView, OllamaInputMode,
+        OllamaModelSortColumn, OllamaPanelFocus, OllamaRunningSortColumn, OllamaView,
     },
     App,
 };
 use crate::ui::theme::Theme;
-use crate::integrations::ollama::{ChatLogEntry, RunningModel};
+use crate::integrations::ollama::ChatLogEntry;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let ollama_data = app.state.ollama_data.read();
@@ -129,12 +128,12 @@ fn render_full(
     } else {
         match app.state.ollama_state.current_view {
             OllamaView::Models => render_models_table(f, chunks[1], data, app, theme),
-            OllamaView::Running => render_running_models_table(f, chunks[1], data, app, theme),
+            OllamaView::Running => render_running_models_table(f, chunks[1], app, theme),
         }
     }
 
     // Render VRAM/GPU panel
-    render_vram_panel(f, chunks[2], data, app, theme);
+    render_vram_panel(f, chunks[2], app, theme);
 
     // Render activity log
     render_activity_log(f, chunks[3], data, app, theme);
@@ -189,7 +188,7 @@ fn render_compact(
     } else {
         match app.state.ollama_state.current_view {
             OllamaView::Models => render_models_table(f, chunks[1], data, app, theme),
-            OllamaView::Running => render_running_models_table(f, chunks[1], data, app, theme),
+            OllamaView::Running => render_running_models_table(f, chunks[1], app, theme),
         }
     }
 
@@ -219,7 +218,7 @@ fn render_header(
     _theme: &Theme,
 ) {
     let model_count = data.models.len();
-    let running_count = data.running_models.len();
+    let running_count = app.state.sorted_ollama_running_models().len();
 
     let view_text = match app.state.ollama_state.current_view {
         OllamaView::Models => "Available Models",
@@ -394,33 +393,8 @@ fn render_models_table(
     f.render_widget(table, area);
 }
 
-fn render_running_models_table(
-    f: &mut Frame,
-    area: Rect,
-    data: &crate::integrations::OllamaData,
-    app: &App,
-    theme: &Theme,
-) {
-    let mut running_models = data.running_models.clone();
-    let mut known_models = std::collections::HashSet::new();
-    for model in &running_models {
-        known_models.insert(model.name.to_ascii_lowercase());
-    }
-    for session in &app.state.ollama_state.paused_chats {
-        let key = session.model.to_ascii_lowercase();
-        if !known_models.contains(&key) {
-            running_models.push(build_paused_running_model(session));
-            known_models.insert(key);
-        }
-    }
-    sort_ollama_running(
-        &mut running_models,
-        app.state.ollama_state.running_sort_column,
-        app.state.ollama_state.running_sort_ascending,
-        &app.state.ollama_state.paused_chats,
-        app.state.ollama_state.active_chat_model.as_deref(),
-        &app.state.ollama_state.chat_messages,
-    );
+fn render_running_models_table(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let running_models = app.state.sorted_ollama_running_models();
     let sort_indicator = if app.state.ollama_state.running_sort_ascending {
         "↑"
     } else {
@@ -578,7 +552,7 @@ fn render_running_models_table(
                 Cell::from(model.name.clone()).style(style),
                 Cell::from(model.params_display.clone()).style(style),
                 Cell::from(model.gpu_memory_display.clone()).style(style),
-                Cell::from(model.processor.clone()).style(style.fg(Color::Cyan)),
+                Cell::from(model.processor.clone()).style(style),
                 Cell::from(status_text).style(status_style),
                 Cell::from(
                     message_count_map
@@ -801,81 +775,12 @@ fn format_elapsed_short(epoch_seconds: u64) -> String {
     }
 }
 
-fn build_paused_running_model(session: &ChatSession) -> RunningModel {
-    let (params_value, params_unit, params_display) = parse_params_from_name(&session.model);
-    let is_cloud = session.model.to_ascii_lowercase().contains("cloud");
-    RunningModel {
-        name: session.model.clone(),
-        size_bytes: 0,
-        size_display: "-".to_string(),
-        gpu_memory_mb: None,
-        gpu_memory_display: if is_cloud { "cloud".to_string() } else { "-".to_string() },
-        params_value,
-        params_unit,
-        params_display,
-        processor: "Paused".to_string(),
-        until: None,
-    }
-}
-
-fn parse_params_from_name(name: &str) -> (Option<f64>, Option<char>, String) {
-    let chars: Vec<char> = name.chars().collect();
-    for (idx, ch) in chars.iter().enumerate() {
-        let unit = ch.to_ascii_uppercase();
-        if !matches!(unit, 'M' | 'B' | 'T') {
-            continue;
-        }
-        if idx == 0 {
-            continue;
-        }
-        let mut start = idx;
-        while start > 0 {
-            let prev = chars[start - 1];
-            if prev.is_ascii_digit() || prev == '.' {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        if start == idx {
-            continue;
-        }
-        let num_str: String = chars[start..idx].iter().collect();
-        if let Ok(value) = num_str.parse::<f64>() {
-            let display = format_param_display(value, unit);
-            return (Some(value), Some(unit), display);
-        }
-    }
-    (None, None, "-".to_string())
-}
-
-fn format_param_display(value: f64, unit: char) -> String {
-    if (value.fract() - 0.0).abs() < f64::EPSILON {
-        format!("{:.0}{}", value, unit)
-    } else {
-        let mut text = format!("{:.2}", value);
-        while text.ends_with('0') {
-            text.pop();
-        }
-        if text.ends_with('.') {
-            text.pop();
-        }
-        format!("{text}{unit}")
-    }
-}
-
 fn format_bytes_gb(value: u64) -> String {
     let gb = value as f64 / 1_073_741_824.0;
     format!("{:.2} GB", gb)
 }
 
-fn render_vram_panel(
-    f: &mut Frame,
-    area: Rect,
-    data: &crate::integrations::OllamaData,
-    app: &App,
-    theme: &Theme,
-) {
+fn render_vram_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -928,54 +833,85 @@ fn render_vram_panel(
     f.render_widget(gauge, chunks[0]);
 
     // Running models summary
-    let mut summary = Vec::new();
-    summary.push(Line::from(vec![
-        Span::styled("Active Models: ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            format!("{}", data.running_models.len()),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let total_vram_mb: u64 = data
-        .running_models
+    let running_models = app.state.sorted_ollama_running_models();
+    let total_vram_mb: u64 = running_models
         .iter()
         .filter_map(|model| model.gpu_memory_mb)
         .sum();
-    summary.push(Line::from(vec![
-        Span::styled("Total VRAM: ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            if total_vram_mb > 0 {
-                let total_bytes = total_vram_mb.saturating_mul(1_048_576);
-                format_bytes_gb(total_bytes)
-            } else {
-                "-".to_string()
-            },
-            Style::default().fg(Color::Cyan),
-        ),
-    ]));
 
-    if !data.running_models.is_empty() {
-        summary.push(Line::from(""));
-        for (i, model) in data.running_models.iter().take(3).enumerate() {
-            summary.push(Line::from(vec![
-                Span::raw(format!("{}. ", i + 1)),
-                Span::styled(&model.name, Style::default().fg(Color::White)),
-                Span::raw(" - "),
-                Span::styled(&model.processor, Style::default().fg(Color::Green)),
-            ]));
-        }
-    }
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled("Active Models: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", running_models.len()),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Total VRAM: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if total_vram_mb > 0 {
+                    let total_bytes = total_vram_mb.saturating_mul(1_048_576);
+                    format_bytes_gb(total_bytes)
+                } else {
+                    "-".to_string()
+                },
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+    ];
+
+    let list_lines: Vec<Line> = if running_models.is_empty() {
+        vec![Line::from(Span::styled(
+            "No running models",
+            Style::default().fg(Color::Gray),
+        ))]
+    } else {
+        running_models
+            .iter()
+            .enumerate()
+            .map(|(i, model)| {
+                Line::from(vec![
+                    Span::raw(format!("{}. ", i + 1)),
+                    Span::styled(&model.name, Style::default().fg(Color::White)),
+                    Span::raw(" - "),
+                    Span::styled(&model.processor, Style::default().fg(Color::Green)),
+                ])
+            })
+            .collect()
+    };
 
     let block = Block::default()
         .title("Running Summary")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(vram_border));
+    let inner = block.inner(chunks[1]);
+    f.render_widget(block, chunks[1]);
 
-    let paragraph = Paragraph::new(summary).block(block);
-    f.render_widget(paragraph, chunks[1]);
+    let summary_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+
+    let header = Paragraph::new(header_lines);
+    f.render_widget(header, summary_chunks[0]);
+
+    let list_height = summary_chunks[1].height as usize;
+    let max_scroll = list_lines.len().saturating_sub(list_height.max(1));
+    let scroll = app
+        .state
+        .ollama_state
+        .running_summary_scroll
+        .min(max_scroll);
+    let visible_lines: Vec<Line> = list_lines
+        .into_iter()
+        .skip(scroll)
+        .take(list_height.max(1))
+        .collect();
+    let list = Paragraph::new(visible_lines);
+    f.render_widget(list, summary_chunks[1]);
 }
 
 fn render_activity_log(
@@ -1314,203 +1250,86 @@ fn render_action_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let narrow = area.width < 120;
-    let help_text = if narrow {
-        vec![
-            Line::from(vec![
-                Span::styled("Quick Actions: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    "R",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Chat  "),
-                Span::styled(
-                    "S",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Stop  "),
-                Span::styled(
-                    "U",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Unload  "),
-                Span::styled(
-                    "D",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Delete  "),
-                Span::styled(
-                    "P",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Pull  "),
-                Span::styled(
-                    "C",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Command"),
-            ]),
-            Line::from(vec![
-                Span::styled("  ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    "L",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Refresh  "),
-                Span::styled(
-                    "V",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":View  "),
-                Span::styled(
-                    "N/M/T",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Sort  "),
-                Span::styled(
-                    "G",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Msgs  "),
-                Span::styled(
-                    "A",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Additions  "),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Back  "),
-                Span::styled(
-                    "Left/Right",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":Focus"),
-            ]),
-        ]
+    struct QuickAction {
+        key: &'static str,
+        label: &'static str,
+    }
+
+    let mut actions = Vec::new();
+    actions.push(QuickAction { key: "R", label: "Chat" });
+
+    if app.state.ollama_state.current_view == OllamaView::Running {
+        actions.push(QuickAction {
+            key: "U",
+            label: "Unload",
+        });
     } else {
-        vec![Line::from(vec![
-            Span::styled("Quick Actions: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                "R",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Chat  "),
-            Span::styled(
-                "S",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Stop  "),
-            Span::styled(
-                "U",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Unload  "),
-            Span::styled(
-                "D",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Delete  "),
-            Span::styled(
-                "P",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Pull  "),
-            Span::styled(
-                "C",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Command  "),
-            Span::styled(
-                "L",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Refresh  "),
-            Span::styled(
-                "V",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":View  "),
-            Span::styled(
-                "N/M/T",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Sort  "),
-            Span::styled(
-                "G",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Msgs  "),
-            Span::styled(
-                "A",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Additions  "),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Back  "),
-            Span::styled(
-                "Left/Right",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":Focus"),
-        ])]
-    };
+        actions.push(QuickAction {
+            key: "D",
+            label: "Delete",
+        });
+        actions.push(QuickAction { key: "P", label: "Pull" });
+        actions.push(QuickAction {
+            key: "C",
+            label: "Command",
+        });
+    }
+
+    actions.push(QuickAction {
+        key: "L",
+        label: "Refresh",
+    });
+    actions.push(QuickAction { key: "V", label: "View" });
+    actions.push(QuickAction {
+        key: "N/M/T",
+        label: "Sort",
+    });
+
+    if app.state.ollama_state.current_view == OllamaView::Models
+        && app.state.ollama_state.activity_view == OllamaActivityView::List
+    {
+        actions.push(QuickAction {
+            key: "A",
+            label: "Additions",
+        });
+    }
+
+    actions.push(QuickAction { key: "Esc", label: "Back" });
+    actions.push(QuickAction {
+        key: "Left/Right",
+        label: "Focus",
+    });
+
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let header_span = Span::styled("Quick Actions: ", Style::default().fg(Color::Gray));
+    let continuation = Span::styled("  ", Style::default().fg(Color::Gray));
+    let available_width = area.width.saturating_sub(2) as usize;
+
+    let mut lines = Vec::new();
+    let mut current = vec![header_span];
+    let mut in_second_line = false;
+
+    for action in actions {
+        let action_spans = vec![
+            Span::styled(action.key, key_style),
+            Span::raw(format!(":{}  ", action.label)),
+        ];
+        if !in_second_line {
+            let mut test = current.clone();
+            test.extend(action_spans.clone());
+            if Line::from(test).width() > available_width {
+                lines.push(Line::from(current));
+                current = vec![continuation.clone()];
+                in_second_line = true;
+            }
+        }
+        current.extend(action_spans);
+    }
+    lines.push(Line::from(current));
+
+    let help_text = lines;
 
     let help_focused = app.state.ollama_state.focused_panel == OllamaPanelFocus::Help;
     let border_color = if help_focused {
@@ -1626,12 +1445,18 @@ fn render_command_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn render_delete_confirm(f: &mut Frame, area: Rect, app: &App, _theme: &Theme) {
-    let model_name = app
-        .state
-        .ollama_state
-        .pending_delete
-        .clone()
-        .unwrap_or_else(|| "selected model".to_string());
+    let (title, label) = match app.state.ollama_state.pending_delete.clone() {
+        Some(crate::app::state::OllamaDeleteTarget::Model(name)) => {
+            ("Delete model", name)
+        }
+        Some(crate::app::state::OllamaDeleteTarget::ChatLog(entry)) => {
+            (
+                "Delete chat log",
+                format!("{} ({})", entry.model, entry.ended_at_display),
+            )
+        }
+        None => ("Delete", "selected item".to_string()),
+    };
     let rect = centered_rect(60, 7, area);
 
     f.render_widget(Clear, rect);
@@ -1639,11 +1464,11 @@ fn render_delete_confirm(f: &mut Frame, area: Rect, app: &App, _theme: &Theme) {
     let text = vec![
         Line::from(vec![
             Span::styled(
-                "Delete model",
+                title,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::raw(": "),
-            Span::styled(model_name, Style::default().fg(Color::White)),
+            Span::styled(label, Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from("This action cannot be undone."),

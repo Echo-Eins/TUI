@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::app::state::{RamPanelFocus, RamProcessSortColumn};
+use crate::monitors::ram::ProcessMemoryInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes};
 
@@ -34,7 +36,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         if app.state.compact_mode {
             render_compact(f, area, data, &theme);
         } else {
-            render_full(f, area, data, &theme);
+            render_full(f, area, data, app, &theme);
         }
     } else {
         let block = Block::default()
@@ -50,7 +52,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::RamData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -133,10 +141,12 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme
     render_pagefile_gauge(f, chunks[3], data, theme);
 
     // Memory breakdown
-    render_memory_breakdown(f, chunks[4], data, theme);
+    let breakdown_focused = app.state.ram_state.focused_panel == RamPanelFocus::Breakdown;
+    render_memory_breakdown(f, chunks[4], data, theme, breakdown_focused);
 
     // Top processes
-    render_top_processes(f, chunks[5], data, theme);
+    let processes_focused = app.state.ram_state.focused_panel == RamPanelFocus::TopProcesses;
+    render_top_processes(f, chunks[5], data, app, theme, processes_focused);
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
@@ -234,6 +244,7 @@ fn render_memory_breakdown(
     area: Rect,
     data: &crate::monitors::RamData,
     theme: &Theme,
+    focused: bool,
 ) {
     let mut breakdown_text = vec![
         Line::from(vec![
@@ -283,17 +294,6 @@ fn render_memory_breakdown(
             )),
         ]),
         Line::from(vec![
-            Span::raw("  Free:       "),
-            Span::styled(
-                format!("{:>12}  ", format_bytes(data.free)),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::raw(create_progress_bar(
-                ((data.free as f64 / data.total as f64) * 100.0) as f32,
-                30,
-            )),
-        ]),
-        Line::from(vec![
             Span::raw("  Modified:   "),
             Span::styled(
                 format!("{:>12}  ", format_bytes(data.modified)),
@@ -334,7 +334,11 @@ fn render_memory_breakdown(
     let breakdown_block = Block::default()
         .borders(Borders::ALL)
         .title("Memory Breakdown")
-        .border_style(Style::default().fg(theme.ram_color));
+        .border_style(Style::default().fg(if focused {
+            Color::Yellow
+        } else {
+            theme.ram_color
+        }));
 
     let breakdown_para = Paragraph::new(breakdown_text)
         .block(breakdown_block)
@@ -420,29 +424,116 @@ fn render_pagefile_gauge(
     }
 }
 
-fn render_top_processes(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
-    let header_cells = ["PID", "Process Name", "Working Set", "Private Bytes"]
-        .iter()
-        .map(|h| {
-            ratatui::widgets::Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+fn render_top_processes(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::RamData,
+    app: &App,
+    theme: &Theme,
+    focused: bool,
+) {
+    let mut processes = data.top_processes.clone();
+    sort_ram_processes(
+        &mut processes,
+        app.state.ram_state.sort_column,
+        app.state.ram_state.sort_ascending,
+    );
+    if processes.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Top Memory Consumers")
+            .border_style(Style::default().fg(if focused {
+                Color::Yellow
+            } else {
+                theme.ram_color
+            }));
+        let text = Paragraph::new("No memory consumers detected")
+            .block(block)
+            .style(Style::default().fg(Color::Gray));
+        f.render_widget(text, area);
+        return;
+    }
+    let selected_index = app
+        .state
+        .ram_state
+        .selected_index
+        .min(processes.len().saturating_sub(1));
+
+    let hotkeys_height = if area.height > 2 { 1 } else { 0 };
+    let visible_rows = area
+        .height
+        .saturating_sub(2 + 1 + hotkeys_height)
+        .max(1) as usize;
+    let scroll_offset = if selected_index >= visible_rows {
+        selected_index - (visible_rows - 1)
+    } else {
+        0
+    };
+
+    let sort_indicator = if app.state.ram_state.sort_ascending {
+        "↑"
+    } else {
+        "↓"
+    };
+    let header_cells = vec![
+        ratatui::widgets::Cell::from(
+            if app.state.ram_state.sort_column == RamProcessSortColumn::Pid {
+                format!("PID {sort_indicator}")
+            } else {
+                "PID".to_string()
+            },
+        ),
+        ratatui::widgets::Cell::from(
+            if app.state.ram_state.sort_column == RamProcessSortColumn::Name {
+                format!("Process Name {sort_indicator}")
+            } else {
+                "Process Name".to_string()
+            },
+        ),
+        ratatui::widgets::Cell::from(
+            if app.state.ram_state.sort_column == RamProcessSortColumn::WorkingSet {
+                format!("Working Set {sort_indicator}")
+            } else {
+                "Working Set".to_string()
+            },
+        ),
+        ratatui::widgets::Cell::from(
+            if app.state.ram_state.sort_column == RamProcessSortColumn::PrivateBytes {
+                format!("Private Bytes {sort_indicator}")
+            } else {
+                "Private Bytes".to_string()
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|cell| {
+        cell.style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
-    let rows: Vec<Row> = data
-        .top_processes
+    let rows: Vec<Row> = processes
         .iter()
-        .map(|proc| {
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows)
+        .map(|(i, proc)| {
+            let is_selected = i == selected_index;
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
             let cells = vec![
                 ratatui::widgets::Cell::from(proc.pid.to_string()),
                 ratatui::widgets::Cell::from(proc.name.clone()),
                 ratatui::widgets::Cell::from(format_bytes(proc.working_set)),
                 ratatui::widgets::Cell::from(format_bytes(proc.private_bytes)),
             ];
-            Row::new(cells).height(1)
+            Row::new(cells).height(1).style(style)
         })
         .collect();
 
@@ -460,9 +551,57 @@ fn render_top_processes(f: &mut Frame, area: Rect, data: &crate::monitors::RamDa
         Block::default()
             .borders(Borders::ALL)
             .title("Top Memory Consumers")
-            .border_style(Style::default().fg(theme.ram_color)),
+            .border_style(Style::default().fg(if focused {
+                Color::Yellow
+            } else {
+                theme.ram_color
+            })),
     )
-    .style(Style::default().fg(Color::White));
+    .style(Style::default().fg(Color::White))
+    .column_spacing(1)
+    .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
 
     f.render_widget(table, area);
+
+    let hotkeys = vec![Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
+        Span::styled("p/n/w/b", Style::default().fg(Color::Cyan)),
+        Span::raw(": Sort by PID/Name/Working Set/Private Bytes  "),
+        Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
+        Span::raw(": Page Up/Down  "),
+        Span::styled("←/→", Style::default().fg(Color::Cyan)),
+        Span::raw(": Focus"),
+    ])];
+    if hotkeys_height > 0 {
+        let hotkeys_area = Rect {
+            x: area.x + 2,
+            y: area.y + area.height - 2,
+            width: area.width.saturating_sub(4),
+            height: 1,
+        };
+        let hotkeys_paragraph = Paragraph::new(hotkeys);
+        f.render_widget(hotkeys_paragraph, hotkeys_area);
+    }
+}
+
+fn sort_ram_processes(
+    processes: &mut Vec<ProcessMemoryInfo>,
+    column: RamProcessSortColumn,
+    ascending: bool,
+) {
+    processes.sort_by(|a, b| {
+        let cmp = match column {
+            RamProcessSortColumn::Pid => a.pid.cmp(&b.pid),
+            RamProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            RamProcessSortColumn::WorkingSet => a.working_set.cmp(&b.working_set),
+            RamProcessSortColumn::PrivateBytes => a.private_bytes.cmp(&b.private_bytes),
+        };
+
+        if ascending {
+            cmp
+        } else {
+            cmp.reverse()
+        }
+    });
 }

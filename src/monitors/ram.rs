@@ -97,6 +97,12 @@ const PHYSICAL_MEMORY_SCRIPT: &str = r#"
                 default { $null }
             }
 
+            $formFactor = switch ([int]$mem.FormFactor) {
+                12 { "SODIMM" }
+                8 { "DIMM" }
+                default { $null }
+            }
+
             if (-not $memType) {
                 $memType = switch ([int]$mem.MemoryType) {
                     20 { "DDR" }
@@ -106,6 +112,10 @@ const PHYSICAL_MEMORY_SCRIPT: &str = r#"
                     34 { "DDR5" }
                     default { "Unknown" }
                 }
+            }
+
+            if ($formFactor -and $memType -and $memType -ne "Unknown") {
+                $memType = "$formFactor $memType"
             }
 
             $speed = $null

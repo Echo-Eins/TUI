@@ -16,6 +16,8 @@ pub struct GpuData {
     pub clock_speed: u32,
     pub memory_clock: u32,
     pub driver_version: String,
+    pub bus_id: String,
+    pub cuda_version: String,
     pub processes: Vec<GpuProcessInfo>,
 }
 
@@ -86,7 +88,34 @@ impl GpuMonitor {
                 throw "nvidia-smi not found"
             }
 
-            $raw = & $nvidiaPath --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version --format=csv,noheader,nounits
+            function Parse-Float($value, $default) {
+                if ($null -eq $value) { return [float]$default }
+                $v = $value.ToString().Trim()
+                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]') { return [float]$default }
+                $out = 0.0
+                if ([double]::TryParse($v, [ref]$out)) { return [float]$out }
+                return [float]$default
+            }
+
+            function Parse-UInt64($value, $default) {
+                if ($null -eq $value) { return [uint64]$default }
+                $v = $value.ToString().Trim()
+                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]') { return [uint64]$default }
+                $out = 0.0
+                if ([double]::TryParse($v, [ref]$out)) { return [uint64]$out }
+                return [uint64]$default
+            }
+
+            $cudaVersion = "N/A"
+            $header = & $nvidiaPath
+            if ($header) {
+                $line = $header | Where-Object { $_ -match 'CUDA Version' } | Select-Object -First 1
+                if ($line -match 'CUDA Version:\s*([0-9\.]+)') {
+                    $cudaVersion = $Matches[1]
+                }
+            }
+
+            $raw = & $nvidiaPath --query-gpu=name,pci.bus_id,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version --format=csv,noheader,nounits
             $lines = $raw -split "`n" | Where-Object { $_ -match '\S' }
             if (-not $lines) {
                 throw "nvidia-smi returned empty output"
@@ -94,20 +123,22 @@ impl GpuMonitor {
 
             $rows = foreach ($line in $lines) {
                 $parts = $line.Split(',') | ForEach-Object { $_.Trim() }
-                if ($parts.Count -lt 12) { continue }
+                if ($parts.Count -lt 13) { continue }
                 [PSCustomObject]@{
                     Name = $parts[0]
-                    Temperature = [float]$parts[1]
-                    UtilizationGpu = [float]$parts[2]
-                    UtilizationMemory = [float]$parts[3]
-                    MemoryUsed = [uint64]($parts[4]) * 1MB
-                    MemoryTotal = [uint64]($parts[5]) * 1MB
-                    PowerDraw = [float]$parts[6]
-                    PowerLimit = [float]$parts[7]
-                    FanSpeed = if ($parts[8] -ne '[N/A]' -and $parts[8] -ne 'N/A') { [float]$parts[8] } else { 0.0 }
-                    ClockGraphics = [uint32]$parts[9]
-                    ClockMemory = [uint32]$parts[10]
-                    DriverVersion = $parts[11]
+                    BusId = $parts[1]
+                    Temperature = Parse-Float $parts[2] 0.0
+                    UtilizationGpu = Parse-Float $parts[3] 0.0
+                    UtilizationMemory = Parse-Float $parts[4] 0.0
+                    MemoryUsed = (Parse-UInt64 $parts[5] 0) * 1MB
+                    MemoryTotal = (Parse-UInt64 $parts[6] 0) * 1MB
+                    PowerDraw = Parse-Float $parts[7] 0.0
+                    PowerLimit = Parse-Float $parts[8] 0.0
+                    FanSpeed = Parse-Float $parts[9] -1.0
+                    ClockGraphics = [uint32](Parse-UInt64 $parts[10] 0)
+                    ClockMemory = [uint32](Parse-UInt64 $parts[11] 0)
+                    DriverVersion = $parts[12]
+                    CudaVersion = $cudaVersion
                 }
             }
 
@@ -146,6 +177,8 @@ impl GpuMonitor {
             clock_speed: info.ClockGraphics,
             memory_clock: info.ClockMemory,
             driver_version: info.DriverVersion,
+            bus_id: info.BusId,
+            cuda_version: info.CudaVersion,
             processes,
         })
     }
@@ -211,10 +244,12 @@ impl GpuMonitor {
             temperature: 0.0,
             power_usage: 0.0,
             power_limit: 0.0,
-            fan_speed: 0.0,
+            fan_speed: -1.0,
             clock_speed: 0,
             memory_clock: 0,
             driver_version: info.DriverVersion,
+            bus_id: "N/A".to_string(),
+            cuda_version: "N/A".to_string(),
             processes,
         })
     }
@@ -245,6 +280,8 @@ impl GpuMonitor {
                         Pid = [uint32]$parts[0]
                         Name = $parts[1]
                         Vram = [uint64]($parts[2]) * 1MB
+                        GpuUsage = -1.0
+                        Type = "Compute"
                     }
                 } | ConvertTo-Json
             } else {
@@ -264,9 +301,13 @@ impl GpuMonitor {
             .map(|p| GpuProcessInfo {
                 pid: p.Pid,
                 name: p.Name,
-                gpu_usage: 0.0,  // Not available via nvidia-smi compute-apps
+                gpu_usage: if p.GpuUsage < 0.0 { -1.0 } else { p.GpuUsage },
                 vram: p.Vram,
-                process_type: "Compute".to_string(),
+                process_type: if p.Type.trim().is_empty() {
+                    "Compute".to_string()
+                } else {
+                    p.Type
+                },
             })
             .collect())
     }
@@ -290,25 +331,59 @@ impl GpuMonitor {
                 }
             }
 
-            if ($byPid.Count -eq 0) {
+            $engine = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue
+            $gpuByPid = @{}
+            $typeByPid = @{}
+            $typeUtilByPid = @{}
+            if ($engine) {
+                foreach ($item in $engine) {
+                    if ($item.Name -match '^pid_(\d+)_') {
+                        $pid = [int]$matches[1]
+                        $util = [float]$item.UtilizationPercentage
+                        if (-not $gpuByPid.ContainsKey($pid)) { $gpuByPid[$pid] = 0.0 }
+                        $gpuByPid[$pid] += $util
+
+                        $etype = "Unknown"
+                        if ($item.Name -match 'engtype_3D' -or $item.Name -match 'engtype_Graphics') {
+                            $etype = "Graphics"
+                        } elseif ($item.Name -match 'engtype_Compute') {
+                            $etype = "Compute"
+                        } elseif ($item.Name -match 'engtype_Copy') {
+                            $etype = "Copy"
+                        }
+                        if (-not $typeUtilByPid.ContainsKey($pid) -or $util -gt $typeUtilByPid[$pid]) {
+                            $typeUtilByPid[$pid] = $util
+                            $typeByPid[$pid] = $etype
+                        }
+                    }
+                }
+            }
+
+            if ($byPid.Count -eq 0 -and $gpuByPid.Count -eq 0) {
                 "[]"
                 return
             }
 
+            $allPids = @($byPid.Keys + $gpuByPid.Keys) | Sort-Object -Unique
             $procMap = @{}
             try {
-                Get-Process -Id $byPid.Keys -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-Process -Id $allPids -ErrorAction SilentlyContinue | ForEach-Object {
                     $procMap[$_.Id] = $_.ProcessName
                 }
             } catch {}
 
-            $result = foreach ($pid in $byPid.Keys) {
+            $result = foreach ($pid in $allPids) {
+                $vram = if ($byPid.ContainsKey($pid)) { [uint64]$byPid[$pid] } else { [uint64]0 }
+                $gpu = if ($gpuByPid.ContainsKey($pid)) { [float]$gpuByPid[$pid] } else { -1.0 }
+                $ptype = if ($typeByPid.ContainsKey($pid)) { $typeByPid[$pid] } else { "Unknown" }
                 [PSCustomObject]@{
                     Pid = [uint32]$pid
                     Name = if ($procMap.ContainsKey($pid)) { $procMap[$pid] } else { "PID $pid" }
-                    Vram = [uint64]$byPid[$pid]
+                    Vram = $vram
+                    GpuUsage = $gpu
+                    Type = $ptype
                 }
-            } | Sort-Object -Property Vram -Descending | Select-Object -First 10
+            } | Sort-Object -Property Vram -Descending | Select-Object -First 50
 
             $result | ConvertTo-Json
         "#;
@@ -325,9 +400,13 @@ impl GpuMonitor {
             .map(|p| GpuProcessInfo {
                 pid: p.Pid,
                 name: p.Name,
-                gpu_usage: 0.0,
+                gpu_usage: if p.GpuUsage < 0.0 { -1.0 } else { p.GpuUsage },
                 vram: p.Vram,
-                process_type: "Graphics".to_string(),
+                process_type: if p.Type.trim().is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    p.Type
+                },
             })
             .collect())
     }
@@ -359,7 +438,11 @@ impl GpuMonitor {
         let memory_total = parts[5].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MB to bytes
         let power_draw = parts[6].parse::<f32>().unwrap_or(0.0);
         let power_limit = parts[7].parse::<f32>().unwrap_or(300.0);
-        let fan_speed = if parts[8] == "[N/A]" { 0.0 } else { parts[8].parse::<f32>().unwrap_or(0.0) };
+        let fan_speed = if parts[8] == "[N/A]" || parts[8] == "N/A" {
+            -1.0
+        } else {
+            parts[8].parse::<f32>().unwrap_or(-1.0)
+        };
         let clock_graphics = parts[9].parse::<u32>().unwrap_or(0);
         let clock_memory = parts[10].parse::<u32>().unwrap_or(0);
         let driver_version = parts[11].to_string();
@@ -379,6 +462,8 @@ impl GpuMonitor {
             clock_speed: clock_graphics,
             memory_clock: clock_memory,
             driver_version,
+            bus_id: "N/A".to_string(),
+            cuda_version: "N/A".to_string(),
             processes,
         })
     }
@@ -430,10 +515,12 @@ impl GpuMonitor {
             temperature: 0.0,
             power_usage: 0.0,
             power_limit: 0.0,
-            fan_speed: 0.0,
+            fan_speed: -1.0,
             clock_speed: 0,
             memory_clock: 0,
             driver_version: "N/A".to_string(),
+            bus_id: "N/A".to_string(),
+            cuda_version: "N/A".to_string(),
             processes: Vec::new(),
         }
     }
@@ -443,6 +530,7 @@ impl GpuMonitor {
 #[allow(non_snake_case)]
 struct NvidiaSmiData {
     Name: String,
+    BusId: String,
     Temperature: f32,
     UtilizationGpu: f32,
     #[allow(dead_code)]
@@ -455,6 +543,7 @@ struct NvidiaSmiData {
     ClockGraphics: u32,
     ClockMemory: u32,
     DriverVersion: String,
+    CudaVersion: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +552,10 @@ struct GpuProcessSample {
     Pid: u32,
     Name: String,
     Vram: u64,
+    #[serde(default)]
+    GpuUsage: f32,
+    #[serde(default)]
+    Type: String,
 }
 
 #[derive(Debug, Deserialize)]

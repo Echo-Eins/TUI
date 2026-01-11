@@ -138,6 +138,7 @@ fn render_physical_disk(
     all_data: &crate::monitors::DiskData,
     theme: &Theme,
 ) {
+    let system_drive = system_drive_letter();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -156,10 +157,23 @@ fn render_physical_disk(
         String::new()
     };
 
+    let disk_label = if let Some(system) = system_drive.as_ref() {
+        if disk
+            .partitions
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(system))
+        {
+            format!("Disk {} (System)", disk.disk_number)
+        } else {
+            format!("Disk {}", disk.disk_number)
+        }
+    } else {
+        format!("Disk {}", disk.disk_number)
+    };
     let header = format!(
-        "{} Disk {}: {} {} | {} | {}{}",
+        "{} {}: {} {} | {} | {}{}",
         health_indicator,
-        disk.disk_number,
+        disk_label,
         disk.model,
         disk.media_type,
         disk.bus_type,
@@ -168,7 +182,7 @@ fn render_physical_disk(
     );
 
     let header_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
         .border_style(Style::default().fg(get_health_color(&disk.health_status)));
 
     let header_text = Paragraph::new(header).block(header_block).style(
@@ -189,7 +203,11 @@ fn render_physical_disk(
     };
 
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title("Total Usage"))
+        .block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .title("Total Usage"),
+        )
         .gauge_style(
             Style::default()
                 .fg(get_usage_color(usage_percent as f32))
@@ -401,6 +419,7 @@ fn render_disk_details(
     all_data: &crate::monitors::DiskData,
     theme: &Theme,
 ) {
+    let system_drive = system_drive_letter();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -463,6 +482,15 @@ fn render_disk_details(
                 .iter()
                 .find(|d| &d.letter == partition_letter)
             {
+                let is_system = system_drive
+                    .as_ref()
+                    .map(|letter| drive.letter.eq_ignore_ascii_case(letter))
+                    .unwrap_or(false);
+                let label = if is_system {
+                    format!("{} (System)", drive.letter)
+                } else {
+                    drive.letter.clone()
+                };
                 let usage_pct = if drive.total > 0 {
                     (drive.used as f64 / drive.total as f64 * 100.0) as f32
                 } else {
@@ -470,7 +498,7 @@ fn render_disk_details(
                 };
 
                 detail_lines.push(Line::from(vec![
-                    Span::raw(format!("    {} ", drive.letter)),
+                    Span::raw(format!("    {:12} ", label)),
                     Span::styled(
                         format!("{:15}", drive.name),
                         Style::default().fg(Color::Cyan),
@@ -573,6 +601,17 @@ fn render_process_table(
         .column_spacing(1);
 
     f.render_widget(table, area);
+}
+
+fn system_drive_letter() -> Option<String> {
+    let drive = std::env::var("SystemDrive").ok()?;
+    let trimmed = drive.trim().trim_end_matches('\\');
+    let normalized = if trimmed.ends_with(':') {
+        trimmed.to_string()
+    } else {
+        format!("{}:", trimmed)
+    };
+    Some(normalized.to_uppercase())
 }
 
 fn get_health_indicator(health_status: &str) -> &'static str {

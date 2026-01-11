@@ -7,7 +7,7 @@ use crossterm::event::{
 use crossterm::terminal;
 use parking_lot::RwLock;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,6 +61,12 @@ pub struct AppState {
     pub last_text_input: Option<Instant>,
     pub terminal_size: (u16, u16),
 
+    // GPU UI state
+    pub gpu_state: GpuUIState,
+
+    // RAM UI state
+    pub ram_state: RamUIState,
+
     // Processes UI state
     pub processes_state: ProcessesUIState,
 
@@ -102,6 +108,42 @@ pub enum ServiceStatusFilter {
     All,
     Running,
     Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GpuProcessSortColumn {
+    Pid,
+    Name,
+    Gpu,
+    Memory,
+    Type,
+}
+
+pub struct GpuUIState {
+    pub selected_index: usize,
+    pub sort_column: GpuProcessSortColumn,
+    pub sort_ascending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamPanelFocus {
+    Breakdown,
+    TopProcesses,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RamProcessSortColumn {
+    Pid,
+    Name,
+    WorkingSet,
+    PrivateBytes,
+}
+
+pub struct RamUIState {
+    pub focused_panel: RamPanelFocus,
+    pub selected_index: usize,
+    pub sort_column: RamProcessSortColumn,
+    pub sort_ascending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,11 +256,18 @@ pub struct OllamaUIState {
     pub model_sort_ascending: bool,
     pub running_sort_column: OllamaRunningSortColumn,
     pub running_sort_ascending: bool,
+    pub running_summary_scroll: usize,
     pub chat_prompt_height: u16,
     pub chat_prompt_scroll: usize,
     pub paused_chats: Vec<ChatSession>,
-    pub pending_delete: Option<String>,
+    pub pending_delete: Option<OllamaDeleteTarget>,
     pub show_delete_confirm: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum OllamaDeleteTarget {
+    Model(String),
+    ChatLog(crate::integrations::ollama::ChatLogEntry),
 }
 
 impl AppState {
@@ -316,13 +365,30 @@ impl AppState {
         models
     }
 
-    fn sorted_ollama_running_models(&self) -> Vec<RunningModel> {
+    pub(crate) fn sorted_ollama_running_models(&self) -> Vec<RunningModel> {
         let mut models = self
             .ollama_data
             .read()
             .as_ref()
             .map(|data| data.running_models.clone())
             .unwrap_or_default();
+        let mut known = HashSet::new();
+        for model in &models {
+            known.insert(model.name.to_ascii_lowercase());
+        }
+        for session in &self.ollama_state.paused_chats {
+            let key = session.model.to_ascii_lowercase();
+            if !known.contains(&key) {
+                models.push(Self::build_running_placeholder(&session.model, "Paused"));
+                known.insert(key);
+            }
+        }
+        if let Some(active) = self.ollama_state.active_chat_model.as_deref() {
+            let key = active.to_ascii_lowercase();
+            if !known.contains(&key) {
+                models.push(Self::build_running_placeholder(active, "Running"));
+            }
+        }
         sort_ollama_running(
             &mut models,
             self.ollama_state.running_sort_column,
@@ -332,6 +398,82 @@ impl AppState {
             &self.ollama_state.chat_messages,
         );
         models
+    }
+
+    fn selected_running_model_name(&self) -> Option<String> {
+        let models = self.sorted_ollama_running_models();
+        if models.is_empty() {
+            return None;
+        }
+        let idx = self
+            .ollama_state
+            .selected_running_index
+            .min(models.len().saturating_sub(1));
+        models.get(idx).map(|model| model.name.clone())
+    }
+
+    fn build_running_placeholder(model_name: &str, processor: &str) -> RunningModel {
+        let (params_value, params_unit, params_display) =
+            Self::parse_params_from_name(model_name);
+        let is_cloud = model_name.to_ascii_lowercase().contains("cloud");
+        RunningModel {
+            name: model_name.to_string(),
+            size_bytes: 0,
+            size_display: "-".to_string(),
+            gpu_memory_mb: None,
+            gpu_memory_display: if is_cloud { "cloud".to_string() } else { "-".to_string() },
+            params_value,
+            params_unit,
+            params_display,
+            processor: processor.to_string(),
+            until: None,
+        }
+    }
+
+    fn parse_params_from_name(name: &str) -> (Option<f64>, Option<char>, String) {
+        let chars: Vec<char> = name.chars().collect();
+        for (idx, ch) in chars.iter().enumerate() {
+            let unit = ch.to_ascii_uppercase();
+            if !matches!(unit, 'M' | 'B' | 'T') {
+                continue;
+            }
+            if idx == 0 {
+                continue;
+            }
+            let mut start = idx;
+            while start > 0 {
+                let prev = chars[start - 1];
+                if prev.is_ascii_digit() || prev == '.' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if start == idx {
+                continue;
+            }
+            let num_str: String = chars[start..idx].iter().collect();
+            if let Ok(value) = num_str.parse::<f64>() {
+                let display = Self::format_param_display(value, unit);
+                return (Some(value), Some(unit), display);
+            }
+        }
+        (None, None, "-".to_string())
+    }
+
+    fn format_param_display(value: f64, unit: char) -> String {
+        if (value.fract() - 0.0).abs() < f64::EPSILON {
+            format!("{:.0}{}", value, unit)
+        } else {
+            let mut text = format!("{:.2}", value);
+            while text.ends_with('0') {
+                text.pop();
+            }
+            if text.ends_with('.') {
+                text.pop();
+            }
+            format!("{text}{unit}")
+        }
     }
 
     fn toggle_model_sort(&mut self, column: OllamaModelSortColumn) {
@@ -349,6 +491,15 @@ impl AppState {
         } else {
             self.ollama_state.running_sort_column = column;
             self.ollama_state.running_sort_ascending = true;
+        }
+    }
+
+    fn toggle_gpu_sort(&mut self, column: GpuProcessSortColumn) {
+        if self.gpu_state.sort_column == column {
+            self.gpu_state.sort_ascending = !self.gpu_state.sort_ascending;
+        } else {
+            self.gpu_state.sort_column = column;
+            self.gpu_state.sort_ascending = true;
         }
     }
 
@@ -947,6 +1098,19 @@ impl AppState {
             last_text_input: None,
             terminal_size: terminal::size().unwrap_or((120, 40)),
 
+            gpu_state: GpuUIState {
+                selected_index: 0,
+                sort_column: GpuProcessSortColumn::Gpu,
+                sort_ascending: false,
+            },
+
+            ram_state: RamUIState {
+                focused_panel: RamPanelFocus::TopProcesses,
+                selected_index: 0,
+                sort_column: RamProcessSortColumn::WorkingSet,
+                sort_ascending: false,
+            },
+
             processes_state: ProcessesUIState {
                 selected_index: 0,
                 scroll_offset: 0,
@@ -990,6 +1154,7 @@ impl AppState {
                 model_sort_ascending: true,
                 running_sort_column: OllamaRunningSortColumn::Name,
                 running_sort_ascending: true,
+                running_summary_scroll: 0,
                 chat_prompt_height: 3,
                 chat_prompt_scroll: 0,
                 paused_chats: Vec::new(),
@@ -1195,6 +1360,193 @@ impl AppState {
             }
         }
 
+        if self.tab_manager.current() == TabType::Gpu {
+            let process_count = self
+                .gpu_data
+                .read()
+                .as_ref()
+                .map(|d| d.processes.len())
+                .unwrap_or(0);
+            match key.code {
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.gpu_state.selected_index > 0 {
+                        self.gpu_state.selected_index -= 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.gpu_state.selected_index + 1 < process_count {
+                        self.gpu_state.selected_index += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    self.gpu_state.selected_index =
+                        self.gpu_state.selected_index.saturating_sub(step);
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    if process_count > 0 {
+                        let next = self.gpu_state.selected_index + step;
+                        self.gpu_state.selected_index =
+                            next.min(process_count.saturating_sub(1));
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_gpu_sort(GpuProcessSortColumn::Pid);
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_gpu_sort(GpuProcessSortColumn::Name);
+                    return Ok(true);
+                }
+                KeyCode::Char('g') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_gpu_sort(GpuProcessSortColumn::Gpu);
+                    return Ok(true);
+                }
+                KeyCode::Char('m') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_gpu_sort(GpuProcessSortColumn::Memory);
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_gpu_sort(GpuProcessSortColumn::Type);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        if self.tab_manager.current() == TabType::Ram {
+            let process_count = self
+                .ram_data
+                .read()
+                .as_ref()
+                .map(|d| d.top_processes.len())
+                .unwrap_or(0);
+            match key.code {
+                KeyCode::Left | KeyCode::Right => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    self.ram_state.focused_panel = match self.ram_state.focused_panel {
+                        RamPanelFocus::Breakdown => RamPanelFocus::TopProcesses,
+                        RamPanelFocus::TopProcesses => RamPanelFocus::Breakdown,
+                    };
+                    return Ok(true);
+                }
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.ram_state.focused_panel == RamPanelFocus::TopProcesses
+                        && self.ram_state.selected_index > 0
+                    {
+                        self.ram_state.selected_index -= 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.ram_state.focused_panel == RamPanelFocus::TopProcesses
+                        && self.ram_state.selected_index + 1 < process_count
+                    {
+                        self.ram_state.selected_index += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    if self.ram_state.focused_panel == RamPanelFocus::TopProcesses {
+                        self.ram_state.selected_index =
+                            self.ram_state.selected_index.saturating_sub(step);
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let step = 10usize;
+                    if self.ram_state.focused_panel == RamPanelFocus::TopProcesses
+                        && process_count > 0
+                    {
+                        let next = self.ram_state.selected_index + step;
+                        self.ram_state.selected_index =
+                            next.min(process_count.saturating_sub(1));
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.ram_state.sort_column = RamProcessSortColumn::Pid;
+                    self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.ram_state.sort_column = RamProcessSortColumn::Name;
+                    self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('w') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.ram_state.sort_column = RamProcessSortColumn::WorkingSet;
+                    self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                KeyCode::Char('b') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.ram_state.sort_column = RamProcessSortColumn::PrivateBytes;
+                    self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
                 // Services tab hotkeys
         if self.tab_manager.current() == TabType::Services {
             match key.code {
@@ -1364,13 +1716,28 @@ impl AppState {
             if self.ollama_state.show_delete_confirm {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
-                        if let Some(model_name) = self.ollama_state.pending_delete.clone() {
-                            tokio::spawn(async move {
-                                use crate::integrations::OllamaClient;
-                                if let Ok(client) = OllamaClient::new(None) {
-                                    let _ = client.remove_model(&model_name).await;
+                        if let Some(target) = self.ollama_state.pending_delete.clone() {
+                            match target {
+                                OllamaDeleteTarget::Model(model_name) => {
+                                    tokio::spawn(async move {
+                                        use crate::integrations::OllamaClient;
+                                        if let Ok(client) = OllamaClient::new(None) {
+                                            let _ = client.remove_model(&model_name).await;
+                                        }
+                                    });
                                 }
-                            });
+                                OllamaDeleteTarget::ChatLog(entry) => {
+                                    let log_path = entry.path.clone();
+                                    let meta_path =
+                                        std::path::PathBuf::from(&log_path).with_extension("toml");
+                                    let _ = fs::remove_file(&log_path);
+                                    let _ = fs::remove_file(&meta_path);
+                                    if let Some(data) = self.ollama_data.write().as_mut() {
+                                        data.chat_logs
+                                            .retain(|item| item.path != entry.path);
+                                    }
+                                }
+                            }
                         }
                         self.ollama_state.pending_delete = None;
                         self.ollama_state.show_delete_confirm = false;
@@ -1483,14 +1850,17 @@ impl AppState {
                         }
                     }
                     KeyCode::Char(c) => {
-                        let is_text_event = matches!(
-                            key.kind,
-                            KeyEventKind::Press | KeyEventKind::Repeat
-                        );
-                        if is_text_event
-                            && (self.ollama_state.input_mode != OllamaInputMode::Chat
-                                || self.allow_text_input())
+                        if self.ollama_state.input_mode == OllamaInputMode::None {
+                            return Ok(true);
+                        }
+                        let allow_input = if self.ollama_state.input_mode == OllamaInputMode::Chat
                         {
+                            matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                                && self.allow_text_input()
+                        } else {
+                            self.allow_text_input()
+                        };
+                        if allow_input {
                             self.ollama_state.input_buffer.push(c);
                         }
                     }
@@ -1700,6 +2070,13 @@ impl AppState {
                                     self.ollama_state.activity_log_scroll.saturating_sub(1);
                             }
                         },
+                        OllamaPanelFocus::Vram => {
+                            if !self.allow_widget_scroll() {
+                                return Ok(true);
+                            }
+                            self.ollama_state.running_summary_scroll =
+                                self.ollama_state.running_summary_scroll.saturating_sub(1);
+                        }
                         OllamaPanelFocus::Additions => {
                             if self.ollama_state.activity_additions_open
                                 && self.ollama_state.activity_additions_selected > 0
@@ -1737,12 +2114,8 @@ impl AppState {
                                         }
                                     }
                                     OllamaView::Running => {
-                                        let running_count = self
-                                            .ollama_data
-                                            .read()
-                                            .as_ref()
-                                            .map(|d| d.running_models.len())
-                                            .unwrap_or(0);
+                                        let running_count =
+                                            self.sorted_ollama_running_models().len();
                                         if self.ollama_state.selected_running_index + 1
                                             < running_count
                                         {
@@ -1775,6 +2148,13 @@ impl AppState {
                                 self.ollama_state.activity_log_scroll += 1;
                             }
                         },
+                        OllamaPanelFocus::Vram => {
+                            if !self.allow_widget_scroll() {
+                                return Ok(true);
+                            }
+                            self.ollama_state.running_summary_scroll =
+                                self.ollama_state.running_summary_scroll.saturating_add(1);
+                        }
                         OllamaPanelFocus::Additions => {
                             let additions_len = if self.ollama_state.activity_additions_open {
                                 1usize
@@ -1842,6 +2222,15 @@ impl AppState {
                                     .saturating_sub(step);
                             }
                         },
+                        OllamaPanelFocus::Vram => {
+                            if !self.allow_widget_scroll() {
+                                return Ok(true);
+                            }
+                            self.ollama_state.running_summary_scroll = self
+                                .ollama_state
+                                .running_summary_scroll
+                                .saturating_sub(step);
+                        }
                         _ => {}
                     }
                     return Ok(true);
@@ -1875,12 +2264,8 @@ impl AppState {
                                         }
                                     }
                                     OllamaView::Running => {
-                                        let running_count = self
-                                            .ollama_data
-                                            .read()
-                                            .as_ref()
-                                            .map(|d| d.running_models.len())
-                                            .unwrap_or(0);
+                                        let running_count =
+                                            self.sorted_ollama_running_models().len();
                                         if running_count > 0 {
                                             let next =
                                                 self.ollama_state.selected_running_index + step;
@@ -1916,6 +2301,15 @@ impl AppState {
                                 self.ollama_state.activity_log_scroll += step;
                             }
                         },
+                        OllamaPanelFocus::Vram => {
+                            if !self.allow_widget_scroll() {
+                                return Ok(true);
+                            }
+                            self.ollama_state.running_summary_scroll = self
+                                .ollama_state
+                                .running_summary_scroll
+                                .saturating_add(step);
+                        }
                         _ => {}
                     }
                     return Ok(true);
@@ -1946,10 +2340,7 @@ impl AppState {
                             .sorted_ollama_models()
                             .get(self.ollama_state.selected_model_index)
                             .map(|model| model.name.clone()),
-                        OllamaView::Running => self
-                            .sorted_ollama_running_models()
-                            .get(self.ollama_state.selected_running_index)
-                            .map(|model| model.name.clone()),
+                        OllamaView::Running => self.selected_running_model_name(),
                     };
                     if let Some(model_name) = model_name {
                         if !self.resume_ollama_chat(&model_name) {
@@ -1959,15 +2350,20 @@ impl AppState {
                     return Ok(true);
                 }
                 KeyCode::Char('s') | KeyCode::Char('u') => {
-                    let model_name = self
-                        .sorted_ollama_running_models()
-                        .get(self.ollama_state.selected_running_index)
-                        .map(|running| running.name.clone());
+                    let model_name = self.selected_running_model_name();
                     if let Some(model_name) = model_name {
                         if self.ollama_state.active_chat_model.as_deref()
                             == Some(model_name.as_str())
                         {
                             self.finish_ollama_chat();
+                        }
+                        if let Some(pos) = self
+                            .ollama_state
+                            .paused_chats
+                            .iter()
+                            .position(|session| session.model == model_name)
+                        {
+                            self.ollama_state.paused_chats.remove(pos);
                         }
                         tokio::spawn(async move {
                             use crate::integrations::OllamaClient;
@@ -1982,6 +2378,26 @@ impl AppState {
                     if !is_initial_press {
                         return Ok(true);
                     }
+                    if self.ollama_state.focused_panel == OllamaPanelFocus::Activity
+                        && self.ollama_state.activity_view == OllamaActivityView::List
+                    {
+                        let entry = self.ollama_data.read().as_ref().and_then(|data| {
+                            let idx = self
+                                .ollama_state
+                                .activity_selected
+                                .min(data.chat_logs.len().saturating_sub(1));
+                            data.chat_logs.get(idx).cloned()
+                        });
+                        if let Some(entry) = entry {
+                            self.ollama_state.pending_delete =
+                                Some(OllamaDeleteTarget::ChatLog(entry));
+                            self.ollama_state.show_delete_confirm = true;
+                        }
+                        return Ok(true);
+                    }
+                    if self.ollama_state.current_view == OllamaView::Running {
+                        return Ok(true);
+                    }
                     let target_name = match self.ollama_state.current_view {
                         OllamaView::Models => self
                             .sorted_ollama_models()
@@ -1993,7 +2409,8 @@ impl AppState {
                             .map(|model| model.name.clone()),
                     };
                     if let Some(name) = target_name {
-                        self.ollama_state.pending_delete = Some(name);
+                        self.ollama_state.pending_delete =
+                            Some(OllamaDeleteTarget::Model(name));
                         self.ollama_state.show_delete_confirm = true;
                     }
                     return Ok(true);

@@ -53,11 +53,11 @@ impl TabType {
             TabType::Gpu,
             TabType::Ram,
             TabType::Disk,
+            TabType::DiskAnalyzer,
             TabType::Network,
             TabType::Ollama,
             TabType::Processes,
             TabType::Services,
-            TabType::DiskAnalyzer,
             TabType::Settings,
         ]
     }

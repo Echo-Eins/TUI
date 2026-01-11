@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::app::state::GpuProcessSortColumn;
+use crate::monitors::gpu::GpuProcessInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
 
@@ -34,7 +36,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         if app.state.compact_mode {
             render_compact(f, area, data, &theme);
         } else {
-            render_full(f, area, data, &theme);
+            render_full(f, area, data, app, &theme);
         }
     } else {
         let block = Block::default()
@@ -50,7 +52,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme: &Theme) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::GpuData,
+    app: &App,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -64,8 +72,12 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
 
     // Header
     let header = format!(
-        "GPU: {}  Driver: {}  Temp: {:.1}°C",
-        data.name, data.driver_version, data.temperature
+        "GPU: {}  Bus: {}  Driver: {}  CUDA: {}  Temp: {:.1}°C",
+        data.name,
+        if data.bus_id.is_empty() { "N/A" } else { &data.bus_id },
+        data.driver_version,
+        if data.cuda_version.is_empty() { "N/A" } else { &data.cuda_version },
+        data.temperature
     );
 
     let header_block = Block::default()
@@ -122,7 +134,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
             ),
             Span::raw("  │  Fan Speed: "),
             Span::styled(
-                format!("{:.0}%", data.fan_speed),
+                if data.fan_speed < 0.0 {
+                    "-".to_string()
+                } else {
+                    format!("{:.0}%", data.fan_speed)
+                },
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -184,47 +200,134 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
     f.render_widget(vram_gauge, chunks[3]);
 
     // GPU Processes
-    if !data.processes.is_empty() {
-        let rows: Vec<Row> = data
-            .processes
+    let mut processes = data.processes.clone();
+    sort_gpu_processes(
+        &mut processes,
+        app.state.gpu_state.sort_column,
+        app.state.gpu_state.sort_ascending,
+    );
+    if !processes.is_empty() {
+        let selected_index = app
+            .state
+            .gpu_state
+            .selected_index
+            .min(processes.len().saturating_sub(1));
+        let hotkeys_height = if chunks[4].height > 2 { 1 } else { 0 };
+        let visible_rows = chunks[4]
+            .height
+            .saturating_sub(2 + 1 + hotkeys_height)
+            .max(1) as usize;
+        let scroll_offset = if selected_index >= visible_rows {
+            selected_index - (visible_rows - 1)
+        } else {
+            0
+        };
+
+        let rows: Vec<Row> = processes
             .iter()
-            .map(|p| {
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_rows)
+            .map(|(i, p)| {
+                let is_selected = i == selected_index;
+                let style = if is_selected {
+                    Style::default().fg(Color::Black).bg(Color::Green)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let gpu_text = if p.gpu_usage < 0.0 {
+                    "-".to_string()
+                } else {
+                    format!("{:.1}%", p.gpu_usage)
+                };
                 Row::new(vec![
+                    format!("{}", i + 1),
                     format!("{}", p.pid),
-                    p.name.clone(),
-                    format!("{:.1}%", p.gpu_usage),
-                    format_bytes(p.vram),
                     p.process_type.clone(),
+                    p.name.clone(),
+                    gpu_text,
+                    format_bytes(p.vram),
                 ])
-                .style(Style::default().fg(Color::White))
+                .style(style)
             })
             .collect();
+
+        let sort_indicator = if app.state.gpu_state.sort_ascending {
+            "↑"
+        } else {
+            "↓"
+        };
+        let header = Row::new(vec![
+            "№".to_string(),
+            if app.state.gpu_state.sort_column == GpuProcessSortColumn::Pid {
+                format!("PID {sort_indicator}")
+            } else {
+                "PID".to_string()
+            },
+            if app.state.gpu_state.sort_column == GpuProcessSortColumn::Type {
+                format!("Type {sort_indicator}")
+            } else {
+                "Type".to_string()
+            },
+            if app.state.gpu_state.sort_column == GpuProcessSortColumn::Name {
+                format!("Name {sort_indicator}")
+            } else {
+                "Name".to_string()
+            },
+            if app.state.gpu_state.sort_column == GpuProcessSortColumn::Gpu {
+                format!("GPU% {sort_indicator}")
+            } else {
+                "GPU%".to_string()
+            },
+            if app.state.gpu_state.sort_column == GpuProcessSortColumn::Memory {
+                format!("VRAM {sort_indicator}")
+            } else {
+                "VRAM".to_string()
+            },
+        ])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
 
         let table = Table::new(
             rows,
             &[
+                Constraint::Length(4),
                 Constraint::Length(8),
-                Constraint::Min(20),
                 Constraint::Length(10),
+                Constraint::Min(18),
+                Constraint::Length(8),
                 Constraint::Length(12),
-                Constraint::Length(18),
             ],
         )
-        .header(
-            Row::new(vec!["PID", "Name", "GPU%", "VRAM", "Type"]).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
+        .header(header)
         .block(
             Block::default()
                 .title("GPU Processes")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.gpu_color)),
-        );
+        )
+        .column_spacing(1)
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Green));
 
         f.render_widget(table, chunks[4]);
+
+        let hotkeys = vec![Line::from(vec![
+            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+            Span::raw(": Navigate  "),
+            Span::styled("p/n/g/m/t", Style::default().fg(Color::Cyan)),
+            Span::raw(": Sort by PID/Name/GPU/Memory/Type  "),
+            Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
+            Span::raw(": Page Up/Down"),
+        ])];
+        if hotkeys_height > 0 {
+            let hotkeys_area = Rect {
+                x: chunks[4].x + 2,
+                y: chunks[4].y + chunks[4].height - 2,
+                width: chunks[4].width.saturating_sub(4),
+                height: 1,
+            };
+            let hotkeys_paragraph = Paragraph::new(hotkeys);
+            f.render_widget(hotkeys_paragraph, hotkeys_area);
+        }
     } else {
         let block = Block::default()
             .title("GPU Processes")
@@ -237,6 +340,34 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme
 
         f.render_widget(text, chunks[4]);
     }
+}
+
+fn sort_gpu_processes(
+    processes: &mut Vec<GpuProcessInfo>,
+    column: GpuProcessSortColumn,
+    ascending: bool,
+) {
+    processes.sort_by(|a, b| {
+        let cmp = match column {
+            GpuProcessSortColumn::Pid => a.pid.cmp(&b.pid),
+            GpuProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            GpuProcessSortColumn::Gpu => a
+                .gpu_usage
+                .partial_cmp(&b.gpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            GpuProcessSortColumn::Memory => a.vram.cmp(&b.vram),
+            GpuProcessSortColumn::Type => a
+                .process_type
+                .to_lowercase()
+                .cmp(&b.process_type.to_lowercase()),
+        };
+
+        if ascending {
+            cmp
+        } else {
+            cmp.reverse()
+        }
+    });
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::GpuData, theme: &Theme) {

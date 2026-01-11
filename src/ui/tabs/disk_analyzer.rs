@@ -88,10 +88,20 @@ fn render_drive_panel(
     drive: &crate::monitors::AnalyzedDrive,
     theme: &Theme,
 ) {
-    let title = if drive.name.is_empty() {
-        format!("Drive {}", drive.letter)
+    let system_drive = system_drive_letter();
+    let is_system = system_drive
+        .as_ref()
+        .map(|letter| drive.letter.eq_ignore_ascii_case(letter))
+        .unwrap_or(false);
+    let label = if is_system {
+        format!("{} (System)", drive.letter)
     } else {
-        format!("Drive {} ({})", drive.letter, drive.name)
+        drive.letter.clone()
+    };
+    let title = if drive.name.is_empty() {
+        format!("Drive {}", label)
+    } else {
+        format!("Drive {} ({})", label, drive.name)
     };
 
     let block = Block::default()
@@ -218,6 +228,17 @@ fn render_drive_panel(
 
     let text = Paragraph::new(lines).style(Style::default().fg(Color::White));
     f.render_widget(text, inner);
+}
+
+fn system_drive_letter() -> Option<String> {
+    let drive = std::env::var("SystemDrive").ok()?;
+    let trimmed = drive.trim().trim_end_matches('\\');
+    let normalized = if trimmed.ends_with(':') {
+        trimmed.to_string()
+    } else {
+        format!("{}:", trimmed)
+    };
+    Some(normalized.to_uppercase())
 }
 
 fn compute_column_widths(available: usize) -> (usize, usize) {
