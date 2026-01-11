@@ -33,6 +33,14 @@ pub struct RootFolderInfo {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderContents {
+    pub subfolders: Vec<RootFolderInfo>,
+    pub file_count: usize,
+    pub folder_count: usize,
+    pub extension_counts: std::collections::HashMap<String, usize>,
+}
+
 pub struct DiskAnalyzerMonitor {
     ps: PowerShellExecutor,
     es_executable: String,
@@ -172,6 +180,83 @@ impl DiskAnalyzerMonitor {
             .context("Failed to query Everything CLI")?;
 
         Ok(parse_everything_output(&output, drive_root))
+    }
+
+    /// Query subfolders and file counts for a specific folder path
+    pub async fn query_folder_contents(
+        &self,
+        folder_path: &str,
+        track_extensions: &[String],
+    ) -> Result<FolderContents> {
+        let normalized_path = normalize_folder_path(folder_path);
+
+        // Query subfolders with sizes
+        let subfolder_args = vec![
+            "-parent",
+            &normalized_path,
+            "/ad",
+            "-size",
+            "-json",
+            "-no-result-error",
+            "-sort",
+            "size-descending",
+        ];
+
+        let subfolder_output = self
+            .run_everything(&subfolder_args)
+            .await
+            .context("Failed to query subfolders")?;
+
+        let subfolders = parse_everything_output(&subfolder_output, &normalized_path);
+        let folder_count = subfolders.len();
+
+        // Query files count
+        let file_args = vec![
+            "-parent",
+            &normalized_path,
+            "/af",
+            "-json",
+            "-no-result-error",
+        ];
+
+        let file_output = self
+            .run_everything(&file_args)
+            .await
+            .context("Failed to query files")?;
+
+        let files = parse_file_list(&file_output);
+        let file_count = files.len();
+
+        // Count extensions if specified
+        let mut extension_counts = std::collections::HashMap::new();
+        if !track_extensions.is_empty() {
+            for file in &files {
+                let file_lower = file.to_lowercase();
+                for ext in track_extensions {
+                    let ext_lower = ext.to_lowercase();
+                    let ext_with_dot = if ext_lower.starts_with('.') {
+                        ext_lower
+                    } else {
+                        format!(".{}", ext_lower)
+                    };
+                    if file_lower.ends_with(&ext_with_dot) {
+                        *extension_counts.entry(ext.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(FolderContents {
+            subfolders,
+            file_count,
+            folder_count,
+            extension_counts,
+        })
+    }
+
+    /// Get the path to Everything executable
+    pub fn es_executable(&self) -> &str {
+        &self.es_executable
     }
 
     async fn run_everything(&self, args: &[&str]) -> Result<String> {
@@ -545,4 +630,59 @@ struct DriveSample {
     Name: Option<String>,
     Total: Option<u64>,
     Free: Option<u64>,
+}
+
+fn normalize_folder_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('\\').trim_end_matches('/');
+    format!("{}\\", trimmed)
+}
+
+fn parse_file_list(output: &str) -> Vec<String> {
+    let trimmed = output.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Try to parse as JSON first
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return parse_file_list_json(value);
+    }
+
+    // Fallback to line-based parsing
+    trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+fn parse_file_list_json(value: serde_json::Value) -> Vec<String> {
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(map) => {
+            if let Some(results) = find_value_ci(&map, &["results", "items"]) {
+                if let serde_json::Value::Array(items) = results {
+                    items.clone()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                vec![serde_json::Value::Object(map)]
+            }
+        }
+        _ => Vec::new(),
+    };
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            if let serde_json::Value::Object(map) = item {
+                get_string_ci(&map, &["filename", "name", "path"])
+            } else if let serde_json::Value::String(s) = item {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect()
 }

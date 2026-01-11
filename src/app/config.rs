@@ -132,6 +132,8 @@ impl Default for ServiceMonitorConfig {
 pub struct IntegrationsConfig {
     pub ollama: OllamaConfig,
     pub everything: EverythingConfig,
+    #[serde(default)]
+    pub disk_analyzer: DiskAnalyzerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,6 +151,23 @@ pub struct EverythingConfig {
     pub max_depth: usize,
     #[serde(default = "default_everything_refresh_interval_ms")]
     pub refresh_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiskAnalyzerConfig {
+    #[serde(default)]
+    pub show_extensions: Vec<String>,
+    #[serde(default)]
+    pub extended_view_default: bool,
+}
+
+impl Default for DiskAnalyzerConfig {
+    fn default() -> Self {
+        Self {
+            show_extensions: Vec::new(),
+            extended_view_default: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

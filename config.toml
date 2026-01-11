@@ -68,6 +68,12 @@ es_executable = "D:\\Coding\\everything\\Everything 1.5a\\es.exe"
 max_depth = 10
 refresh_interval_ms = 5000
 
+[integrations.disk_analyzer]
+# Extensions to show in folder info (e.g., [".exe", ".dll", ".bin"])
+show_extensions = []
+# Default state for extended view (show folder contents for all items)
+extended_view_default = false
+
 [ui]
 mouse_support = true
 tab_switch_key = "Tab"
