@@ -6,6 +6,7 @@ use crate::utils::parse_json_array;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuData {
     pub name: String,
+    pub gpu_index: u32,
     pub utilization: f32,
     pub memory_used: u64,
     pub memory_total: u64,
@@ -91,7 +92,7 @@ impl GpuMonitor {
             function Parse-Float($value, $default) {
                 if ($null -eq $value) { return [float]$default }
                 $v = $value.ToString().Trim()
-                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]') { return [float]$default }
+                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]' -or $v -eq '[Not Supported]' -or $v -eq 'Not Supported') { return [float]$default }
                 $out = 0.0
                 if ([double]::TryParse($v, [ref]$out)) { return [float]$out }
                 return [float]$default
@@ -100,18 +101,37 @@ impl GpuMonitor {
             function Parse-UInt64($value, $default) {
                 if ($null -eq $value) { return [uint64]$default }
                 $v = $value.ToString().Trim()
-                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]') { return [uint64]$default }
+                if ($v -eq '' -or $v -eq 'N/A' -or $v -eq '[N/A]' -or $v -eq '[Not Supported]' -or $v -eq 'Not Supported') { return [uint64]$default }
                 $out = 0.0
                 if ([double]::TryParse($v, [ref]$out)) { return [uint64]$out }
                 return [uint64]$default
             }
 
+            # Get standard nvidia-smi output for power draw fallback
+            $standardOutput = & $nvidiaPath
             $cudaVersion = "N/A"
-            $header = & $nvidiaPath
-            if ($header) {
-                $line = $header | Where-Object { $_ -match 'CUDA Version' } | Select-Object -First 1
+            $fallbackPowerDraw = 0.0
+            $fallbackPowerLimit = 0.0
+            $gpuIndex = 0
+
+            if ($standardOutput) {
+                # Extract CUDA version
+                $line = $standardOutput | Where-Object { $_ -match 'CUDA Version' } | Select-Object -First 1
                 if ($line -match 'CUDA Version:\s*([0-9\.]+)') {
                     $cudaVersion = $Matches[1]
+                }
+
+                # Extract power draw from the table (e.g., "32W / 137W")
+                $powerLine = $standardOutput | Where-Object { $_ -match 'Pwr:Usage/Cap' } | Select-Object -First 1
+                if ($powerLine -match '(\d+)W\s*/\s*(\d+)W') {
+                    $fallbackPowerDraw = [float]$Matches[1]
+                    $fallbackPowerLimit = [float]$Matches[2]
+                }
+
+                # Extract GPU index from Bus-Id line
+                $busLine = $standardOutput | Where-Object { $_ -match 'Bus-Id' } | Select-Object -First 1
+                if ($busLine -match '\|\s*(\d+)\s+') {
+                    $gpuIndex = [int]$Matches[1]
                 }
             }
 
@@ -124,16 +144,36 @@ impl GpuMonitor {
             $rows = foreach ($line in $lines) {
                 $parts = $line.Split(',') | ForEach-Object { $_.Trim() }
                 if ($parts.Count -lt 13) { continue }
+
+                $powerDraw = Parse-Float $parts[7] 0.0
+                $powerLimit = Parse-Float $parts[8] 0.0
+
+                # Use fallback power values if query returned 0
+                if ($powerDraw -eq 0.0 -and $fallbackPowerDraw -gt 0.0) {
+                    $powerDraw = $fallbackPowerDraw
+                }
+                if ($powerLimit -eq 0.0 -and $fallbackPowerLimit -gt 0.0) {
+                    $powerLimit = $fallbackPowerLimit
+                }
+
+                # Parse GPU index from bus_id (format: 00000000:01:00.0)
+                $busId = $parts[1]
+                $busIdIndex = 0
+                if ($busId -match ':(\d+):') {
+                    $busIdIndex = [int]$Matches[1]
+                }
+
                 [PSCustomObject]@{
                     Name = $parts[0]
                     BusId = $parts[1]
+                    GpuIndex = $busIdIndex
                     Temperature = Parse-Float $parts[2] 0.0
                     UtilizationGpu = Parse-Float $parts[3] 0.0
                     UtilizationMemory = Parse-Float $parts[4] 0.0
                     MemoryUsed = (Parse-UInt64 $parts[5] 0) * 1MB
                     MemoryTotal = (Parse-UInt64 $parts[6] 0) * 1MB
-                    PowerDraw = Parse-Float $parts[7] 0.0
-                    PowerLimit = Parse-Float $parts[8] 0.0
+                    PowerDraw = $powerDraw
+                    PowerLimit = $powerLimit
                     FanSpeed = Parse-Float $parts[9] -1.0
                     ClockGraphics = [uint32](Parse-UInt64 $parts[10] 0)
                     ClockMemory = [uint32](Parse-UInt64 $parts[11] 0)
@@ -167,6 +207,7 @@ impl GpuMonitor {
 
         Ok(GpuData {
             name: info.Name,
+            gpu_index: info.GpuIndex,
             utilization: info.UtilizationGpu.clamp(0.0, 100.0),
             memory_used,
             memory_total,
@@ -238,6 +279,7 @@ impl GpuMonitor {
 
         Ok(GpuData {
             name: info.Name,
+            gpu_index: 0,
             utilization,
             memory_used,
             memory_total,
@@ -452,6 +494,7 @@ impl GpuMonitor {
 
         Ok(GpuData {
             name,
+            gpu_index: 0,
             utilization: utilization_gpu,
             memory_used,
             memory_total,
@@ -509,6 +552,7 @@ impl GpuMonitor {
     fn get_stub_gpu_data(&self) -> GpuData {
         GpuData {
             name: "No GPU detected".to_string(),
+            gpu_index: 0,
             utilization: 0.0,
             memory_used: 0,
             memory_total: 0,
@@ -531,6 +575,7 @@ impl GpuMonitor {
 struct NvidiaSmiData {
     Name: String,
     BusId: String,
+    GpuIndex: u32,
     Temperature: f32,
     UtilizationGpu: f32,
     #[allow(dead_code)]
