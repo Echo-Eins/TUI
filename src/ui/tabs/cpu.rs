@@ -105,9 +105,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
 
     f.render_widget(gauge, chunks[1]);
 
-    // Core usage
-    let core_text: Vec<Line> = data
-        .core_usage
+    // Core usage - sort by core_id first
+    let mut sorted_cores = data.core_usage.clone();
+    sorted_cores.sort_by_key(|c| c.core_id);
+
+    let core_text: Vec<Line> = sorted_cores
         .chunks(2)
         .map(|chunk| {
             let spans: Vec<Span> = chunk

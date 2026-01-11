@@ -148,19 +148,40 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let help_text = if app.state.command_input.is_empty() {
-        "[F1] Help │ [F2] Compact │ [Tab] Next │ [Ctrl+F] History │ [Ctrl+C] Exit"
+    if app.state.command_input.is_empty() {
+        let monitors_running = *app.state.monitors_running.read();
+        let status_text = if monitors_running { "running" } else { "stopped" };
+        let status_color = if monitors_running { Color::Green } else { Color::Red };
+
+        let help_spans = vec![
+            Span::raw("[F1] Help │ [F2] Compact │ [Tab] Next │ [Ctrl+F] History │ [Ctrl+C] Exit │ [M+S] "),
+            Span::styled(
+                format!("({})", status_text),
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        let block = Block::default().borders(Borders::ALL);
+        let paragraph = Paragraph::new(Line::from(help_spans))
+            .block(block)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(paragraph, area);
     } else {
-        &format!("Command: {} [Enter] Execute [Esc] Cancel", app.state.command_input)
-    };
+        let help_text = format!(
+            "Command: {} [Enter] Execute [Esc] Cancel",
+            app.state.command_input
+        );
 
-    let block = Block::default().borders(Borders::ALL);
-    let paragraph = Paragraph::new(help_text)
-        .block(block)
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Gray));
+        let block = Block::default().borders(Borders::ALL);
+        let paragraph = Paragraph::new(help_text)
+            .block(block)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Gray));
 
-    f.render_widget(paragraph, area);
+        f.render_widget(paragraph, area);
+    }
 }
 
 fn render_command_menu(f: &mut Frame, _area: Rect, app: &App) {

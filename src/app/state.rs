@@ -75,6 +75,11 @@ pub struct AppState {
 
     // Ollama UI state
     pub ollama_state: OllamaUIState,
+
+    // Monitor control
+    pub monitors_running: Arc<RwLock<bool>>,
+    pub ms_keys_pressed: Option<Instant>,
+    pub pressed_keys: HashSet<KeyCode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1038,9 +1043,12 @@ impl AppState {
         let ollama_data = Arc::new(RwLock::new(None));
         let ollama_error = Arc::new(RwLock::new(None));
 
+        let monitors_running = Arc::new(RwLock::new(true));
+
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
             Arc::clone(&config),
+            Arc::clone(&monitors_running),
             Arc::clone(&cpu_data),
             Arc::clone(&cpu_error),
             Arc::clone(&gpu_data),
@@ -1161,6 +1169,10 @@ impl AppState {
                 pending_delete: None,
                 show_delete_confirm: false,
             },
+
+            monitors_running,
+            ms_keys_pressed: None,
+            pressed_keys: HashSet::new(),
         })
     }
 
@@ -1178,6 +1190,47 @@ impl AppState {
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         let is_initial_press = matches!(key.kind, KeyEventKind::Press);
+        let is_release = matches!(key.kind, KeyEventKind::Release);
+
+        // Track M and S key presses for monitor toggle
+        match key.code {
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                if is_initial_press && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.pressed_keys.insert(KeyCode::Char('m'));
+                } else if is_release {
+                    self.pressed_keys.remove(&KeyCode::Char('m'));
+                    self.ms_keys_pressed = None;
+                }
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if is_initial_press && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.pressed_keys.insert(KeyCode::Char('s'));
+                } else if is_release {
+                    self.pressed_keys.remove(&KeyCode::Char('s'));
+                    self.ms_keys_pressed = None;
+                }
+            }
+            _ => {}
+        }
+
+        // Check if both M and S are pressed
+        if self.pressed_keys.contains(&KeyCode::Char('m'))
+            && self.pressed_keys.contains(&KeyCode::Char('s'))
+        {
+            if self.ms_keys_pressed.is_none() {
+                self.ms_keys_pressed = Some(Instant::now());
+            } else if let Some(start_time) = self.ms_keys_pressed {
+                if start_time.elapsed() >= Duration::from_secs(3) {
+                    // Toggle monitors
+                    let mut running = self.monitors_running.write();
+                    *running = !*running;
+                    self.ms_keys_pressed = None;
+                    self.pressed_keys.clear();
+                    log::info!("Monitors toggled: {}", *running);
+                }
+            }
+        }
+
         // Handle Ctrl+C to quit
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(false);

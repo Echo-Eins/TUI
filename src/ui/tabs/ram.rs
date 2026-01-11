@@ -392,35 +392,40 @@ fn render_pagefile_gauge(
 
         f.render_widget(gauge, area);
     } else {
-        // Multiple pagefiles - show total
-        let total_percent = if data.total_pagefile_size > 0 {
-            ((data.total_pagefile_used as f64 / data.total_pagefile_size as f64) * 100.0).min(100.0)
-                as u16
-        } else {
-            0
-        };
+        // Multiple pagefiles - show each one as a line with progress bar
+        let mut pagefile_lines = Vec::new();
 
-        let gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Pagefile (Total: {} files)", data.pagefiles.len()))
-                    .border_style(Style::default().fg(theme.disk_color)),
-            )
-            .gauge_style(
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .percent(total_percent)
-            .label(format!(
-                "{}% - {} / {}",
-                total_percent,
-                format_bytes(data.total_pagefile_used),
-                format_bytes(data.total_pagefile_size)
-            ));
+        for (i, pf) in data.pagefiles.iter().enumerate() {
+            let percent = pf.usage_percent.min(100.0);
+            let bar = create_progress_bar(percent as f32, 25);
 
-        f.render_widget(gauge, area);
+            pagefile_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  PF{}: ", i + 1),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:>8} ", format_bytes(pf.current_usage)),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::raw(bar),
+                Span::styled(
+                    format!(" / {} ({:.0}%)", format_bytes(pf.total_size), percent),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Pagefiles ({})", data.pagefiles.len()))
+            .border_style(Style::default().fg(theme.disk_color));
+
+        let paragraph = Paragraph::new(pagefile_lines)
+            .block(block)
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(paragraph, area);
     }
 }
 

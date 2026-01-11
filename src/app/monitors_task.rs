@@ -70,6 +70,7 @@ fn update_monitor_error(
 }
 pub fn spawn_monitor_tasks(
     config: Arc<RwLock<Config>>,
+    monitors_running: Arc<RwLock<bool>>,
     cpu_data: Arc<RwLock<Option<CpuData>>>,
     cpu_error: Arc<RwLock<Option<String>>>,
     gpu_data: Arc<RwLock<Option<GpuData>>>,
@@ -119,6 +120,7 @@ pub fn spawn_monitor_tasks(
     // CPU monitor task
     {
         let config = Arc::clone(&config);
+        let monitors_running = Arc::clone(&monitors_running);
         let cpu_data = Arc::clone(&cpu_data);
         let cpu_error = Arc::clone(&cpu_error);
         let ps_available = powershell_ready || cfg!(target_os = "linux");
@@ -149,6 +151,11 @@ pub fn spawn_monitor_tasks(
                         &cpu_error,
                         Some("CPU monitor disabled in config".to_string()),
                     );
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !*monitors_running.read() {
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
