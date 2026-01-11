@@ -13,8 +13,23 @@ use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let monitors_running = *app.state.monitors_running.read();
     let ram_data = app.state.ram_data.read();
     let ram_error = app.state.ram_error.read();
+
+    if !monitors_running {
+        let block = Block::default()
+            .title("RAM Monitor")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+
+        let text = Paragraph::new("Monitor stopped")
+            .block(block)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+
+        f.render_widget(text, area);
+        return;
+    }
 
     if let Some(message) = ram_error.as_ref() {
         let config = app.state.config.read();

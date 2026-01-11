@@ -13,8 +13,23 @@ use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let monitors_running = *app.state.monitors_running.read();
     let process_data = app.state.process_data.read();
     let process_error = app.state.process_error.read();
+
+    if !monitors_running {
+        let block = Block::default()
+            .title("Process Monitor")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+
+        let text = Paragraph::new("Monitor stopped")
+            .block(block)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+
+        f.render_widget(text, area);
+        return;
+    }
 
     if let Some(message) = process_error.as_ref() {
         let config = app.state.config.read();

@@ -229,6 +229,7 @@ pub fn spawn_monitor_tasks(
     // GPU monitor task
     {
         let config = Arc::clone(&config);
+        let monitors_running = Arc::clone(&monitors_running);
         let gpu_data = Arc::clone(&gpu_data);
         let gpu_error = Arc::clone(&gpu_error);
         let ps_available = powershell_ready || cfg!(target_os = "linux");
@@ -259,6 +260,11 @@ pub fn spawn_monitor_tasks(
                         &gpu_error,
                         Some("GPU monitor disabled in config".to_string()),
                     );
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !*monitors_running.read() {
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -332,6 +338,7 @@ pub fn spawn_monitor_tasks(
     // RAM monitor task
     {
         let config = Arc::clone(&config);
+        let monitors_running = Arc::clone(&monitors_running);
         let ram_data = Arc::clone(&ram_data);
         let ram_error = Arc::clone(&ram_error);
         let ps_available = powershell_ready || cfg!(target_os = "linux");
@@ -362,6 +369,11 @@ pub fn spawn_monitor_tasks(
                         &ram_error,
                         Some("RAM monitor disabled in config".to_string()),
                     );
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !*monitors_running.read() {
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -435,6 +447,7 @@ pub fn spawn_monitor_tasks(
     // Disk monitor task
     {
         let config = Arc::clone(&config);
+        let monitors_running = Arc::clone(&monitors_running);
         let disk_data = Arc::clone(&disk_data);
         let disk_error = Arc::clone(&disk_error);
         let ps_available = powershell_ready || cfg!(target_os = "linux");
@@ -465,6 +478,11 @@ pub fn spawn_monitor_tasks(
                         &disk_error,
                         Some("Disk monitor disabled in config".to_string()),
                     );
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !*monitors_running.read() {
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
@@ -781,6 +799,7 @@ pub fn spawn_monitor_tasks(
     // Process monitor task
     {
         let config = Arc::clone(&config);
+        let monitors_running = Arc::clone(&monitors_running);
         let process_data = Arc::clone(&process_data);
         let process_error = Arc::clone(&process_error);
         let ps_available = powershell_ready || cfg!(target_os = "linux");
@@ -811,6 +830,11 @@ pub fn spawn_monitor_tasks(
                         &process_error,
                         Some("Process monitor disabled in config".to_string()),
                     );
+                    sleep(refresh_duration(refresh_interval_ms)).await;
+                    continue;
+                }
+
+                if !*monitors_running.read() {
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
                 }
