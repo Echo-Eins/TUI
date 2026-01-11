@@ -72,10 +72,9 @@ fn render_full(
 
     // Header
     let header = format!(
-        "GPU {}: {}  Bus: {}  Driver: {}  CUDA: {}  Temp: {:.1}°C",
+        "GPU {}: {}  Driver: {}  CUDA: {}  Temp: {:.1}°C",
         data.gpu_index,
         data.name,
-        if data.bus_id.is_empty() { "N/A" } else { &data.bus_id },
         data.driver_version,
         if data.cuda_version.is_empty() { "N/A" } else { &data.cuda_version },
         data.temperature
