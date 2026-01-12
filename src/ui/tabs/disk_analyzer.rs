@@ -210,6 +210,7 @@ fn render_tree_content(
     let state = &app.state.disk_analyzer_state;
     let horizontal_offset = state.horizontal_offset;
     let type_filter = state.type_filter;
+    let show_files = state.show_files;
 
     // Get tree nodes or create from root folders
     let all_nodes: Vec<TreeNode> = if let Some(tree) = state.trees.get(drive_letter) {
@@ -218,11 +219,18 @@ fn render_tree_content(
         drive.root_folders.iter().map(TreeNode::from_root_folder).collect()
     };
 
+    // Apply show_files filter first, then type filter
+    let filtered_by_show_files: Vec<TreeNode> = if show_files {
+        all_nodes
+    } else {
+        all_nodes.into_iter().filter(|n| !n.is_file).collect()
+    };
+
     // Apply type filter
     let tree_nodes: Vec<TreeNode> = match type_filter {
-        DiskAnalyzerTypeFilter::All => all_nodes,
-        DiskAnalyzerTypeFilter::Folders => all_nodes.into_iter().filter(|n| !n.is_file).collect(),
-        DiskAnalyzerTypeFilter::Files => all_nodes.into_iter().filter(|n| n.is_file).collect(),
+        DiskAnalyzerTypeFilter::All => filtered_by_show_files,
+        DiskAnalyzerTypeFilter::Folders => filtered_by_show_files.into_iter().filter(|n| !n.is_file).collect(),
+        DiskAnalyzerTypeFilter::Files => filtered_by_show_files.into_iter().filter(|n| n.is_file).collect(),
     };
 
     if tree_nodes.is_empty() {
@@ -255,10 +263,15 @@ fn render_tree_content(
         }
     });
 
+    // Get the depth of selected node for extended view filtering
+    let selected_depth = tree_nodes.get(selected_idx).map(|n| n.depth).unwrap_or(0);
+
     let mut lines = Vec::new();
 
     for (i, node) in tree_nodes.iter().enumerate().skip(scroll_offset).take(visible_height) {
         let is_selected = i == selected_idx;
+        // Extended view only shows info for siblings (same depth as selected)
+        let show_extended_for_node = extended_view && node.depth == selected_depth;
 
         // Build tree prefix
         let indent = "   ".repeat(node.depth);
@@ -282,8 +295,8 @@ fn render_tree_content(
             ("  ", Color::Cyan)
         };
 
-        // Build folder/file info string
-        let item_info = if !node.is_file && (is_selected || extended_view) {
+        // Build folder/file info string (extended view only shows for siblings at same depth)
+        let item_info = if !node.is_file && (is_selected || show_extended_for_node) {
             build_folder_info(node, show_extensions)
         } else if node.is_file {
             // For files show extension if available

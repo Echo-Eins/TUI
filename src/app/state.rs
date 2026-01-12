@@ -59,6 +59,7 @@ pub struct AppState {
     pub last_widget_scroll_input: Option<Instant>,
     pub last_view_toggle_input: Option<Instant>,
     pub last_text_input: Option<Instant>,
+    pub last_backspace_input: Option<Instant>,
     pub terminal_size: (u16, u16),
 
     // GPU UI state
@@ -607,6 +608,10 @@ impl AppState {
 
     fn allow_text_input(&mut self) -> bool {
         Self::allow_with_throttle(&mut self.last_text_input, Duration::from_millis(35))
+    }
+
+    fn allow_backspace_input(&mut self) -> bool {
+        Self::allow_with_throttle(&mut self.last_backspace_input, Duration::from_millis(50))
     }
 
     fn suggested_chat_prompt_height(&self, rows: u16) -> u16 {
@@ -1246,9 +1251,11 @@ impl AppState {
                         if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
                             if selected_idx < tree.len() {
                                 tree[selected_idx].loading = false;
+                                tree[selected_idx].expanded = true; // Ensure expanded stays true after async
                                 tree[selected_idx].file_count = Some(contents.file_count);
                                 tree[selected_idx].folder_count = Some(contents.folder_count);
                                 tree[selected_idx].extension_counts = Some(contents.extension_counts);
+                                // has_children indicates if there's content, but expanded shows user expanded it
                                 let has_content = !contents.subfolders.is_empty() || !contents.files.is_empty();
                                 tree[selected_idx].has_children = has_content;
 
@@ -1330,19 +1337,17 @@ impl AppState {
                                     }
                                 }
 
-                                // Insert folders first, then files (if show_files enabled)
+                                // Insert folders first, then files (always load files for F toggle)
                                 let mut insert_pos = selected_idx + 1;
                                 for node in folder_nodes {
                                     tree.insert(insert_pos, node);
                                     insert_pos += 1;
                                 }
 
-                                // Insert files after folders if show_files is enabled
-                                if self.disk_analyzer_state.show_files {
-                                    for node in file_nodes {
-                                        tree.insert(insert_pos, node);
-                                        insert_pos += 1;
-                                    }
+                                // Always insert files (visibility controlled by show_files in UI)
+                                for node in file_nodes {
+                                    tree.insert(insert_pos, node);
+                                    insert_pos += 1;
                                 }
                             }
                         }
@@ -1351,6 +1356,7 @@ impl AppState {
                         if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
                             if selected_idx < tree.len() {
                                 tree[selected_idx].loading = false;
+                                tree[selected_idx].expanded = true; // Keep expanded even on error
                                 tree[selected_idx].has_children = false;
                             }
                         }
@@ -1480,6 +1486,7 @@ impl AppState {
             last_widget_scroll_input: None,
             last_view_toggle_input: None,
             last_text_input: None,
+            last_backspace_input: None,
             terminal_size: terminal::size().unwrap_or((120, 40)),
 
             gpu_state: GpuUIState {
@@ -2241,10 +2248,14 @@ impl AppState {
                     }
                     if self.disk_analyzer_state.selected_index > 0 {
                         self.disk_analyzer_state.selected_index -= 1;
-                        // Keep 3-row buffer at top
+                        // Keep 3-row buffer at top for anticipation scroll
                         let buffer = 3usize;
-                        if self.disk_analyzer_state.selected_index < self.disk_analyzer_state.scroll_offset + buffer {
-                            self.disk_analyzer_state.scroll_offset = self.disk_analyzer_state.selected_index.saturating_sub(buffer);
+                        let position_in_view = self.disk_analyzer_state.selected_index
+                            .saturating_sub(self.disk_analyzer_state.scroll_offset);
+                        // If selected is within buffer rows from top, scroll
+                        if position_in_view < buffer {
+                            self.disk_analyzer_state.scroll_offset =
+                                self.disk_analyzer_state.selected_index.saturating_sub(buffer);
                         }
                     }
                     return Ok(true);
@@ -2256,14 +2267,19 @@ impl AppState {
                     let item_count = self.get_tree_item_count();
                     if self.disk_analyzer_state.selected_index + 1 < item_count {
                         self.disk_analyzer_state.selected_index += 1;
-                        // Keep 3-row buffer at bottom
-                        // Estimate visible height (terminal height - header - footer - borders)
-                        let visible_height = self.terminal_size.1.saturating_sub(12) as usize;
+                        // Keep 3-row buffer at bottom for anticipation scroll
+                        // Layout: drive tabs (3) + usage bar (3) + tree content (variable) + footer (2) + borders (2) = ~10
+                        let visible_height = self.terminal_size.1.saturating_sub(10) as usize;
                         let buffer = 3usize;
-                        if visible_height > buffer {
-                            let max_visible_index = self.disk_analyzer_state.scroll_offset + visible_height.saturating_sub(buffer);
-                            if self.disk_analyzer_state.selected_index >= max_visible_index {
-                                self.disk_analyzer_state.scroll_offset = self.disk_analyzer_state.selected_index.saturating_sub(visible_height.saturating_sub(buffer));
+                        if visible_height > buffer + 1 {
+                            // Calculate position relative to visible area
+                            let position_in_view = self.disk_analyzer_state.selected_index
+                                .saturating_sub(self.disk_analyzer_state.scroll_offset);
+                            // If selected is within buffer rows from bottom, scroll
+                            if position_in_view + buffer >= visible_height {
+                                self.disk_analyzer_state.scroll_offset =
+                                    self.disk_analyzer_state.selected_index
+                                        .saturating_sub(visible_height.saturating_sub(buffer).saturating_sub(1));
                             }
                         }
                     }
@@ -2285,11 +2301,10 @@ impl AppState {
                     let item_count = self.get_tree_item_count();
                     if item_count > 0 {
                         self.disk_analyzer_state.selected_index = item_count - 1;
-                        // Update scroll to show selected item with buffer
-                        let visible_height = self.terminal_size.1.saturating_sub(12) as usize;
-                        let buffer = 3usize;
-                        if visible_height > buffer && item_count > visible_height {
-                            self.disk_analyzer_state.scroll_offset = item_count.saturating_sub(visible_height.saturating_sub(buffer));
+                        // Update scroll to show last item (with buffer at top)
+                        let visible_height = self.terminal_size.1.saturating_sub(10) as usize;
+                        if item_count > visible_height {
+                            self.disk_analyzer_state.scroll_offset = item_count.saturating_sub(visible_height);
                         }
                     }
                     return Ok(true);
@@ -2305,6 +2320,10 @@ impl AppState {
                 KeyCode::Char('s') => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         // Handled above for collapse
+                        return Ok(true);
+                    }
+                    // Don't trigger sort if M is pressed (M+S is global action for monitor toggle)
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
                         return Ok(true);
                     }
                     if !is_initial_press || !self.allow_sort_toggle() {
@@ -2465,12 +2484,15 @@ impl AppState {
                             self.ollama_state.input_mode = OllamaInputMode::None;
                         }
                         OllamaInputMode::Chat => {
-                            let prompt = self.ollama_state.input_buffer.trim().to_string();
-                            if !prompt.is_empty() {
-                                let _ = self.send_ollama_chat_prompt(prompt).await;
+                            // Only process on initial press, not repeat
+                            if key.kind == KeyEventKind::Press {
+                                let prompt = self.ollama_state.input_buffer.trim().to_string();
+                                if !prompt.is_empty() {
+                                    let _ = self.send_ollama_chat_prompt(prompt).await;
+                                }
+                                self.ollama_state.input_buffer.clear();
+                                self.ollama_state.chat_prompt_scroll = 0;
                             }
-                            self.ollama_state.input_buffer.clear();
-                            self.ollama_state.chat_prompt_scroll = 0;
                         }
                         OllamaInputMode::None => {}
                     },
@@ -2486,7 +2508,16 @@ impl AppState {
                         }
                     }
                     KeyCode::Backspace => {
-                        self.ollama_state.input_buffer.pop();
+                        // Add throttle for backspace in Chat mode
+                        let allow = if self.ollama_state.input_mode == OllamaInputMode::Chat {
+                            matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                                && self.allow_backspace_input()
+                        } else {
+                            true
+                        };
+                        if allow {
+                            self.ollama_state.input_buffer.pop();
+                        }
                     }
                     KeyCode::Up | KeyCode::Down if self.ollama_state.input_mode == OllamaInputMode::Chat => {
                         if !self.allow_widget_scroll() {
