@@ -287,13 +287,6 @@ pub enum DiskAnalyzerSortColumn {
     Type,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiskAnalyzerTypeFilter {
-    All,
-    Folders,
-    Files,
-}
-
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub path: String,
@@ -360,7 +353,6 @@ pub struct DiskAnalyzerUIState {
     pub sort_ascending: bool,
     pub extended_view: bool,
     pub show_files: bool,
-    pub type_filter: DiskAnalyzerTypeFilter,
     pub trees: std::collections::HashMap<String, Vec<TreeNode>>,
     pub path_copied_at: Option<(String, Instant)>,
     pub collapse_keys_pressed: Option<Instant>,
@@ -1161,6 +1153,153 @@ impl AppState {
         None
     }
 
+    /// Re-sort the current tree based on current sort settings
+    fn resort_current_tree(&mut self) {
+        let drive_letter = match self.get_current_drive_letter() {
+            Some(letter) => letter,
+            None => return,
+        };
+
+        let tree = match self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+            Some(tree) => tree,
+            None => return,
+        };
+
+        if tree.is_empty() {
+            return;
+        }
+
+        let sort_column = self.disk_analyzer_state.sort_column;
+        let sort_ascending = self.disk_analyzer_state.sort_ascending;
+
+        // Sort root level items (depth 0)
+        let root_end = tree.iter().position(|n| n.depth > 0).unwrap_or(tree.len());
+        if root_end > 0 {
+            let root_items: Vec<TreeNode> = tree.drain(0..root_end).collect();
+
+            // Separate folders and files
+            let mut folders: Vec<TreeNode> = root_items.iter().filter(|n| !n.is_file).cloned().collect();
+            let mut files: Vec<TreeNode> = root_items.iter().filter(|n| n.is_file).cloned().collect();
+
+            Self::sort_nodes(&mut folders, sort_column, sort_ascending);
+            Self::sort_nodes(&mut files, sort_column, sort_ascending);
+
+            // Reinsert sorted items (folders first, then files)
+            let mut sorted: Vec<TreeNode> = folders;
+            sorted.extend(files);
+
+            for (i, node) in sorted.into_iter().enumerate() {
+                tree.insert(i, node);
+            }
+        }
+    }
+
+    fn sort_nodes(nodes: &mut Vec<TreeNode>, sort_column: DiskAnalyzerSortColumn, ascending: bool) {
+        match sort_column {
+            DiskAnalyzerSortColumn::Name => {
+                nodes.sort_by(|a, b| {
+                    let cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            DiskAnalyzerSortColumn::Size => {
+                nodes.sort_by(|a, b| {
+                    let cmp = a.size.cmp(&b.size);
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            DiskAnalyzerSortColumn::Type => {
+                nodes.sort_by(|a, b| {
+                    let ext_a = a.extension.as_deref().unwrap_or("");
+                    let ext_b = b.extension.as_deref().unwrap_or("");
+                    let cmp = ext_a.to_lowercase().cmp(&ext_b.to_lowercase());
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+        }
+    }
+
+    /// Load folder stats for the currently selected folder (async)
+    async fn load_selected_folder_stats(&mut self) {
+        let drive_letter = match self.get_current_drive_letter() {
+            Some(letter) => letter,
+            None => return,
+        };
+
+        let selected_idx = self.disk_analyzer_state.selected_index;
+
+        // Get the selected node
+        let node_info = {
+            let tree = match self.disk_analyzer_state.trees.get(&drive_letter) {
+                Some(tree) => tree,
+                None => return,
+            };
+
+            if selected_idx >= tree.len() {
+                return;
+            }
+
+            let node = &tree[selected_idx];
+
+            // Skip if it's a file or already has stats loaded
+            if node.is_file || node.file_count.is_some() {
+                return;
+            }
+
+            (node.path.clone(), node.depth)
+        };
+
+        let (node_path, _node_depth) = node_info;
+
+        // Get extensions to track from config
+        let extensions = self.config
+            .read()
+            .integrations
+            .disk_analyzer
+            .show_extensions
+            .clone();
+
+        // Query folder contents using Everything
+        let es_exe = self.config.read().integrations.everything.es_executable.clone();
+        let timeout = self.config.read().integrations.everything.refresh_interval_ms / 1000;
+
+        if let Ok(monitor) = crate::monitors::DiskAnalyzerMonitor::new(
+            crate::integrations::PowerShellExecutor::new(
+                self.config.read().powershell.executable.clone(),
+                self.config.read().powershell.timeout_seconds,
+                self.config.read().powershell.cache_ttl_seconds,
+                self.config.read().powershell.use_cache,
+            ),
+            es_exe,
+            0,
+            timeout.max(5),
+        ) {
+            match monitor.query_folder_contents(&node_path, &extensions).await {
+                Ok(contents) => {
+                    // Update node with stats
+                    if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                        if selected_idx < tree.len() && tree[selected_idx].path == node_path {
+                            tree[selected_idx].file_count = Some(contents.file_count);
+                            tree[selected_idx].folder_count = Some(contents.folder_count);
+                            tree[selected_idx].extension_counts = Some(contents.extension_counts);
+                            let has_content = !contents.subfolders.is_empty() || !contents.files.is_empty();
+                            tree[selected_idx].has_children = has_content;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Mark as no children on error
+                    if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                        if selected_idx < tree.len() && tree[selected_idx].path == node_path {
+                            tree[selected_idx].file_count = Some(0);
+                            tree[selected_idx].folder_count = Some(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn toggle_folder_expansion(&mut self) {
         let drive_letter = match self.get_current_drive_letter() {
             Some(letter) => letter,
@@ -1563,7 +1702,6 @@ impl AppState {
                 sort_ascending: false,
                 extended_view: false,
                 show_files: true,
-                type_filter: DiskAnalyzerTypeFilter::All,
                 trees: std::collections::HashMap::new(),
                 path_copied_at: None,
                 collapse_keys_pressed: None,
@@ -2257,6 +2395,8 @@ impl AppState {
                             self.disk_analyzer_state.scroll_offset =
                                 self.disk_analyzer_state.selected_index.saturating_sub(buffer);
                         }
+                        // Load folder stats for newly selected item
+                        self.load_selected_folder_stats().await;
                     }
                     return Ok(true);
                 }
@@ -2282,6 +2422,8 @@ impl AppState {
                                         .saturating_sub(visible_height.saturating_sub(buffer).saturating_sub(1));
                             }
                         }
+                        // Load folder stats for newly selected item
+                        self.load_selected_folder_stats().await;
                     }
                     return Ok(true);
                 }
@@ -2317,6 +2459,24 @@ impl AppState {
                     self.toggle_folder_expansion().await;
                     return Ok(true);
                 }
+                KeyCode::Char('n') => {
+                    // Don't trigger sort if M is pressed (M+S is global action for monitor toggle)
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
+                        return Ok(true);
+                    }
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    // Sort by Name
+                    if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Name {
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    } else {
+                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Name;
+                        self.disk_analyzer_state.sort_ascending = true;
+                    }
+                    self.resort_current_tree();
+                    return Ok(true);
+                }
                 KeyCode::Char('s') => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         // Handled above for collapse
@@ -2329,13 +2489,32 @@ impl AppState {
                     if !is_initial_press || !self.allow_sort_toggle() {
                         return Ok(true);
                     }
-                    // Toggle sort
+                    // Sort by Size
                     if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Size {
-                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Name;
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
                     } else {
                         self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Size;
+                        self.disk_analyzer_state.sort_ascending = false; // Size defaults to descending
                     }
-                    self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    self.resort_current_tree();
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    // Don't trigger sort if M is pressed
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
+                        return Ok(true);
+                    }
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    // Sort by Type (extension)
+                    if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Type {
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    } else {
+                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Type;
+                        self.disk_analyzer_state.sort_ascending = true;
+                    }
+                    self.resort_current_tree();
                     return Ok(true);
                 }
                 KeyCode::Char('e') | KeyCode::Char('E') => {
@@ -2368,21 +2547,6 @@ impl AppState {
                     }
                     // Toggle show files
                     self.disk_analyzer_state.show_files = !self.disk_analyzer_state.show_files;
-                    return Ok(true);
-                }
-                KeyCode::Char('t') | KeyCode::Char('T') => {
-                    if !is_initial_press {
-                        return Ok(true);
-                    }
-                    // Cycle through type filter
-                    self.disk_analyzer_state.type_filter = match self.disk_analyzer_state.type_filter {
-                        DiskAnalyzerTypeFilter::All => DiskAnalyzerTypeFilter::Folders,
-                        DiskAnalyzerTypeFilter::Folders => DiskAnalyzerTypeFilter::Files,
-                        DiskAnalyzerTypeFilter::Files => DiskAnalyzerTypeFilter::All,
-                    };
-                    // Reset selection when filter changes
-                    self.disk_analyzer_state.selected_index = 0;
-                    self.disk_analyzer_state.scroll_offset = 0;
                     return Ok(true);
                 }
                 _ => {}

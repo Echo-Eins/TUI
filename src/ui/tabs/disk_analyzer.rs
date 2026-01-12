@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 use crate::app::App;
-use crate::app::state::{TreeNode, DiskAnalyzerSortColumn, DiskAnalyzerTypeFilter};
+use crate::app::state::{TreeNode, DiskAnalyzerSortColumn};
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
 
@@ -209,7 +209,6 @@ fn render_tree_content(
     let drive_letter = &drive.letter;
     let state = &app.state.disk_analyzer_state;
     let horizontal_offset = state.horizontal_offset;
-    let type_filter = state.type_filter;
     let show_files = state.show_files;
 
     // Get tree nodes or create from root folders
@@ -219,27 +218,15 @@ fn render_tree_content(
         drive.root_folders.iter().map(TreeNode::from_root_folder).collect()
     };
 
-    // Apply show_files filter first, then type filter
-    let filtered_by_show_files: Vec<TreeNode> = if show_files {
+    // Apply show_files filter
+    let tree_nodes: Vec<TreeNode> = if show_files {
         all_nodes
     } else {
         all_nodes.into_iter().filter(|n| !n.is_file).collect()
     };
 
-    // Apply type filter
-    let tree_nodes: Vec<TreeNode> = match type_filter {
-        DiskAnalyzerTypeFilter::All => filtered_by_show_files,
-        DiskAnalyzerTypeFilter::Folders => filtered_by_show_files.into_iter().filter(|n| !n.is_file).collect(),
-        DiskAnalyzerTypeFilter::Files => filtered_by_show_files.into_iter().filter(|n| n.is_file).collect(),
-    };
-
     if tree_nodes.is_empty() {
-        let msg = match type_filter {
-            DiskAnalyzerTypeFilter::All => "No items found",
-            DiskAnalyzerTypeFilter::Folders => "No folders found",
-            DiskAnalyzerTypeFilter::Files => "No files found (expand folders first)",
-        };
-        let text = Paragraph::new(msg)
+        let text = Paragraph::new("No items found")
             .style(Style::default().fg(Color::Gray));
         f.render_widget(text, inner);
         return;
@@ -263,15 +250,12 @@ fn render_tree_content(
         }
     });
 
-    // Get the depth of selected node for extended view filtering
-    let selected_depth = tree_nodes.get(selected_idx).map(|n| n.depth).unwrap_or(0);
-
     let mut lines = Vec::new();
 
     for (i, node) in tree_nodes.iter().enumerate().skip(scroll_offset).take(visible_height) {
         let is_selected = i == selected_idx;
-        // Extended view only shows info for siblings (same depth as selected)
-        let show_extended_for_node = extended_view && node.depth == selected_depth;
+        // Extended view shows info for ALL folders when enabled
+        let show_extended_for_node = extended_view;
 
         // Build tree prefix
         let indent = "   ".repeat(node.depth);
@@ -305,8 +289,10 @@ fn render_tree_content(
             String::new()
         };
 
-        // Check if this path was just copied
-        let show_copied = path_copied_info.as_ref().map(|p| p == &node.path).unwrap_or(false) && is_selected;
+        // Check if this path was just copied (compare trimmed paths)
+        let show_copied = path_copied_info.as_ref()
+            .map(|p| p == node.path.trim_end_matches('\\'))
+            .unwrap_or(false) && is_selected;
 
         // Build the line
         let mut spans = Vec::new();
@@ -349,9 +335,9 @@ fn render_tree_content(
             ));
         }
 
-        // "Path copied" indicator
+        // "Path Copied!" indicator
         if show_copied {
-            spans.push(Span::styled(" (Path copied)", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(" Path Copied!", Style::default().fg(Color::Green)));
         }
 
         // Size (right-aligned) - calculate remaining space using unicode width
@@ -447,17 +433,40 @@ fn render_footer(
     // Separator
     spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
 
-    // Sort indicator
-    let sort_char = match state.sort_column {
-        DiskAnalyzerSortColumn::Size => "Size",
+    // Sort indicator - n,s,t keys like Services tab
+    let sort_dir = if state.sort_ascending { "^" } else { "v" };
+
+    // Show which key is active (highlighted) and which column is selected
+    let n_style = if state.sort_column == DiskAnalyzerSortColumn::Name {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let s_style = if state.sort_column == DiskAnalyzerSortColumn::Size {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let t_style = if state.sort_column == DiskAnalyzerSortColumn::Type {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    spans.push(Span::styled("n", n_style));
+    spans.push(Span::styled(",", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("s", s_style));
+    spans.push(Span::styled(",", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("t", t_style));
+    spans.push(Span::raw(" Sort"));
+
+    // Show direction indicator for the active sort column
+    let sort_name = match state.sort_column {
         DiskAnalyzerSortColumn::Name => "Name",
+        DiskAnalyzerSortColumn::Size => "Size",
         DiskAnalyzerSortColumn::Type => "Type",
     };
-    let sort_dir = if state.sort_ascending { "^" } else { "v" };
-    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
-    spans.push(Span::styled("s", Style::default().fg(Color::Yellow)));
-    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
-    spans.push(Span::raw(format!(" {}{} ", sort_char, sort_dir)));
+    spans.push(Span::styled(format!(":{}{} ", sort_name, sort_dir), Style::default().fg(Color::DarkGray)));
 
     // Extended view indicator
     spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
@@ -478,22 +487,6 @@ fn render_footer(
     } else {
         spans.push(Span::raw(" Files:OFF "));
     }
-
-    // Type filter indicator
-    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
-    spans.push(Span::styled("T", Style::default().fg(Color::Yellow)));
-    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
-    let filter_text = match state.type_filter {
-        DiskAnalyzerTypeFilter::All => " All ",
-        DiskAnalyzerTypeFilter::Folders => " Folders ",
-        DiskAnalyzerTypeFilter::Files => " Files ",
-    };
-    let filter_color = if state.type_filter == DiskAnalyzerTypeFilter::All {
-        Color::Gray
-    } else {
-        Color::Green
-    };
-    spans.push(Span::styled(filter_text, Style::default().fg(filter_color)));
 
     // Open in explorer
     spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
