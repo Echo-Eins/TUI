@@ -59,6 +59,7 @@ pub struct AppState {
     pub last_widget_scroll_input: Option<Instant>,
     pub last_view_toggle_input: Option<Instant>,
     pub last_text_input: Option<Instant>,
+    pub last_backspace_input: Option<Instant>,
     pub terminal_size: (u16, u16),
 
     // GPU UI state
@@ -75,6 +76,9 @@ pub struct AppState {
 
     // Ollama UI state
     pub ollama_state: OllamaUIState,
+
+    // Disk Analyzer UI state
+    pub disk_analyzer_state: DiskAnalyzerUIState,
 
     // Monitor control
     pub monitors_running: Arc<RwLock<bool>>,
@@ -273,6 +277,85 @@ pub struct OllamaUIState {
 pub enum OllamaDeleteTarget {
     Model(String),
     ChatLog(crate::integrations::ollama::ChatLogEntry),
+}
+
+// Disk Analyzer UI State
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskAnalyzerSortColumn {
+    Name,
+    Size,
+    Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeNode {
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub depth: usize,
+    pub expanded: bool,
+    pub has_children: bool,
+    pub loading: bool,
+    pub is_file: bool,
+    pub extension: Option<String>,
+    pub file_count: Option<usize>,
+    pub folder_count: Option<usize>,
+    pub extension_counts: Option<std::collections::HashMap<String, usize>>,
+}
+
+impl TreeNode {
+    pub fn from_root_folder(folder: &crate::monitors::RootFolderInfo) -> Self {
+        Self {
+            path: folder.path.clone(),
+            name: folder.name.clone(),
+            size: folder.size,
+            depth: 0,
+            expanded: false,
+            has_children: true,
+            loading: false,
+            is_file: false,
+            extension: None,
+            file_count: None,
+            folder_count: None,
+            extension_counts: None,
+        }
+    }
+
+    pub fn from_file(name: String, path: String, size: u64, depth: usize) -> Self {
+        let extension = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()));
+        Self {
+            path,
+            name,
+            size,
+            depth,
+            expanded: false,
+            has_children: false,
+            loading: false,
+            is_file: true,
+            extension,
+            file_count: None,
+            folder_count: None,
+            extension_counts: None,
+        }
+    }
+}
+
+pub struct DiskAnalyzerUIState {
+    pub selected_drive: usize,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub horizontal_offset: usize,
+    pub in_tree_mode: bool,
+    pub sort_column: DiskAnalyzerSortColumn,
+    pub sort_ascending: bool,
+    pub extended_view: bool,
+    pub show_files: bool,
+    pub trees: std::collections::HashMap<String, Vec<TreeNode>>,
+    pub path_copied_at: Option<(String, Instant)>,
+    pub collapse_keys_pressed: Option<Instant>,
 }
 
 impl AppState {
@@ -517,6 +600,10 @@ impl AppState {
 
     fn allow_text_input(&mut self) -> bool {
         Self::allow_with_throttle(&mut self.last_text_input, Duration::from_millis(35))
+    }
+
+    fn allow_backspace_input(&mut self) -> bool {
+        Self::allow_with_throttle(&mut self.last_backspace_input, Duration::from_millis(50))
     }
 
     fn suggested_chat_prompt_height(&self, rows: u16) -> u16 {
@@ -1016,6 +1103,440 @@ impl AppState {
         self.close_activity_additions();
     }
 
+    // Disk Analyzer helper methods
+    fn get_current_drive_letter(&self) -> Option<String> {
+        self.disk_analyzer_data
+            .read()
+            .as_ref()
+            .and_then(|data| data.drives.get(self.disk_analyzer_state.selected_drive))
+            .map(|drive| drive.letter.clone())
+    }
+
+    fn get_drive_count(&self) -> usize {
+        self.disk_analyzer_data
+            .read()
+            .as_ref()
+            .map(|data| data.drives.len())
+            .unwrap_or(0)
+    }
+
+    pub fn has_any_expanded_folder(&self) -> bool {
+        if let Some(drive_letter) = self.get_current_drive_letter() {
+            if let Some(tree) = self.disk_analyzer_state.trees.get(&drive_letter) {
+                return tree.iter().any(|node| node.expanded);
+            }
+        }
+        false
+    }
+
+    pub fn get_tree_item_count(&self) -> usize {
+        if let Some(drive_letter) = self.get_current_drive_letter() {
+            if let Some(tree) = self.disk_analyzer_state.trees.get(&drive_letter) {
+                return tree.len();
+            }
+        }
+        // Fallback to root folders count
+        self.disk_analyzer_data
+            .read()
+            .as_ref()
+            .and_then(|data| data.drives.get(self.disk_analyzer_state.selected_drive))
+            .map(|drive| drive.root_folders.len())
+            .unwrap_or(0)
+    }
+
+    pub fn get_selected_tree_node(&self) -> Option<TreeNode> {
+        if let Some(drive_letter) = self.get_current_drive_letter() {
+            if let Some(tree) = self.disk_analyzer_state.trees.get(&drive_letter) {
+                return tree.get(self.disk_analyzer_state.selected_index).cloned();
+            }
+        }
+        None
+    }
+
+    /// Re-sort the current tree based on current sort settings
+    fn resort_current_tree(&mut self) {
+        let drive_letter = match self.get_current_drive_letter() {
+            Some(letter) => letter,
+            None => return,
+        };
+
+        let tree = match self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+            Some(tree) => tree,
+            None => return,
+        };
+
+        if tree.is_empty() {
+            return;
+        }
+
+        let sort_column = self.disk_analyzer_state.sort_column;
+        let sort_ascending = self.disk_analyzer_state.sort_ascending;
+
+        // Sort root level items (depth 0)
+        let root_end = tree.iter().position(|n| n.depth > 0).unwrap_or(tree.len());
+        if root_end > 0 {
+            let root_items: Vec<TreeNode> = tree.drain(0..root_end).collect();
+
+            // Separate folders and files
+            let mut folders: Vec<TreeNode> = root_items.iter().filter(|n| !n.is_file).cloned().collect();
+            let mut files: Vec<TreeNode> = root_items.iter().filter(|n| n.is_file).cloned().collect();
+
+            Self::sort_nodes(&mut folders, sort_column, sort_ascending);
+            Self::sort_nodes(&mut files, sort_column, sort_ascending);
+
+            // Reinsert sorted items (folders first, then files)
+            let mut sorted: Vec<TreeNode> = folders;
+            sorted.extend(files);
+
+            for (i, node) in sorted.into_iter().enumerate() {
+                tree.insert(i, node);
+            }
+        }
+    }
+
+    fn sort_nodes(nodes: &mut Vec<TreeNode>, sort_column: DiskAnalyzerSortColumn, ascending: bool) {
+        match sort_column {
+            DiskAnalyzerSortColumn::Name => {
+                nodes.sort_by(|a, b| {
+                    let cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            DiskAnalyzerSortColumn::Size => {
+                nodes.sort_by(|a, b| {
+                    let cmp = a.size.cmp(&b.size);
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            DiskAnalyzerSortColumn::Type => {
+                nodes.sort_by(|a, b| {
+                    let ext_a = a.extension.as_deref().unwrap_or("");
+                    let ext_b = b.extension.as_deref().unwrap_or("");
+                    let cmp = ext_a.to_lowercase().cmp(&ext_b.to_lowercase());
+                    if ascending { cmp } else { cmp.reverse() }
+                });
+            }
+        }
+    }
+
+    /// Load folder stats for the currently selected folder (async)
+    async fn load_selected_folder_stats(&mut self) {
+        let drive_letter = match self.get_current_drive_letter() {
+            Some(letter) => letter,
+            None => return,
+        };
+
+        let selected_idx = self.disk_analyzer_state.selected_index;
+
+        // Get the selected node
+        let node_info = {
+            let tree = match self.disk_analyzer_state.trees.get(&drive_letter) {
+                Some(tree) => tree,
+                None => return,
+            };
+
+            if selected_idx >= tree.len() {
+                return;
+            }
+
+            let node = &tree[selected_idx];
+
+            // Skip if it's a file or already has stats loaded
+            if node.is_file || node.file_count.is_some() {
+                return;
+            }
+
+            (node.path.clone(), node.depth)
+        };
+
+        let (node_path, _node_depth) = node_info;
+
+        // Get extensions to track from config
+        let extensions = self.config
+            .read()
+            .integrations
+            .disk_analyzer
+            .show_extensions
+            .clone();
+
+        // Query folder contents using Everything
+        let es_exe = self.config.read().integrations.everything.es_executable.clone();
+        let timeout = self.config.read().integrations.everything.refresh_interval_ms / 1000;
+
+        if let Ok(monitor) = crate::monitors::DiskAnalyzerMonitor::new(
+            crate::integrations::PowerShellExecutor::new(
+                self.config.read().powershell.executable.clone(),
+                self.config.read().powershell.timeout_seconds,
+                self.config.read().powershell.cache_ttl_seconds,
+                self.config.read().powershell.use_cache,
+            ),
+            es_exe,
+            0,
+            timeout.max(5),
+        ) {
+            match monitor.query_folder_contents(&node_path, &extensions).await {
+                Ok(contents) => {
+                    // Update node with stats
+                    if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                        if selected_idx < tree.len() && tree[selected_idx].path == node_path {
+                            tree[selected_idx].file_count = Some(contents.file_count);
+                            tree[selected_idx].folder_count = Some(contents.folder_count);
+                            tree[selected_idx].extension_counts = Some(contents.extension_counts);
+                            let has_content = !contents.subfolders.is_empty() || !contents.files.is_empty();
+                            tree[selected_idx].has_children = has_content;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Mark as no children on error
+                    if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                        if selected_idx < tree.len() && tree[selected_idx].path == node_path {
+                            tree[selected_idx].file_count = Some(0);
+                            tree[selected_idx].folder_count = Some(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn toggle_folder_expansion(&mut self) {
+        let drive_letter = match self.get_current_drive_letter() {
+            Some(letter) => letter,
+            None => return,
+        };
+
+        let selected_idx = self.disk_analyzer_state.selected_index;
+
+        // Initialize tree if needed
+        if !self.disk_analyzer_state.trees.contains_key(&drive_letter) {
+            let root_folders = self.disk_analyzer_data
+                .read()
+                .as_ref()
+                .and_then(|data| data.drives.get(self.disk_analyzer_state.selected_drive))
+                .map(|drive| drive.root_folders.clone())
+                .unwrap_or_default();
+
+            let tree: Vec<TreeNode> = root_folders
+                .iter()
+                .map(TreeNode::from_root_folder)
+                .collect();
+
+            self.disk_analyzer_state.trees.insert(drive_letter.clone(), tree);
+        }
+
+        let tree = match self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+            Some(tree) => tree,
+            None => return,
+        };
+
+        if selected_idx >= tree.len() {
+            return;
+        }
+
+        let node = &tree[selected_idx];
+        let is_expanded = node.expanded;
+        let node_path = node.path.clone();
+        let node_depth = node.depth;
+
+        if is_expanded {
+            // Collapse: remove all children
+            tree[selected_idx].expanded = false;
+            let mut remove_indices = Vec::new();
+            for (i, child) in tree.iter().enumerate().skip(selected_idx + 1) {
+                if child.depth > node_depth {
+                    remove_indices.push(i);
+                } else {
+                    break;
+                }
+            }
+            for i in remove_indices.into_iter().rev() {
+                tree.remove(i);
+            }
+        } else {
+            // Expand: fetch and insert children
+            tree[selected_idx].loading = true;
+            tree[selected_idx].expanded = true;
+
+            // Enter tree mode
+            self.disk_analyzer_state.in_tree_mode = true;
+
+            // Get extensions to track from config
+            let extensions = self.config
+                .read()
+                .integrations
+                .disk_analyzer
+                .show_extensions
+                .clone();
+
+            // Query subfolders using Everything
+            let es_exe = self.config.read().integrations.everything.es_executable.clone();
+            let timeout = self.config.read().integrations.everything.refresh_interval_ms / 1000;
+
+            if let Ok(monitor) = crate::monitors::DiskAnalyzerMonitor::new(
+                crate::integrations::PowerShellExecutor::new(
+                    self.config.read().powershell.executable.clone(),
+                    self.config.read().powershell.timeout_seconds,
+                    self.config.read().powershell.cache_ttl_seconds,
+                    self.config.read().powershell.use_cache,
+                ),
+                es_exe,
+                0,
+                timeout.max(5),
+            ) {
+                match monitor.query_folder_contents(&node_path, &extensions).await {
+                    Ok(contents) => {
+                        // Get mutable reference again after async
+                        if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                            if selected_idx < tree.len() {
+                                tree[selected_idx].loading = false;
+                                tree[selected_idx].expanded = true; // Ensure expanded stays true after async
+                                tree[selected_idx].file_count = Some(contents.file_count);
+                                tree[selected_idx].folder_count = Some(contents.folder_count);
+                                tree[selected_idx].extension_counts = Some(contents.extension_counts);
+                                // has_children indicates if there's content, but expanded shows user expanded it
+                                let has_content = !contents.subfolders.is_empty() || !contents.files.is_empty();
+                                tree[selected_idx].has_children = has_content;
+
+                                // Build folder nodes
+                                let mut folder_nodes: Vec<TreeNode> = contents
+                                    .subfolders
+                                    .iter()
+                                    .map(|folder| {
+                                        let mut node = TreeNode::from_root_folder(folder);
+                                        node.depth = node_depth + 1;
+                                        node
+                                    })
+                                    .collect();
+
+                                // Build file nodes
+                                let mut file_nodes: Vec<TreeNode> = contents
+                                    .files
+                                    .iter()
+                                    .map(|file| {
+                                        TreeNode::from_file(
+                                            file.name.clone(),
+                                            file.path.clone(),
+                                            file.size,
+                                            node_depth + 1,
+                                        )
+                                    })
+                                    .collect();
+
+                                // Sort folders
+                                match self.disk_analyzer_state.sort_column {
+                                    DiskAnalyzerSortColumn::Size => {
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            folder_nodes.sort_by(|a, b| a.size.cmp(&b.size));
+                                        } else {
+                                            folder_nodes.sort_by(|a, b| b.size.cmp(&a.size));
+                                        }
+                                    }
+                                    DiskAnalyzerSortColumn::Name | DiskAnalyzerSortColumn::Type => {
+                                        // For folders, Type sort is same as Name sort
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            folder_nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                        } else {
+                                            folder_nodes.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+                                        }
+                                    }
+                                }
+
+                                // Sort files
+                                match self.disk_analyzer_state.sort_column {
+                                    DiskAnalyzerSortColumn::Size => {
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| a.size.cmp(&b.size));
+                                        } else {
+                                            file_nodes.sort_by(|a, b| b.size.cmp(&a.size));
+                                        }
+                                    }
+                                    DiskAnalyzerSortColumn::Name => {
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                        } else {
+                                            file_nodes.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+                                        }
+                                    }
+                                    DiskAnalyzerSortColumn::Type => {
+                                        // Sort by extension
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| {
+                                                let ext_a = a.extension.as_deref().unwrap_or("");
+                                                let ext_b = b.extension.as_deref().unwrap_or("");
+                                                ext_a.to_lowercase().cmp(&ext_b.to_lowercase())
+                                            });
+                                        } else {
+                                            file_nodes.sort_by(|a, b| {
+                                                let ext_a = a.extension.as_deref().unwrap_or("");
+                                                let ext_b = b.extension.as_deref().unwrap_or("");
+                                                ext_b.to_lowercase().cmp(&ext_a.to_lowercase())
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Insert folders first, then files (always load files for F toggle)
+                                let mut insert_pos = selected_idx + 1;
+                                for node in folder_nodes {
+                                    tree.insert(insert_pos, node);
+                                    insert_pos += 1;
+                                }
+
+                                // Always insert files (visibility controlled by show_files in UI)
+                                for node in file_nodes {
+                                    tree.insert(insert_pos, node);
+                                    insert_pos += 1;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                            if selected_idx < tree.len() {
+                                tree[selected_idx].loading = false;
+                                tree[selected_idx].expanded = true; // Keep expanded even on error
+                                tree[selected_idx].has_children = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_selected_in_explorer(&self) {
+        if let Some(node) = self.get_selected_tree_node() {
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("explorer")
+                    .arg(&node.path)
+                    .spawn();
+            }
+        }
+    }
+
+    fn copy_selected_path(&mut self) {
+        if let Some(node) = self.get_selected_tree_node() {
+            // For directories, copy the path directly
+            // For files, copy parent directory (but we only have directories here)
+            let path_to_copy = node.path.trim_end_matches('\\').to_string();
+
+            #[cfg(windows)]
+            {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(&path_to_copy);
+                    self.disk_analyzer_state.path_copied_at = Some((path_to_copy, Instant::now()));
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                self.disk_analyzer_state.path_copied_at = Some((path_to_copy, Instant::now()));
+            }
+        }
+    }
+
     pub async fn new(config: Config) -> Result<Self> {
         let tab_manager = TabManager::new(config.tabs.enabled.clone(), &config.tabs.default);
 
@@ -1104,6 +1625,7 @@ impl AppState {
             last_widget_scroll_input: None,
             last_view_toggle_input: None,
             last_text_input: None,
+            last_backspace_input: None,
             terminal_size: terminal::size().unwrap_or((120, 40)),
 
             gpu_state: GpuUIState {
@@ -1168,6 +1690,21 @@ impl AppState {
                 paused_chats: Vec::new(),
                 pending_delete: None,
                 show_delete_confirm: false,
+            },
+
+            disk_analyzer_state: DiskAnalyzerUIState {
+                selected_drive: 0,
+                selected_index: 0,
+                scroll_offset: 0,
+                horizontal_offset: 0,
+                in_tree_mode: false,
+                sort_column: DiskAnalyzerSortColumn::Size,
+                sort_ascending: false,
+                extended_view: false,
+                show_files: true,
+                trees: std::collections::HashMap::new(),
+                path_copied_at: None,
+                collapse_keys_pressed: None,
             },
 
             monitors_running,
@@ -1763,6 +2300,258 @@ impl AppState {
             }
         }
 
+        // Disk Analyzer tab hotkeys
+        if self.tab_manager.current() == TabType::DiskAnalyzer {
+            // Check for Ctrl+S hold (2 seconds) to collapse tree
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                if is_initial_press {
+                    self.disk_analyzer_state.collapse_keys_pressed = Some(Instant::now());
+                }
+            } else if is_release {
+                self.disk_analyzer_state.collapse_keys_pressed = None;
+            }
+
+            // Check if collapse timer expired
+            if let Some(start) = self.disk_analyzer_state.collapse_keys_pressed {
+                if start.elapsed() >= Duration::from_secs(2) {
+                    // Collapse all trees
+                    let current_drive = self.get_current_drive_letter();
+                    if let Some(drive_letter) = current_drive {
+                        if let Some(tree) = self.disk_analyzer_state.trees.get_mut(&drive_letter) {
+                            for node in tree.iter_mut() {
+                                node.expanded = false;
+                            }
+                            // Remove all non-root nodes
+                            tree.retain(|node| node.depth == 0);
+                        }
+                    }
+                    self.disk_analyzer_state.in_tree_mode = false;
+                    self.disk_analyzer_state.collapse_keys_pressed = None;
+                    self.disk_analyzer_state.selected_index = 0;
+                    self.disk_analyzer_state.scroll_offset = 0;
+                    self.disk_analyzer_state.horizontal_offset = 0;
+                    return Ok(true);
+                }
+            }
+
+            let any_expanded = self.has_any_expanded_folder();
+
+            match key.code {
+                KeyCode::Esc => {
+                    if self.disk_analyzer_state.in_tree_mode {
+                        self.disk_analyzer_state.in_tree_mode = false;
+                        return Ok(true);
+                    }
+                }
+                KeyCode::Left => {
+                    if !self.allow_horizontal_nav() {
+                        return Ok(true);
+                    }
+                    if any_expanded && self.disk_analyzer_state.in_tree_mode {
+                        // Horizontal scroll in tree mode
+                        self.disk_analyzer_state.horizontal_offset =
+                            self.disk_analyzer_state.horizontal_offset.saturating_sub(4);
+                    } else if !any_expanded {
+                        // Switch to previous drive
+                        let drive_count = self.get_drive_count();
+                        if drive_count > 0 && self.disk_analyzer_state.selected_drive > 0 {
+                            self.disk_analyzer_state.selected_drive -= 1;
+                            self.disk_analyzer_state.selected_index = 0;
+                            self.disk_analyzer_state.scroll_offset = 0;
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Right => {
+                    if !self.allow_horizontal_nav() {
+                        return Ok(true);
+                    }
+                    if any_expanded && self.disk_analyzer_state.in_tree_mode {
+                        // Horizontal scroll in tree mode
+                        self.disk_analyzer_state.horizontal_offset += 4;
+                    } else if !any_expanded {
+                        // Switch to next drive
+                        let drive_count = self.get_drive_count();
+                        if drive_count > 0 && self.disk_analyzer_state.selected_drive + 1 < drive_count {
+                            self.disk_analyzer_state.selected_drive += 1;
+                            self.disk_analyzer_state.selected_index = 0;
+                            self.disk_analyzer_state.scroll_offset = 0;
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.disk_analyzer_state.selected_index > 0 {
+                        self.disk_analyzer_state.selected_index -= 1;
+                        // Keep 3-row buffer at top for anticipation scroll
+                        let buffer = 3usize;
+                        let position_in_view = self.disk_analyzer_state.selected_index
+                            .saturating_sub(self.disk_analyzer_state.scroll_offset);
+                        // If selected is within buffer rows from top, scroll
+                        if position_in_view < buffer {
+                            self.disk_analyzer_state.scroll_offset =
+                                self.disk_analyzer_state.selected_index.saturating_sub(buffer);
+                        }
+                        // Load folder stats for newly selected item
+                        self.load_selected_folder_stats().await;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    let item_count = self.get_tree_item_count();
+                    if self.disk_analyzer_state.selected_index + 1 < item_count {
+                        self.disk_analyzer_state.selected_index += 1;
+                        // Keep 3-row buffer at bottom for anticipation scroll
+                        // Layout: drive tabs (3) + usage bar (3) + tree content (variable) + footer (2) + borders (2) = ~10
+                        let visible_height = self.terminal_size.1.saturating_sub(10) as usize;
+                        let buffer = 3usize;
+                        if visible_height > buffer + 1 {
+                            // Calculate position relative to visible area
+                            let position_in_view = self.disk_analyzer_state.selected_index
+                                .saturating_sub(self.disk_analyzer_state.scroll_offset);
+                            // If selected is within buffer rows from bottom, scroll
+                            if position_in_view + buffer >= visible_height {
+                                self.disk_analyzer_state.scroll_offset =
+                                    self.disk_analyzer_state.selected_index
+                                        .saturating_sub(visible_height.saturating_sub(buffer).saturating_sub(1));
+                            }
+                        }
+                        // Load folder stats for newly selected item
+                        self.load_selected_folder_stats().await;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Home => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Go to drive root (collapse all)
+                        self.disk_analyzer_state.selected_index = 0;
+                        self.disk_analyzer_state.scroll_offset = 0;
+                    } else {
+                        // Go to beginning of list
+                        self.disk_analyzer_state.selected_index = 0;
+                        self.disk_analyzer_state.scroll_offset = 0;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::End => {
+                    let item_count = self.get_tree_item_count();
+                    if item_count > 0 {
+                        self.disk_analyzer_state.selected_index = item_count - 1;
+                        // Update scroll to show last item (with buffer at top)
+                        let visible_height = self.terminal_size.1.saturating_sub(10) as usize;
+                        if item_count > visible_height {
+                            self.disk_analyzer_state.scroll_offset = item_count.saturating_sub(visible_height);
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Toggle expand/collapse folder
+                    self.toggle_folder_expansion().await;
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    // Don't trigger sort if M is pressed (M+S is global action for monitor toggle)
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
+                        return Ok(true);
+                    }
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    // Sort by Name
+                    if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Name {
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    } else {
+                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Name;
+                        self.disk_analyzer_state.sort_ascending = true;
+                    }
+                    self.resort_current_tree();
+                    return Ok(true);
+                }
+                KeyCode::Char('s') => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Handled above for collapse
+                        return Ok(true);
+                    }
+                    // Don't trigger sort if M is pressed (M+S is global action for monitor toggle)
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
+                        return Ok(true);
+                    }
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    // Sort by Size
+                    if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Size {
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    } else {
+                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Size;
+                        self.disk_analyzer_state.sort_ascending = false; // Size defaults to descending
+                    }
+                    self.resort_current_tree();
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    // Don't trigger sort if M is pressed
+                    if self.pressed_keys.contains(&KeyCode::Char('m')) {
+                        return Ok(true);
+                    }
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    // Sort by Type (extension)
+                    if self.disk_analyzer_state.sort_column == DiskAnalyzerSortColumn::Type {
+                        self.disk_analyzer_state.sort_ascending = !self.disk_analyzer_state.sort_ascending;
+                    } else {
+                        self.disk_analyzer_state.sort_column = DiskAnalyzerSortColumn::Type;
+                        self.disk_analyzer_state.sort_ascending = true;
+                    }
+                    self.resort_current_tree();
+                    return Ok(true);
+                }
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Toggle extended view
+                    self.disk_analyzer_state.extended_view = !self.disk_analyzer_state.extended_view;
+                    return Ok(true);
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Open in explorer
+                    self.open_selected_in_explorer();
+                    return Ok(true);
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Copy path
+                    self.copy_selected_path();
+                    return Ok(true);
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Toggle show files
+                    self.disk_analyzer_state.show_files = !self.disk_analyzer_state.show_files;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
 
         // Ollama tab hotkeys
         if self.tab_manager.current() == TabType::Ollama {
@@ -1859,12 +2648,15 @@ impl AppState {
                             self.ollama_state.input_mode = OllamaInputMode::None;
                         }
                         OllamaInputMode::Chat => {
-                            let prompt = self.ollama_state.input_buffer.trim().to_string();
-                            if !prompt.is_empty() {
-                                let _ = self.send_ollama_chat_prompt(prompt).await;
+                            // Only process on initial press, not repeat
+                            if key.kind == KeyEventKind::Press {
+                                let prompt = self.ollama_state.input_buffer.trim().to_string();
+                                if !prompt.is_empty() {
+                                    let _ = self.send_ollama_chat_prompt(prompt).await;
+                                }
+                                self.ollama_state.input_buffer.clear();
+                                self.ollama_state.chat_prompt_scroll = 0;
                             }
-                            self.ollama_state.input_buffer.clear();
-                            self.ollama_state.chat_prompt_scroll = 0;
                         }
                         OllamaInputMode::None => {}
                     },
@@ -1880,7 +2672,16 @@ impl AppState {
                         }
                     }
                     KeyCode::Backspace => {
-                        self.ollama_state.input_buffer.pop();
+                        // Add throttle for backspace in Chat mode
+                        let allow = if self.ollama_state.input_mode == OllamaInputMode::Chat {
+                            matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                                && self.allow_backspace_input()
+                        } else {
+                            true
+                        };
+                        if allow {
+                            self.ollama_state.input_buffer.pop();
+                        }
                     }
                     KeyCode::Up | KeyCode::Down if self.ollama_state.input_mode == OllamaInputMode::Chat => {
                         if !self.allow_widget_scroll() {

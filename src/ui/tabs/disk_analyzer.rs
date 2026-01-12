@@ -2,20 +2,22 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Gauge},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 use crate::app::App;
+use crate::app::state::{TreeNode, DiskAnalyzerSortColumn};
 use crate::ui::theme::Theme;
-use crate::utils::format::{create_progress_bar, format_bytes};
+use crate::utils::format::format_bytes;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let analyzer_data = app.state.disk_analyzer_data.read();
     let analyzer_error = app.state.disk_analyzer_error.read();
+    let config = app.state.config.read();
+    let theme = Theme::from_config(&config);
 
     if let Some(message) = analyzer_error.as_ref() {
-        let config = app.state.config.read();
-        let theme = Theme::from_config(&config);
         let block = Block::default()
             .title("Disk Analyzer")
             .borders(Borders::ALL)
@@ -26,11 +28,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .style(Style::default().fg(Color::White));
 
         f.render_widget(text, area);
-    } else if let Some(data) = analyzer_data.as_ref() {
-        let config = app.state.config.read();
-        let theme = Theme::from_config(&config);
+        return;
+    }
 
-        if data.drives.is_empty() {
+    let data = match analyzer_data.as_ref() {
+        Some(data) if !data.drives.is_empty() => data,
+        Some(_) => {
             let block = Block::default()
                 .title("Disk Analyzer")
                 .borders(Borders::ALL)
@@ -43,69 +46,150 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(text, area);
             return;
         }
+        None => {
+            let block = Block::default()
+                .title("Disk Analyzer")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red));
 
-        render_drives(f, area, data, &theme);
-    } else {
-        let block = Block::default()
-            .title("Disk Analyzer")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red));
+            let text = Paragraph::new("Loading disk analyzer data...")
+                .block(block)
+                .style(Style::default().fg(Color::White));
 
-        let text = Paragraph::new("Loading disk analyzer data...")
-            .block(block)
-            .style(Style::default().fg(Color::White));
+            f.render_widget(text, area);
+            return;
+        }
+    };
 
-        f.render_widget(text, area);
+    // Main layout: header with tabs, content, footer
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Drive tabs
+            Constraint::Length(3),  // Usage bar
+            Constraint::Min(5),     // Tree content
+            Constraint::Length(2),  // Footer
+        ])
+        .split(area);
+
+    let selected_drive = app.state.disk_analyzer_state.selected_drive.min(data.drives.len().saturating_sub(1));
+
+    // Render drive tabs
+    render_drive_tabs(f, main_chunks[0], data, selected_drive, &theme);
+
+    // Render selected drive content
+    if let Some(drive) = data.drives.get(selected_drive) {
+        render_usage_bar(f, main_chunks[1], drive, &theme);
+        render_tree_content(f, main_chunks[2], app, drive, &theme);
     }
+
+    // Render footer
+    render_footer(f, main_chunks[3], app, &theme);
 }
 
-fn render_drives(
+fn render_drive_tabs(
     f: &mut Frame,
     area: Rect,
     data: &crate::monitors::DiskAnalyzerData,
+    selected: usize,
     theme: &Theme,
 ) {
-    let drive_count = data.drives.len().max(1);
-    let constraints: Vec<Constraint> = (0..drive_count)
-        .map(|_| Constraint::Ratio(1, drive_count as u32))
-        .collect();
+    let system_drive = system_drive_letter();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+    let mut spans = vec![Span::raw(" ")];
 
     for (i, drive) in data.drives.iter().enumerate() {
-        if let Some(chunk) = chunks.get(i) {
-            render_drive_panel(f, *chunk, drive, theme);
+        let is_selected = i == selected;
+        let is_system = system_drive
+            .as_ref()
+            .map(|letter| drive.letter.eq_ignore_ascii_case(letter))
+            .unwrap_or(false);
+
+        let label = if is_system {
+            format!("{} System", drive.letter)
+        } else if !drive.name.is_empty() {
+            format!("{} {}", drive.letter, drive.name)
+        } else {
+            drive.letter.clone()
+        };
+
+        if is_selected {
+            // Selected: yellow color with round brackets
+            if i == 0 {
+                spans.push(Span::styled("< ", Style::default().fg(Color::Yellow)));
+            }
+            spans.push(Span::styled("(", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(label.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(")", Style::default().fg(Color::Yellow)));
+            if i == data.drives.len() - 1 {
+                spans.push(Span::styled(" >", Style::default().fg(Color::Yellow)));
+            }
+        } else {
+            // Not selected: normal color
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(label.clone(), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw(" "));
+        }
+
+        if i < data.drives.len() - 1 {
+            spans.push(Span::raw("   "));
         }
     }
+
+    let block = Block::default()
+        .title("Disk Analyzer")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.disk_color));
+
+    let paragraph = Paragraph::new(Line::from(spans)).block(block);
+    f.render_widget(paragraph, area);
 }
 
-fn render_drive_panel(
+fn render_usage_bar(
     f: &mut Frame,
     area: Rect,
     drive: &crate::monitors::AnalyzedDrive,
     theme: &Theme,
 ) {
-    let system_drive = system_drive_letter();
-    let is_system = system_drive
-        .as_ref()
-        .map(|letter| drive.letter.eq_ignore_ascii_case(letter))
-        .unwrap_or(false);
-    let label = if is_system {
-        format!("{} (System)", drive.letter)
+    let used_pct = if drive.total > 0 {
+        (drive.used as f64 / drive.total as f64 * 100.0).min(100.0)
     } else {
-        drive.letter.clone()
-    };
-    let title = if drive.name.is_empty() {
-        format!("Drive {}", label)
-    } else {
-        format!("Drive {} ({})", label, drive.name)
+        0.0
     };
 
+    let label = format!(
+        "Used {} / {} ({:.0}%)  Free {}",
+        format_bytes(drive.used),
+        format_bytes(drive.total),
+        used_pct,
+        format_bytes(drive.free)
+    );
+
+    let gauge_color = if used_pct > 90.0 {
+        Color::Red
+    } else if used_pct > 75.0 {
+        Color::Yellow
+    } else {
+        theme.disk_color
+    };
+
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.disk_color)))
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::Black))
+        .percent(used_pct as u16)
+        .label(label);
+
+    f.render_widget(gauge, area);
+}
+
+fn render_tree_content(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    drive: &crate::monitors::AnalyzedDrive,
+    theme: &Theme,
+) {
     let block = Block::default()
-        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.disk_color));
     let inner = block.inner(area);
@@ -122,112 +206,306 @@ fn render_drive_panel(
         return;
     }
 
-    let used_pct = if drive.total > 0 {
-        (drive.used as f64 / drive.total as f64 * 100.0).min(100.0)
+    let drive_letter = &drive.letter;
+    let state = &app.state.disk_analyzer_state;
+    let horizontal_offset = state.horizontal_offset;
+    let show_files = state.show_files;
+
+    // Get tree nodes or create from root folders
+    let all_nodes: Vec<TreeNode> = if let Some(tree) = state.trees.get(drive_letter) {
+        tree.clone()
     } else {
-        0.0
+        drive.root_folders.iter().map(TreeNode::from_root_folder).collect()
     };
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::raw("Used "),
-        Span::styled(
-            format_bytes(drive.used),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" / "),
-        Span::raw(format_bytes(drive.total)),
-        Span::raw(format!(" ({:.0}%)  ", used_pct)),
-        Span::raw("Free "),
-        Span::styled(format_bytes(drive.free), Style::default().fg(Color::Green)),
-    ]));
+    // Apply show_files filter
+    let tree_nodes: Vec<TreeNode> = if show_files {
+        all_nodes
+    } else {
+        all_nodes.into_iter().filter(|n| !n.is_file).collect()
+    };
 
-    if inner.height > 1 {
-        lines.push(Line::from(vec![Span::styled(
-            "Root folders (share of used space)",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]));
-    }
-
-    let remaining_rows = inner.height.saturating_sub(lines.len() as u16);
-    if remaining_rows == 0 {
-        let text = Paragraph::new(lines).style(Style::default().fg(Color::White));
+    if tree_nodes.is_empty() {
+        let text = Paragraph::new("No items found")
+            .style(Style::default().fg(Color::Gray));
         f.render_widget(text, inner);
         return;
     }
 
-    if drive.root_folders.is_empty() {
-        lines.push(Line::from("No root folder data"));
-        let text = Paragraph::new(lines).style(Style::default().fg(Color::Gray));
-        f.render_widget(text, inner);
-        return;
-    }
+    let visible_height = inner.height as usize;
+    let selected_idx = state.selected_index.min(tree_nodes.len().saturating_sub(1));
+    let scroll_offset = state.scroll_offset;
+    let extended_view = state.extended_view;
 
-    let max_rows = remaining_rows as usize;
-    let size_samples: Vec<String> = drive
-        .root_folders
-        .iter()
-        .take(max_rows)
-        .map(|entry| format_bytes(entry.size))
-        .collect();
-    let size_width = size_samples
-        .iter()
-        .map(|s| s.len())
-        .max()
-        .unwrap_or(8)
-        .min(inner.width as usize);
+    // Get extension config
+    let config = app.state.config.read();
+    let show_extensions = &config.integrations.disk_analyzer.show_extensions;
 
-    let percent_width = 4usize;
-    let inner_width = inner.width.saturating_sub(1) as usize;
-    let available = inner_width.saturating_sub(size_width + percent_width + 6);
-    let (name_width, bar_width) = compute_column_widths(available);
-
-    let denom = if drive.used > 0 { drive.used } else { drive.total };
-
-    for (entry, size_str) in drive
-        .root_folders
-        .iter()
-        .zip(size_samples.iter())
-        .take(max_rows)
-    {
-        let pct = if denom > 0 {
-            (entry.size as f64 / denom as f64 * 100.0).min(100.0)
+    // Check if path was recently copied
+    let path_copied_info = state.path_copied_at.as_ref().and_then(|(path, time)| {
+        if time.elapsed().as_secs() < 1 {
+            Some(path.clone())
         } else {
-            0.0
+            None
+        }
+    });
+
+    let mut lines = Vec::new();
+
+    for (i, node) in tree_nodes.iter().enumerate().skip(scroll_offset).take(visible_height) {
+        let is_selected = i == selected_idx;
+        // Extended view shows info for ALL folders when enabled
+        let show_extended_for_node = extended_view;
+
+        // Build tree prefix
+        let indent = "   ".repeat(node.depth);
+        let tree_prefix = if node.depth > 0 {
+            format!("{}|-- ", indent)
+        } else {
+            String::new()
         };
 
-        let name = truncate_label(&entry.name, name_width);
-        if bar_width > 0 {
-            let bar = create_progress_bar(pct as f32, bar_width);
-            lines.push(Line::from(format!(
-                "{:<name_width$}  [{}] {:>percent_width$}% {:>size_width$}",
-                name,
-                bar,
-                pct.round() as u16,
-                size_str,
-                name_width = name_width,
-                percent_width = percent_width,
-                size_width = size_width
-            )));
+        // Icon and color based on type (file or folder)
+        let (icon, icon_color) = if node.is_file {
+            // File icon - no expansion indicator
+            ("  ", Color::Gray)
+        } else if node.loading {
+            ("...", Color::Cyan)
+        } else if node.expanded {
+            ("v ", Color::Cyan)
+        } else if node.has_children {
+            ("> ", Color::Cyan)
         } else {
-            lines.push(Line::from(format!(
-                "{:<name_width$}  {:>percent_width$}% {:>size_width$}",
-                name,
-                pct.round() as u16,
-                size_str,
-                name_width = name_width,
-                percent_width = percent_width,
-                size_width = size_width
-            )));
+            ("  ", Color::Cyan)
+        };
+
+        // Build folder/file info string (extended view only shows for siblings at same depth)
+        let item_info = if !node.is_file && (is_selected || show_extended_for_node) {
+            build_folder_info(node, show_extensions)
+        } else if node.is_file {
+            // For files show extension if available
+            node.extension.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Check if this path was just copied (compare trimmed paths)
+        let show_copied = path_copied_info.as_ref()
+            .map(|p| p == node.path.trim_end_matches('\\'))
+            .unwrap_or(false) && is_selected;
+
+        // Build the line
+        let mut spans = Vec::new();
+
+        // Selection arrow (yellow if selected)
+        if is_selected {
+            spans.push(Span::styled(" -> ", Style::default().fg(Color::Yellow)));
+        } else {
+            spans.push(Span::raw("    "));
+        }
+
+        // Apply horizontal scroll to content
+        let displayed_prefix = if horizontal_offset < tree_prefix.len() {
+            tree_prefix[horizontal_offset..].to_string()
+        } else {
+            String::new()
+        };
+
+        // Tree structure prefix
+        spans.push(Span::styled(displayed_prefix, Style::default().fg(Color::DarkGray)));
+
+        // Icon
+        spans.push(Span::styled(icon, Style::default().fg(icon_color)));
+
+        // Name (yellow if selected, gray for files when not selected)
+        let name_style = if is_selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if node.is_file {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        spans.push(Span::styled(node.name.clone(), name_style));
+
+        // Item info (files/folders count for folders, extension for files)
+        if !item_info.is_empty() {
+            spans.push(Span::styled(
+                format!(" {}", item_info),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        // "Path Copied!" indicator
+        if show_copied {
+            spans.push(Span::styled(" Path Copied!", Style::default().fg(Color::Green)));
+        }
+
+        // Size (right-aligned) - calculate remaining space using unicode width
+        let size_str = format_bytes(node.size);
+        let current_len: usize = spans.iter().map(|s| s.content.width()).sum();
+        let available_width = inner.width as usize;
+
+        if current_len + size_str.len() + 2 < available_width {
+            let padding = available_width.saturating_sub(current_len + size_str.len() + 1);
+            spans.push(Span::raw(" ".repeat(padding)));
+            spans.push(Span::styled(size_str, Style::default().fg(Color::Cyan)));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, inner);
+}
+
+fn build_folder_info(node: &TreeNode, show_extensions: &[String]) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(file_count) = node.file_count {
+        let word = if file_count == 1 { "file" } else { "files" };
+        parts.push(format!("{} {}", file_count, word));
+    }
+
+    if let Some(folder_count) = node.folder_count {
+        let word = if folder_count == 1 { "folder" } else { "folders" };
+        parts.push(format!("{} {}", folder_count, word));
+    }
+
+    if let Some(ext_counts) = &node.extension_counts {
+        for ext in show_extensions {
+            if let Some(count) = ext_counts.get(ext) {
+                if *count > 0 {
+                    parts.push(format!("{} {}", count, ext));
+                }
+            }
         }
     }
 
-    let text = Paragraph::new(lines).style(Style::default().fg(Color::White));
-    f.render_widget(text, inner);
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(", "))
+    }
+}
+
+fn render_footer(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+) {
+    let state = &app.state.disk_analyzer_state;
+    let any_expanded = app.state.has_any_expanded_folder();
+    let in_tree_mode = state.in_tree_mode;
+
+    let mut spans = vec![Span::raw(" ")];
+
+    // Navigation keys
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("Up/Dn", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::raw(" Nav "));
+
+    // Left/Right behavior
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("Lt/Rt", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    if any_expanded && in_tree_mode {
+        spans.push(Span::raw(" Scroll "));
+    } else {
+        spans.push(Span::raw(" Disk "));
+    }
+
+    // Enter
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("Enter", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::raw(" Expand "));
+
+    // Esc
+    if in_tree_mode {
+        spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("Esc", Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw(" Exit "));
+    }
+
+    // Separator
+    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+
+    // Sort indicator - n,s,t keys like Services tab
+    let sort_dir = if state.sort_ascending { "^" } else { "v" };
+
+    // Show which key is active (highlighted) and which column is selected
+    let n_style = if state.sort_column == DiskAnalyzerSortColumn::Name {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let s_style = if state.sort_column == DiskAnalyzerSortColumn::Size {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let t_style = if state.sort_column == DiskAnalyzerSortColumn::Type {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    spans.push(Span::styled("n", n_style));
+    spans.push(Span::styled(",", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("s", s_style));
+    spans.push(Span::styled(",", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("t", t_style));
+    spans.push(Span::raw(" Sort"));
+
+    // Show direction indicator for the active sort column
+    let sort_name = match state.sort_column {
+        DiskAnalyzerSortColumn::Name => "Name",
+        DiskAnalyzerSortColumn::Size => "Size",
+        DiskAnalyzerSortColumn::Type => "Type",
+    };
+    spans.push(Span::styled(format!(":{}{} ", sort_name, sort_dir), Style::default().fg(Color::DarkGray)));
+
+    // Extended view indicator
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("E", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    if state.extended_view {
+        spans.push(Span::styled(" Ext:ON ", Style::default().fg(Color::Green)));
+    } else {
+        spans.push(Span::raw(" Ext:OFF "));
+    }
+
+    // Show files toggle
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("F", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    if state.show_files {
+        spans.push(Span::styled(" Files:ON ", Style::default().fg(Color::Green)));
+    } else {
+        spans.push(Span::raw(" Files:OFF "));
+    }
+
+    // Open in explorer
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("O", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::raw(" Open "));
+
+    // Copy path
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled("C", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::raw(" Copy"));
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme.disk_color));
+
+    let paragraph = Paragraph::new(Line::from(spans)).block(block);
+    f.render_widget(paragraph, area);
 }
 
 fn system_drive_letter() -> Option<String> {
@@ -239,46 +517,4 @@ fn system_drive_letter() -> Option<String> {
         format!("{}:", trimmed)
     };
     Some(normalized.to_uppercase())
-}
-
-fn compute_column_widths(available: usize) -> (usize, usize) {
-    if available < 8 {
-        return (available.max(1), 0);
-    }
-
-    let mut bar_width = available.min(24);
-    let mut name_width = available.saturating_sub(bar_width);
-
-    if name_width < 8 {
-        let needed = 8 - name_width;
-        if bar_width > needed + 4 {
-            bar_width = bar_width.saturating_sub(needed);
-            name_width = available.saturating_sub(bar_width);
-        }
-    }
-
-    if bar_width < 4 {
-        (available, 0)
-    } else {
-        (name_width.max(8), bar_width)
-    }
-}
-
-fn truncate_label(label: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let mut chars = label.chars().collect::<Vec<char>>();
-    if chars.len() <= width {
-        return format!("{:<width$}", label, width = width);
-    }
-
-    if width <= 3 {
-        return chars.into_iter().take(width).collect();
-    }
-
-    let mut truncated: String = chars.drain(..width - 3).collect();
-    truncated.push_str("...");
-    format!("{:<width$}", truncated, width = width)
 }
