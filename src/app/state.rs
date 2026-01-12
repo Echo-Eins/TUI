@@ -283,6 +283,14 @@ pub enum OllamaDeleteTarget {
 pub enum DiskAnalyzerSortColumn {
     Name,
     Size,
+    Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskAnalyzerTypeFilter {
+    All,
+    Folders,
+    Files,
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +302,8 @@ pub struct TreeNode {
     pub expanded: bool,
     pub has_children: bool,
     pub loading: bool,
+    pub is_file: bool,
+    pub extension: Option<String>,
     pub file_count: Option<usize>,
     pub folder_count: Option<usize>,
     pub extension_counts: Option<std::collections::HashMap<String, usize>>,
@@ -309,6 +319,29 @@ impl TreeNode {
             expanded: false,
             has_children: true,
             loading: false,
+            is_file: false,
+            extension: None,
+            file_count: None,
+            folder_count: None,
+            extension_counts: None,
+        }
+    }
+
+    pub fn from_file(name: String, path: String, size: u64, depth: usize) -> Self {
+        let extension = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()));
+        Self {
+            path,
+            name,
+            size,
+            depth,
+            expanded: false,
+            has_children: false,
+            loading: false,
+            is_file: true,
+            extension,
             file_count: None,
             folder_count: None,
             extension_counts: None,
@@ -325,7 +358,8 @@ pub struct DiskAnalyzerUIState {
     pub sort_column: DiskAnalyzerSortColumn,
     pub sort_ascending: bool,
     pub extended_view: bool,
-    pub filter: String,
+    pub show_files: bool,
+    pub type_filter: DiskAnalyzerTypeFilter,
     pub trees: std::collections::HashMap<String, Vec<TreeNode>>,
     pub path_copied_at: Option<(String, Instant)>,
     pub collapse_keys_pressed: Option<Instant>,
@@ -1215,10 +1249,11 @@ impl AppState {
                                 tree[selected_idx].file_count = Some(contents.file_count);
                                 tree[selected_idx].folder_count = Some(contents.folder_count);
                                 tree[selected_idx].extension_counts = Some(contents.extension_counts);
-                                tree[selected_idx].has_children = !contents.subfolders.is_empty();
+                                let has_content = !contents.subfolders.is_empty() || !contents.files.is_empty();
+                                tree[selected_idx].has_children = has_content;
 
-                                // Insert children after selected node
-                                let mut children: Vec<TreeNode> = contents
+                                // Build folder nodes
+                                let mut folder_nodes: Vec<TreeNode> = contents
                                     .subfolders
                                     .iter()
                                     .map(|folder| {
@@ -1228,27 +1263,86 @@ impl AppState {
                                     })
                                     .collect();
 
-                                // Sort children
+                                // Build file nodes
+                                let mut file_nodes: Vec<TreeNode> = contents
+                                    .files
+                                    .iter()
+                                    .map(|file| {
+                                        TreeNode::from_file(
+                                            file.name.clone(),
+                                            file.path.clone(),
+                                            file.size,
+                                            node_depth + 1,
+                                        )
+                                    })
+                                    .collect();
+
+                                // Sort folders
                                 match self.disk_analyzer_state.sort_column {
                                     DiskAnalyzerSortColumn::Size => {
                                         if self.disk_analyzer_state.sort_ascending {
-                                            children.sort_by(|a, b| a.size.cmp(&b.size));
+                                            folder_nodes.sort_by(|a, b| a.size.cmp(&b.size));
                                         } else {
-                                            children.sort_by(|a, b| b.size.cmp(&a.size));
+                                            folder_nodes.sort_by(|a, b| b.size.cmp(&a.size));
                                         }
                                     }
-                                    DiskAnalyzerSortColumn::Name => {
+                                    DiskAnalyzerSortColumn::Name | DiskAnalyzerSortColumn::Type => {
+                                        // For folders, Type sort is same as Name sort
                                         if self.disk_analyzer_state.sort_ascending {
-                                            children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                            folder_nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                                         } else {
-                                            children.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+                                            folder_nodes.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
                                         }
                                     }
                                 }
 
-                                // Insert after selected
-                                for (i, child) in children.into_iter().enumerate() {
-                                    tree.insert(selected_idx + 1 + i, child);
+                                // Sort files
+                                match self.disk_analyzer_state.sort_column {
+                                    DiskAnalyzerSortColumn::Size => {
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| a.size.cmp(&b.size));
+                                        } else {
+                                            file_nodes.sort_by(|a, b| b.size.cmp(&a.size));
+                                        }
+                                    }
+                                    DiskAnalyzerSortColumn::Name => {
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                        } else {
+                                            file_nodes.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+                                        }
+                                    }
+                                    DiskAnalyzerSortColumn::Type => {
+                                        // Sort by extension
+                                        if self.disk_analyzer_state.sort_ascending {
+                                            file_nodes.sort_by(|a, b| {
+                                                let ext_a = a.extension.as_deref().unwrap_or("");
+                                                let ext_b = b.extension.as_deref().unwrap_or("");
+                                                ext_a.to_lowercase().cmp(&ext_b.to_lowercase())
+                                            });
+                                        } else {
+                                            file_nodes.sort_by(|a, b| {
+                                                let ext_a = a.extension.as_deref().unwrap_or("");
+                                                let ext_b = b.extension.as_deref().unwrap_or("");
+                                                ext_b.to_lowercase().cmp(&ext_a.to_lowercase())
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Insert folders first, then files (if show_files enabled)
+                                let mut insert_pos = selected_idx + 1;
+                                for node in folder_nodes {
+                                    tree.insert(insert_pos, node);
+                                    insert_pos += 1;
+                                }
+
+                                // Insert files after folders if show_files is enabled
+                                if self.disk_analyzer_state.show_files {
+                                    for node in file_nodes {
+                                        tree.insert(insert_pos, node);
+                                        insert_pos += 1;
+                                    }
                                 }
                             }
                         }
@@ -1461,7 +1555,8 @@ impl AppState {
                 sort_column: DiskAnalyzerSortColumn::Size,
                 sort_ascending: false,
                 extended_view: false,
-                filter: String::new(),
+                show_files: true,
+                type_filter: DiskAnalyzerTypeFilter::All,
                 trees: std::collections::HashMap::new(),
                 path_copied_at: None,
                 collapse_keys_pressed: None,
@@ -2146,8 +2241,10 @@ impl AppState {
                     }
                     if self.disk_analyzer_state.selected_index > 0 {
                         self.disk_analyzer_state.selected_index -= 1;
-                        if self.disk_analyzer_state.selected_index < self.disk_analyzer_state.scroll_offset {
-                            self.disk_analyzer_state.scroll_offset = self.disk_analyzer_state.selected_index;
+                        // Keep 3-row buffer at top
+                        let buffer = 3usize;
+                        if self.disk_analyzer_state.selected_index < self.disk_analyzer_state.scroll_offset + buffer {
+                            self.disk_analyzer_state.scroll_offset = self.disk_analyzer_state.selected_index.saturating_sub(buffer);
                         }
                     }
                     return Ok(true);
@@ -2159,6 +2256,16 @@ impl AppState {
                     let item_count = self.get_tree_item_count();
                     if self.disk_analyzer_state.selected_index + 1 < item_count {
                         self.disk_analyzer_state.selected_index += 1;
+                        // Keep 3-row buffer at bottom
+                        // Estimate visible height (terminal height - header - footer - borders)
+                        let visible_height = self.terminal_size.1.saturating_sub(12) as usize;
+                        let buffer = 3usize;
+                        if visible_height > buffer {
+                            let max_visible_index = self.disk_analyzer_state.scroll_offset + visible_height.saturating_sub(buffer);
+                            if self.disk_analyzer_state.selected_index >= max_visible_index {
+                                self.disk_analyzer_state.scroll_offset = self.disk_analyzer_state.selected_index.saturating_sub(visible_height.saturating_sub(buffer));
+                            }
+                        }
                     }
                     return Ok(true);
                 }
@@ -2178,6 +2285,12 @@ impl AppState {
                     let item_count = self.get_tree_item_count();
                     if item_count > 0 {
                         self.disk_analyzer_state.selected_index = item_count - 1;
+                        // Update scroll to show selected item with buffer
+                        let visible_height = self.terminal_size.1.saturating_sub(12) as usize;
+                        let buffer = 3usize;
+                        if visible_height > buffer && item_count > visible_height {
+                            self.disk_analyzer_state.scroll_offset = item_count.saturating_sub(visible_height.saturating_sub(buffer));
+                        }
                     }
                     return Ok(true);
                 }
@@ -2228,6 +2341,29 @@ impl AppState {
                     }
                     // Copy path
                     self.copy_selected_path();
+                    return Ok(true);
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Toggle show files
+                    self.disk_analyzer_state.show_files = !self.disk_analyzer_state.show_files;
+                    return Ok(true);
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    if !is_initial_press {
+                        return Ok(true);
+                    }
+                    // Cycle through type filter
+                    self.disk_analyzer_state.type_filter = match self.disk_analyzer_state.type_filter {
+                        DiskAnalyzerTypeFilter::All => DiskAnalyzerTypeFilter::Folders,
+                        DiskAnalyzerTypeFilter::Folders => DiskAnalyzerTypeFilter::Files,
+                        DiskAnalyzerTypeFilter::Files => DiskAnalyzerTypeFilter::All,
+                    };
+                    // Reset selection when filter changes
+                    self.disk_analyzer_state.selected_index = 0;
+                    self.disk_analyzer_state.scroll_offset = 0;
                     return Ok(true);
                 }
                 _ => {}

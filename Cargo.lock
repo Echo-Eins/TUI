@@ -1829,6 +1829,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "unicode-width",
  "windows-sys 0.52.0",
 ]
 
