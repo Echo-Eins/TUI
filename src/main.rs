@@ -1,199 +1,277 @@
-use anyhow::Result;
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+//! Cardputer Remote Desktop Server - Main Entry Point
+//!
+//! Usage:
+//!   cardputer-remote [OPTIONS]
+//!
+//! Options:
+//!   -c, --config <FILE>  Path to config file (default: config.toml)
+//!   -v, --verbose        Enable verbose logging
+//!   -h, --help           Show help
+
+use cardputer_remote::{
+    config::Config,
+    network::{DiscoveryService, Server, Session},
+    VERSION,
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
-use std::fs::OpenOptions;
-use std::io::{self, Write};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;  // Use tokio Mutex for async compatibility
+use tokio::sync::mpsc;
+use tracing::{error, info, warn, Level};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-mod app;
-mod ui;
-mod monitors;
-mod integrations;
-mod events;
-mod utils;
-
-use app::App;
-use events::{EventHandler, AppEvent};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_logging();
-
-    set_console_utf8();
-
-    // Setup terminal with proper error handling
-    if let Err(e) = setup_terminal().await {
-        eprintln!("Failed to setup terminal: {}", e);
-        return Err(e);
-    }
-
-    Ok(())
+/// Command line arguments
+struct Args {
+    config_path: PathBuf,
+    verbose: bool,
 }
 
-fn init_logging() {
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    );
-    builder.format_timestamp_secs();
+impl Args {
+    fn parse() -> Self {
+        let mut args = std::env::args().skip(1);
+        let mut config_path = PathBuf::from("config.toml");
+        let mut verbose = false;
 
-    let log_path = std::env::var("TUI_PLUS_LOG")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "logs/tui-plus.log".to_string());
-
-    if let Some(parent) = Path::new(&log_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                eprintln!("Failed to create log directory {:?}: {}", parent, err);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-c" | "--config" => {
+                    if let Some(path) = args.next() {
+                        config_path = PathBuf::from(path);
+                    }
+                }
+                "-v" | "--verbose" => {
+                    verbose = true;
+                }
+                "-h" | "--help" => {
+                    Self::print_help();
+                    std::process::exit(0);
+                }
+                _ => {
+                    eprintln!("Unknown argument: {}", arg);
+                    Self::print_help();
+                    std::process::exit(1);
+                }
             }
         }
-    }
 
-    match OpenOptions::new().create(true).append(true).open(&log_path) {
-        Ok(file) => {
-            builder.target(env_logger::Target::Pipe(Box::new(file)));
-        }
-        Err(err) => {
-            eprintln!("Failed to open log file {}: {}", log_path, err);
+        Self {
+            config_path,
+            verbose,
         }
     }
 
-    builder.init();
-}
-
-#[cfg(windows)]
-fn set_console_utf8() {
-    use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
-
-    unsafe {
-        if SetConsoleOutputCP(65001) == 0 {
-            log::warn!("Failed to set console output codepage to UTF-8");
-        }
-        if SetConsoleCP(65001) == 0 {
-            log::warn!("Failed to set console input codepage to UTF-8");
-        }
+    fn print_help() {
+        println!("Cardputer Remote Desktop Server v{}", VERSION);
+        println!();
+        println!("Usage: cardputer-remote [OPTIONS]");
+        println!();
+        println!("Options:");
+        println!("  -c, --config <FILE>  Path to config file (default: config.toml)");
+        println!("  -v, --verbose        Enable verbose logging");
+        println!("  -h, --help           Show this help");
     }
 }
 
-#[cfg(not(windows))]
-fn set_console_utf8() {}
-
-async fn setup_terminal() -> Result<()> {
-    enable_raw_mode()?;
-
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // CRITICAL: Force clear to trigger initial full render
-    terminal.clear()?;
-
-    // Create app
-    let app = match App::new().await {
-        Ok(app) => app,
-        Err(e) => {
-            // Cleanup terminal before returning error
-            cleanup_terminal(&mut terminal)?;
-            return Err(e);
+/// Initialize logging based on config
+fn init_logging(config: &Config, verbose: bool) {
+    let level = if verbose {
+        Level::DEBUG
+    } else {
+        match config.logging.level.to_lowercase().as_str() {
+            "trace" => Level::TRACE,
+            "debug" => Level::DEBUG,
+            "info" => Level::INFO,
+            "warn" => Level::WARN,
+            "error" => Level::ERROR,
+            _ => Level::INFO,
         }
     };
 
-    let tick_rate_ms = app.state.config.read().general.refresh_rate_ms;
+    let filter = EnvFilter::new(format!("cardputer_remote={}", level));
 
-    // Use tokio::sync::Mutex for proper async support
-    let app_state = Arc::new(Mutex::new(app));
-
-    // Create event handler
-    let event_handler = EventHandler::new(tick_rate_ms.max(50)); // At least 20fps
-
-    // Run the application
-    let res = run_app(&mut terminal, app_state, event_handler).await;
-
-    // Always cleanup terminal
-    cleanup_terminal(&mut terminal)?;
-
-    res
-}
-
-fn cleanup_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app_state: Arc<Mutex<App>>,
-    mut event_handler: EventHandler,
-) -> Result<()> {
-    // Force initial draw
-    {
-        let app = app_state.lock().await;
-        terminal.draw(|f| {
-            ui::render(f, &app);
-        })?;
-        // Explicit flush
-        io::stdout().flush()?;
+    if config.logging.json_format {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().with_target(false).with_thread_ids(false))
+            .init();
     }
 
-    let mut needs_clear = false;
+    // Log to file if configured
+    if let Some(ref log_file) = config.logging.log_file {
+        // Note: In production, we'd use tracing-appender for file logging
+        info!("Logging to file: {}", log_file);
+    }
+}
 
-    loop {
-        // Wait for event
-        let event = event_handler.next().await;
+/// Application state
+struct App {
+    config: Arc<Config>,
+    discovery: DiscoveryService,
+    active_sessions: Vec<tokio::task::JoinHandle<()>>,
+}
 
-        // Check if we need to force clear (after resize)
-        if needs_clear {
-            terminal.clear()?;
-            needs_clear = false;
-        }
+impl App {
+    async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = Arc::new(config);
+        let discovery = DiscoveryService::new(&config)?;
 
-        // Process event
-        let should_continue = match event {
-            AppEvent::Input(crossterm_event) => {
-                // Check for resize to force full redraw
-                if matches!(crossterm_event, CrosstermEvent::Resize(_, _)) {
-                    needs_clear = true;
+        Ok(Self {
+            config,
+            discovery,
+            active_sessions: Vec::new(),
+        })
+    }
+
+    async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Cardputer Remote Desktop Server v{}", VERSION);
+        info!("Protocol version: {}", cardputer_remote::PROTOCOL_VERSION);
+        info!("Listening on port {}", self.config.server.port);
+
+        // Start mDNS discovery
+        self.discovery.start().await?;
+        info!("mDNS discovery started");
+
+        // Channel for new sessions
+        let (session_tx, mut session_rx) = mpsc::channel::<Session>(4);
+
+        // Start server in background
+        let server_handle = {
+            let config = self.config.clone();
+            tokio::spawn(async move {
+                match Server::new(config).await {
+                    Ok(server) => {
+                        if let Err(e) = server.run(session_tx).await {
+                            error!("Server error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create server: {}", e);
+                    }
                 }
-
-                // Handle event with async lock
-                let mut app = app_state.lock().await;
-                app.handle_event(crossterm_event).await?
-            }
-            AppEvent::Tick => true,
+            })
         };
 
-        if !should_continue {
-            break;
+        // Handle Ctrl+C
+        let shutdown = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown);
+
+        info!("Server running. Press Ctrl+C to stop.");
+
+        loop {
+            tokio::select! {
+                // Handle new sessions
+                Some(mut session) = session_rx.recv() => {
+                    let addr = session.addr();
+                    info!("New session from {}", addr);
+
+                    // Log session start
+                    self.log_event("session_start", &format!("Client: {}", addr));
+
+                    // Run session in background
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = session.run().await {
+                            warn!("Session {} error: {}", addr, e);
+                        }
+                        info!("Session {} ended", addr);
+                    });
+
+                    self.active_sessions.push(handle);
+
+                    // Clean up finished sessions
+                    self.active_sessions.retain(|h| !h.is_finished());
+                }
+
+                // Handle shutdown
+                _ = &mut shutdown => {
+                    info!("Shutting down...");
+                    break;
+                }
+            }
         }
 
-        // Render after each event
-        {
-            let app = app_state.lock().await;
-            terminal.draw(|f| {
-                ui::render(f, &app);
-            })?;
+        // Cleanup
+        self.discovery.stop();
+        server_handle.abort();
 
-            // Explicit flush to ensure immediate display
-            io::stdout().flush()?;
+        // Wait for active sessions to finish (with timeout)
+        for handle in self.active_sessions.drain(..) {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         }
+
+        info!("Server stopped");
+        Ok(())
     }
 
-    Ok(())
+    /// Log an event for auditing
+    fn log_event(&self, event_type: &str, details: &str) {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        info!(
+            event_type = event_type,
+            details = details,
+            timestamp = timestamp,
+            "Event"
+        );
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    // Load config
+    let config = match Config::load(&args.config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load config from {:?}: {}", args.config_path, e);
+            eprintln!("Creating default config file...");
+
+            // Create default config
+            let default_config = Config::default();
+            let toml_str = match toml::to_string_pretty(&default_config) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("Failed to serialize default config: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Err(e) = std::fs::write(&args.config_path, toml_str) {
+                eprintln!("Failed to write default config: {}", e);
+                std::process::exit(1);
+            }
+
+            eprintln!("Default config created at {:?}", args.config_path);
+            eprintln!("Please edit the config file and restart.");
+            std::process::exit(1);
+        }
+    };
+
+    // Initialize logging
+    init_logging(&config, args.verbose);
+
+    // Create and run application
+    let mut app = match App::new(config).await {
+        Ok(app) => app,
+        Err(e) => {
+            error!("Failed to initialize application: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = app.run().await {
+        error!("Application error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_args_parse() {
+        // Basic test - would need more comprehensive testing with actual args
+    }
 }

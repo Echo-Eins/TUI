@@ -1,63 +1,132 @@
-# TUI+ System Monitor
+# Cardputer Remote Desktop
 
-Advanced cross-platform system monitoring TUI built with Rust. Windows uses
-PowerShell integration, and the UI includes an Ollama model manager.
+Secure remote desktop system for M5Stack Cardputer with full PKI mutual authentication.
 
-## Features
-- Core architecture
-  - Rust TUI using ratatui
-  - Async data collection with tokio
-  - Hot-reloadable TOML configuration
-  - Modular monitor system
-- UI/UX
-  - Tab-based navigation with custom highlighting
-  - Compact and full view modes (toggle with F2)
-  - Command history radial menu (Ctrl+F)
-  - Keyboard navigation with throttled input
-- Monitoring tabs
-  - CPU: usage, per-core, frequency, power
-  - GPU: utilization, VRAM, temperature, processes
-  - RAM: totals, speed, usage
-  - Disk: multi-drive, I/O stats, partitions
-  - Network: interface stats and traffic history
-  - Processes: sorting and paging
-  - Services: list + details panel with scroll
-  - Disk Analyzer: Everything integration for root folder sizes
-- Ollama manager
-  - Model list + running models
-  - Chat mode with pause/resume
-  - Pull/delete/run/stop actions
-  - VRAM usage summary
-  - Recent Activity with log metadata
+## Security Features
 
-## Requirements
-- Rust 1.70+ (Edition 2021)
-- Windows (primary target)
-- PowerShell 5.1+ or PowerShell Core 7+
-- Optional: NVIDIA GPU for GPU monitoring
+- **ECDSA Mutual Authentication** - Both client and server verify each other's identity
+- **ECDH Forward Secrecy** - Ephemeral keys ensure past sessions remain secure if keys leak
+- **AES-128-GCM Encryption** - Authenticated encryption for all session data
+- **Replay Protection** - Monotonic nonce counters prevent replay attacks
+- **HKDF Key Derivation** - RFC 5869 compliant key derivation
 
-## Installation
+## Quick Start
+
+### 1. Generate Keys
+
 ```bash
-cargo build --release
-./target/release/tui-plus
+cd cardputer-remote
+cargo run --bin keygen
 ```
 
-## Usage
-Keyboard shortcuts:
-- Ctrl+C: Exit
-- Tab/Shift+Tab: Navigate tabs
-- F2: Toggle compact mode
-- Ctrl+F: Command history menu
-- Up/Down: Navigate lists/history
-- 1-9,0: Jump to tab
+This generates:
+- PC private/public keypair
+- Cardputer private/public keypair
+- Discovery cookie
 
-## Logging
-Logs are written to logs/tui-plus.log by default. To override the log path:
-```bash
-TUI_PLUS_LOG=path/to/custom.log cargo run
+### 2. Configure PC Server
+
+Create `config.toml`:
+
+```toml
+[server]
+port = 19847
+session_timeout_secs = 300
+max_fps = 10
+jpeg_quality = 70
+
+[security]
+discovery_cookie = "<generated cookie>"
+private_key = "<PC private key>"
+cardputer_public_key = "<Cardputer public key>"
+
+[network]
+mdns_service_name = "CardputerRemote"
+device_name = "MyPC"
+bind_address = "0.0.0.0"
+
+[display]
+target_width = 240
+target_height = 135
+
+[logging]
+level = "info"
 ```
 
-## Configuration
-Edit config.toml to customize settings.
+### 3. Configure Cardputer (ESP32)
 
-See DESIGN_CONCEPTS.md and ARCHITECTURE.md for more details.
+Create key files on SD card:
+
+```bash
+# Create directory
+mkdir /sd/rd_keys
+
+# Convert hex keys to binary and copy to SD card
+echo '<Cardputer private key hex>' | xxd -r -p > /sd/rd_keys/client.key
+echo '<Cardputer public key hex>' | xxd -r -p > /sd/rd_keys/client.pub
+echo '<PC public key hex>' | xxd -r -p > /sd/rd_keys/server.pub
+```
+
+Or use the ESP32's key generation (via Serial):
+```
+[RD] Generated public key (add to server config): 02abc123...
+```
+
+### 4. Run
+
+**PC Server:**
+```bash
+cargo run --release
+```
+
+**Cardputer:**
+1. Flash firmware with Remote Desktop module
+2. Connect to WiFi
+3. Select "Remote Desktop" from menu
+4. Press ENTER to connect
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| FN + ; | Mouse up |
+| FN + . | Mouse down |
+| FN + , | Mouse left |
+| FN + / | Mouse right |
+| FN + ENTER | Left click |
+| FN + BACKSPACE | Disconnect |
+| A-Z, 0-9 | Type characters |
+
+## File Structure
+
+```
+/sd/
+├── rd_keys/
+│   ├── client.key    # ECDSA private key (32 bytes)
+│   ├── client.pub    # ECDSA public key (33 bytes)
+│   └── server.pub    # Server's public key (33 bytes)
+└── remote_desktop.json  # Optional config
+```
+
+## Troubleshooting
+
+### "Failed to load keys"
+- Ensure all three key files exist in `/sd/rd_keys/`
+- Check file sizes: client.key=32, client.pub=33, server.pub=33
+
+### "Server signature verification failed"
+- Verify server.pub matches PC's public key
+- Regenerate keys if compromised
+
+### "Handshake timeout"
+- Check WiFi connectivity
+- Verify PC server is running
+- Check firewall allows port 19847
+
+## Security Considerations
+
+1. **Key Storage**: Private keys are stored unencrypted on SD card. Physical security of the Cardputer is essential.
+
+2. **Network**: Initial TCP connection is unencrypted. Use on trusted networks only.
+
+3. **Updates**: Keep both ESP32 and PC components updated together.
