@@ -2,6 +2,7 @@
 name = "cardputer-remote"
 version = "1.0.0"
 edition = "2021"
+default-run = "TUI"
 authors = ["CardputerADV Team"]
 description = "Secure remote desktop server for M5Stack Cardputer"
 license = "MIT"
@@ -21,14 +22,10 @@ hmac = "0.12"
 # Networking
 mdns-sd = "0.10"
 
-# Screen capture (Windows)
-scrap = "0.5"
 
 # Image processing
 image = { version = "0.24", features = ["jpeg"] }
 
-# Input simulation (Windows)
-enigo = "0.2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -57,6 +54,12 @@ windows = { version = "0.52", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ]}
+enigo = "0.2"
+scrap = "0.5"
+
+[[bin]]
+name = "TUI"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
