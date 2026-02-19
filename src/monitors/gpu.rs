@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use crate::integrations::PowerShellExecutor;
 use crate::utils::parse_json_array;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuData {
@@ -192,8 +192,8 @@ impl GpuMonitor {
 
         let output = self.ps.execute(script).await?;
         let trimmed = output.trim_start_matches('\u{feff}').trim();
-        let info: NvidiaSmiData = serde_json::from_str(trimmed)
-            .context("Failed to parse nvidia-smi data")?;
+        let info: NvidiaSmiData =
+            serde_json::from_str(trimmed).context("Failed to parse nvidia-smi data")?;
 
         let processes = self.get_gpu_processes().await.unwrap_or_default();
 
@@ -265,8 +265,7 @@ impl GpuMonitor {
 
         let output = self.ps.execute(script).await?;
         let trimmed = output.trim_start_matches('\u{feff}').trim();
-        let info: GpuInfo = serde_json::from_str(trimmed)
-            .context("Failed to parse GPU info")?;
+        let info: GpuInfo = serde_json::from_str(trimmed).context("Failed to parse GPU info")?;
 
         let processes = self.get_gpu_processes().await.unwrap_or_default();
 
@@ -332,8 +331,8 @@ impl GpuMonitor {
         "#;
 
         let output = self.ps.execute(script).await?;
-        let processes: Vec<GpuProcessSample> = parse_json_array(&output)
-            .context("Failed to parse GPU process list")?;
+        let processes: Vec<GpuProcessSample> =
+            parse_json_array(&output).context("Failed to parse GPU process list")?;
         if processes.is_empty() {
             return Ok(Vec::new());
         }
@@ -431,8 +430,8 @@ impl GpuMonitor {
         "#;
 
         let output = self.ps.execute(script).await?;
-        let processes: Vec<GpuProcessSample> = parse_json_array(&output)
-            .context("Failed to parse GPU process list")?;
+        let processes: Vec<GpuProcessSample> =
+            parse_json_array(&output).context("Failed to parse GPU process list")?;
         if processes.is_empty() {
             return Ok(Vec::new());
         }
@@ -456,14 +455,10 @@ impl GpuMonitor {
     // Linux-specific nvidia-smi implementation
     #[allow(dead_code)]
     async fn get_nvidia_smi_linux(&self) -> Result<GpuData> {
-        use std::process::Command;
-
-        let output = Command::new("nvidia-smi")
-            .args(&[
-                "--query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version",
-                "--format=csv,noheader,nounits"
-            ])
-            .output()?;
+        let output = self.run_nvidia_smi([
+            "--query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,fan.speed,clocks.current.graphics,clocks.current.memory,driver_version",
+            "--format=csv,noheader,nounits",
+        ])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = stdout.trim().split(',').map(|s| s.trim()).collect();
@@ -513,14 +508,10 @@ impl GpuMonitor {
 
     #[allow(dead_code)]
     async fn get_gpu_processes_linux(&self) -> Result<Vec<GpuProcessInfo>> {
-        use std::process::Command;
-
-        let output = Command::new("nvidia-smi")
-            .args(&[
-                "--query-compute-apps=pid,process_name,used_memory",
-                "--format=csv,noheader,nounits"
-            ])
-            .output()?;
+        let output = self.run_nvidia_smi([
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if stdout.trim().is_empty() {
@@ -549,6 +540,24 @@ impl GpuMonitor {
     }
 
     #[allow(dead_code)]
+
+    fn run_nvidia_smi<I, S>(&self, args: I) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S> + Clone,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        for cmd in ["nvidia-smi", "nvdia-smi"] {
+            let output = std::process::Command::new(cmd).args(args.clone()).output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    return Ok(out);
+                }
+            }
+        }
+
+        anyhow::bail!("nvidia-smi command not found or failed")
+    }
+
     fn get_stub_gpu_data(&self) -> GpuData {
         GpuData {
             name: "No GPU detected".to_string(),
