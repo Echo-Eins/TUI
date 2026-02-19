@@ -1,7 +1,7 @@
 //! Cardputer Remote Desktop Server - Main Entry Point
 //!
 //! Usage:
-//!   TUI [OPTIONS]
+//!   cardputer-remote [OPTIONS]
 //!
 //! Options:
 //!   -c, --config <FILE>  Path to config file (default: config.toml)
@@ -71,9 +71,9 @@ impl Args {
     }
 
     fn print_help() {
-        println!("TUI+ Remote Desktop Server v{}", VERSION);
+        println!("Cardputer Remote Desktop Server v{}", VERSION);
         println!();
-        println!("Usage: TUI [OPTIONS]");
+        println!("Usage: {} [OPTIONS]", executable_name());
         println!();
         println!("Options:");
         println!("  -c, --config <FILE>  Path to config file (default: config.toml)");
@@ -138,7 +138,7 @@ impl App {
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("TUI+ Remote Desktop Server v{}", VERSION);
+        info!("Cardputer Remote Desktop Server v{}", VERSION);
         info!("Protocol version: {}", cardputer_remote::PROTOCOL_VERSION);
         info!("Listening on port {}", self.config.server.port);
 
