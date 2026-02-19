@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::process::Command;
+use std::time::Instant;
 
 pub struct LinuxSysMonitor;
 
@@ -94,6 +95,14 @@ impl LinuxSysMonitor {
         let mut free = 0;
         let mut buffers = 0;
         let mut cached = 0;
+        let mut active = 0;
+        let mut inactive = 0;
+        let mut dirty = 0;
+        let mut shmem = 0;
+        let mut sreclaimable = 0;
+        let mut slab = 0;
+        let mut commit_limit = 0;
+        let mut committed_as = 0;
         let mut swap_total = 0;
         let mut swap_free = 0;
 
@@ -111,6 +120,14 @@ impl LinuxSysMonitor {
                 "MemFree:" => free = value * 1024,
                 "Buffers:" => buffers = value * 1024,
                 "Cached:" => cached = value * 1024,
+                "Active:" => active = value * 1024,
+                "Inactive:" => inactive = value * 1024,
+                "Dirty:" => dirty = value * 1024,
+                "Shmem:" => shmem = value * 1024,
+                "SReclaimable:" => sreclaimable = value * 1024,
+                "Slab:" => slab = value * 1024,
+                "CommitLimit:" => commit_limit = value * 1024,
+                "Committed_AS:" => committed_as = value * 1024,
                 "SwapTotal:" => swap_total = value * 1024,
                 "SwapFree:" => swap_free = value * 1024,
                 _ => {}
@@ -126,7 +143,16 @@ impl LinuxSysMonitor {
             free,
             buffers,
             cached,
+            active,
+            inactive,
+            dirty,
+            shmem,
+            sreclaimable,
+            slab,
+            commit_limit,
+            committed_as,
             swap_total,
+            swap_free,
             swap_used: swap_total - swap_free,
         })
     }
@@ -134,13 +160,14 @@ impl LinuxSysMonitor {
     // Disk functions
     pub fn get_disk_info(&self) -> Result<Vec<DiskInfo>> {
         let output = Command::new("df")
-            .args(&["-B1", "-T"])  // Block size 1 byte, show type
+            .args(&["-B1", "-T"]) // Block size 1 byte, show type
             .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut disks = Vec::new();
 
-        for line in stdout.lines().skip(1) {  // Skip header
+        for line in stdout.lines().skip(1) {
+            // Skip header
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 7 {
                 continue;
@@ -154,7 +181,11 @@ impl LinuxSysMonitor {
             let mount_point = parts[6].to_string();
 
             // Skip special filesystems
-            if fs_type == "tmpfs" || fs_type == "devtmpfs" || mount_point.starts_with("/sys") || mount_point.starts_with("/proc") {
+            if fs_type == "tmpfs"
+                || fs_type == "devtmpfs"
+                || mount_point.starts_with("/sys")
+                || mount_point.starts_with("/proc")
+            {
                 continue;
             }
 
@@ -171,12 +202,150 @@ impl LinuxSysMonitor {
         Ok(disks)
     }
 
+    pub fn get_block_devices(&self) -> Result<Vec<BlockDeviceInfo>> {
+        let output = Command::new("lsblk")
+            .args([
+                "-b",
+                "-J",
+                "-o",
+                "NAME,MODEL,TYPE,SIZE,ROTA,TRAN,FSTYPE,MOUNTPOINT,PKNAME",
+            ])
+            .output()
+            .context("Failed to run lsblk")?;
+
+        if !output.status.success() {
+            anyhow::bail!("lsblk failed with status {}", output.status);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let root: LsblkRoot =
+            serde_json::from_str(&stdout).context("Failed to parse lsblk json")?;
+
+        let mut result = Vec::new();
+        for device in root.blockdevices {
+            Self::flatten_block_device(None, device, &mut result);
+        }
+
+        Ok(result)
+    }
+
+    fn flatten_block_device(
+        parent: Option<String>,
+        device: LsblkEntry,
+        result: &mut Vec<BlockDeviceInfo>,
+    ) {
+        let name = device.name;
+        let parent_name = device.pkname.or(parent);
+
+        result.push(BlockDeviceInfo {
+            name: name.clone(),
+            model: device.model.unwrap_or_default(),
+            dev_type: device.dev_type,
+            size: device.size.unwrap_or(0),
+            rotational: device.rota.unwrap_or(false),
+            transport: device.tran.unwrap_or_default(),
+            filesystem: device.fstype,
+            mount_point: device.mountpoint,
+            parent: parent_name.clone(),
+        });
+
+        if let Some(children) = device.children {
+            for child in children {
+                Self::flatten_block_device(Some(name.clone()), child, result);
+            }
+        }
+    }
+
+    pub fn get_disk_stats(&self) -> Result<Vec<RawDiskStats>> {
+        let content = fs::read_to_string("/proc/diskstats")?;
+        let mut stats = Vec::new();
+
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 14 {
+                continue;
+            }
+
+            let name = parts[2].to_string();
+            if name.starts_with("loop") || name.starts_with("ram") {
+                continue;
+            }
+
+            stats.push(RawDiskStats {
+                name,
+                reads_completed: parts[3].parse().unwrap_or(0),
+                sectors_read: parts[5].parse().unwrap_or(0),
+                ms_reading: parts[6].parse().unwrap_or(0),
+                writes_completed: parts[7].parse().unwrap_or(0),
+                sectors_written: parts[9].parse().unwrap_or(0),
+                ms_writing: parts[10].parse().unwrap_or(0),
+                io_in_progress: parts[11].parse().unwrap_or(0),
+                ms_doing_io: parts[12].parse().unwrap_or(0),
+            });
+        }
+
+        Ok(stats)
+    }
+
+    pub fn get_process_io_samples(&self) -> Result<Vec<ProcessIoSample>> {
+        let mut out = Vec::new();
+        let now = Instant::now();
+
+        for entry in fs::read_dir("/proc")? {
+            let entry = match entry {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let file_name = entry.file_name();
+            let file_name = match file_name.to_str() {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let pid = match file_name.parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let io_path = format!("/proc/{pid}/io");
+            let io_content = match fs::read_to_string(io_path) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let mut read_bytes = 0u64;
+            let mut write_bytes = 0u64;
+            for line in io_content.lines() {
+                if let Some(value) = line.strip_prefix("read_bytes:") {
+                    read_bytes = value.trim().parse().unwrap_or(0);
+                } else if let Some(value) = line.strip_prefix("write_bytes:") {
+                    write_bytes = value.trim().parse().unwrap_or(0);
+                }
+            }
+
+            let name = fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            out.push(ProcessIoSample {
+                pid,
+                name,
+                read_bytes,
+                write_bytes,
+                timestamp: now,
+            });
+        }
+
+        Ok(out)
+    }
+
     // Network functions
     pub fn get_network_stats(&self) -> Result<Vec<NetworkInterface>> {
         let content = fs::read_to_string("/proc/net/dev")?;
         let mut interfaces = Vec::new();
 
-        for line in content.lines().skip(2) {  // Skip first 2 header lines
+        for line in content.lines().skip(2) {
+            // Skip first 2 header lines
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.is_empty() {
                 continue;
@@ -256,10 +425,11 @@ impl LinuxSysMonitor {
         // Read memory from statm
         let statm_path = format!("/proc/{}/statm", pid);
         let memory = if let Ok(statm) = fs::read_to_string(&statm_path) {
-            let pages: Vec<u64> = statm.split_whitespace()
+            let pages: Vec<u64> = statm
+                .split_whitespace()
                 .filter_map(|s| s.parse().ok())
                 .collect();
-            pages.get(1).unwrap_or(&0) * 4096  // RSS in pages * page size (4096)
+            pages.get(1).unwrap_or(&0) * 4096 // RSS in pages * page size (4096)
         } else {
             0
         };
@@ -306,7 +476,16 @@ pub struct MemoryInfo {
     pub free: u64,
     pub buffers: u64,
     pub cached: u64,
+    pub active: u64,
+    pub inactive: u64,
+    pub dirty: u64,
+    pub shmem: u64,
+    pub sreclaimable: u64,
+    pub slab: u64,
+    pub commit_limit: u64,
+    pub committed_as: u64,
     pub swap_total: u64,
+    pub swap_free: u64,
     pub swap_used: u64,
 }
 
@@ -318,6 +497,70 @@ pub struct DiskInfo {
     pub used: u64,
     pub available: u64,
     pub fs_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDeviceInfo {
+    pub name: String,
+    pub model: String,
+    pub dev_type: String,
+    pub size: u64,
+    pub rotational: bool,
+    pub transport: String,
+    pub filesystem: Option<String>,
+    pub mount_point: Option<String>,
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawDiskStats {
+    pub name: String,
+    pub reads_completed: u64,
+    pub sectors_read: u64,
+    pub ms_reading: u64,
+    pub writes_completed: u64,
+    pub sectors_written: u64,
+    pub ms_writing: u64,
+    pub io_in_progress: u64,
+    pub ms_doing_io: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessIoSample {
+    pub pid: u32,
+    pub name: String,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub timestamp: Instant,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LsblkRoot {
+    blockdevices: Vec<LsblkEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LsblkEntry {
+    #[serde(rename = "name")]
+    name: String,
+    #[serde(rename = "model")]
+    model: Option<String>,
+    #[serde(rename = "type")]
+    dev_type: String,
+    #[serde(rename = "size")]
+    size: Option<u64>,
+    #[serde(rename = "rota")]
+    rota: Option<bool>,
+    #[serde(rename = "tran")]
+    tran: Option<String>,
+    #[serde(rename = "fstype")]
+    fstype: Option<String>,
+    #[serde(rename = "mountpoint")]
+    mountpoint: Option<String>,
+    #[serde(rename = "pkname")]
+    pkname: Option<String>,
+    #[serde(rename = "children")]
+    children: Option<Vec<LsblkEntry>>,
 }
 
 #[derive(Debug)]
