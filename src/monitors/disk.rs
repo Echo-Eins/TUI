@@ -1,7 +1,9 @@
+use crate::integrations::{LinuxSysMonitor, PowerShellExecutor};
+use crate::integrations::{ProcessIoSample, RawDiskStats};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 use std::collections::VecDeque;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskData {
@@ -15,13 +17,13 @@ pub struct DiskData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskIOStats {
     pub disk_number: u32,
-    pub read_speed: f64,       // MB/s
-    pub write_speed: f64,      // MB/s
-    pub read_iops: f64,        // Operations per second
-    pub write_iops: f64,       // Operations per second
-    pub queue_depth: f64,      // Average queue length
-    pub avg_response_time: f64,// Milliseconds
-    pub active_time: f64,      // Percentage
+    pub read_speed: f64,        // MB/s
+    pub write_speed: f64,       // MB/s
+    pub read_iops: f64,         // Operations per second
+    pub write_iops: f64,        // Operations per second
+    pub queue_depth: f64,       // Average queue length
+    pub avg_response_time: f64, // Milliseconds
+    pub active_time: f64,       // Percentage
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,9 +38,9 @@ pub struct DiskProcessActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskIOHistory {
     pub disk_number: u32,
-    pub read_history: VecDeque<f64>,   // Last 60 samples of read speed
-    pub write_history: VecDeque<f64>,  // Last 60 samples of write speed
-    pub iops_history: VecDeque<f64>,   // Last 60 samples of total IOPS
+    pub read_history: VecDeque<f64>,  // Last 60 samples of read speed
+    pub write_history: VecDeque<f64>, // Last 60 samples of write speed
+    pub iops_history: VecDeque<f64>,  // Last 60 samples of total IOPS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,21 +48,21 @@ pub struct PhysicalDiskInfo {
     pub disk_number: u32,
     pub friendly_name: String,
     pub model: String,
-    pub media_type: String,      // HDD, SSD, NVMe
-    pub bus_type: String,         // SATA, NVMe, USB, etc.
+    pub media_type: String, // HDD, SSD, NVMe
+    pub bus_type: String,   // SATA, NVMe, USB, etc.
     pub size: u64,
-    pub health_status: String,    // Healthy, Warning, Unhealthy
+    pub health_status: String, // Healthy, Warning, Unhealthy
     pub operational_status: String,
     pub temperature: Option<f32>,
     pub write_cache_enabled: bool,
 
     // SMART data
     pub power_on_hours: Option<u64>,
-    pub tbw: Option<u64>,         // Total Bytes Written (for SSD)
-    pub wear_level: Option<f32>,  // Wear leveling percentage
+    pub tbw: Option<u64>,        // Total Bytes Written (for SSD)
+    pub wear_level: Option<f32>, // Wear leveling percentage
 
     // Associated logical drives
-    pub partitions: Vec<String>,  // Drive letters (C:, D:, etc.)
+    pub partitions: Vec<String>, // Drive letters (C:, D:, etc.)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +81,13 @@ pub struct DiskMonitor {
     ps: PowerShellExecutor,
     #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
-    io_history_map: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u32, DiskIOHistory>>>,
+    io_history_map:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u32, DiskIOHistory>>>,
+    linux_diskstats_prev:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, RawDiskStats>>>,
+    linux_diskstats_ts: std::sync::Arc<parking_lot::Mutex<Option<Instant>>>,
+    linux_proc_io_prev:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u32, ProcessIoSample>>>,
 }
 
 const PHYSICAL_DISKS_SCRIPT: &str = r#"
@@ -376,7 +384,16 @@ impl DiskMonitor {
         Ok(Self {
             ps,
             linux_sys: LinuxSysMonitor::new(),
-            io_history_map: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            io_history_map: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            linux_diskstats_prev: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            linux_diskstats_ts: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            linux_proc_io_prev: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -395,6 +412,47 @@ impl DiskMonitor {
     #[allow(dead_code)]
     async fn collect_data_linux(&self) -> Result<DiskData> {
         let disks = self.linux_sys.get_disk_info()?;
+        let block_devices = self.linux_sys.get_block_devices().unwrap_or_default();
+        let disk_stats = self.linux_sys.get_disk_stats().unwrap_or_default();
+        let process_samples = self.linux_sys.get_process_io_samples().unwrap_or_default();
+
+        let physical_disks: Vec<PhysicalDiskInfo> = block_devices
+            .iter()
+            .filter(|d| d.dev_type == "disk")
+            .enumerate()
+            .map(|(idx, d)| PhysicalDiskInfo {
+                disk_number: idx as u32,
+                friendly_name: if d.model.trim().is_empty() {
+                    d.name.clone()
+                } else {
+                    d.model.clone()
+                },
+                model: d.model.clone(),
+                media_type: if d.rotational {
+                    "HDD".to_string()
+                } else {
+                    "SSD/NVMe".to_string()
+                },
+                bus_type: if d.transport.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    d.transport.clone()
+                },
+                size: d.size,
+                health_status: "Unknown".to_string(),
+                operational_status: "Online".to_string(),
+                temperature: None,
+                write_cache_enabled: false,
+                power_on_hours: None,
+                tbw: None,
+                wear_level: None,
+                partitions: block_devices
+                    .iter()
+                    .filter(|child| child.parent.as_deref() == Some(d.name.as_str()))
+                    .filter_map(|child| child.mount_point.clone())
+                    .collect(),
+            })
+            .collect();
 
         let logical_drives: Vec<DriveInfo> = disks
             .iter()
@@ -406,17 +464,159 @@ impl DiskMonitor {
                 total: d.total,
                 used: d.used,
                 free: d.available,
-                disk_number: Some(0),
+                disk_number: None,
             })
             .collect();
 
+        let io_stats = self.compute_linux_io_stats(&disk_stats);
+        let process_activity = self.compute_linux_process_activity(&process_samples);
+        self.update_io_history(&io_stats);
+        let io_history = self.io_history_map.lock().values().cloned().collect();
+
         Ok(DiskData {
-            physical_disks: Vec::new(),
+            physical_disks,
             logical_drives,
-            io_stats: Vec::new(),
-            process_activity: Vec::new(),
-            io_history: Vec::new(),
+            io_stats,
+            process_activity,
+            io_history,
         })
+    }
+
+    fn compute_linux_io_stats(&self, current_stats: &[RawDiskStats]) -> Vec<DiskIOStats> {
+        let now = Instant::now();
+        let mut prev_map = self.linux_diskstats_prev.lock();
+        let mut prev_ts = self.linux_diskstats_ts.lock();
+        let elapsed = prev_ts
+            .map(|ts| now.saturating_duration_since(ts).as_secs_f64())
+            .unwrap_or(0.0);
+
+        let mut out = Vec::new();
+        for (idx, stat) in current_stats.iter().enumerate() {
+            let mut read_speed = 0.0;
+            let mut write_speed = 0.0;
+            let mut read_iops = 0.0;
+            let mut write_iops = 0.0;
+            let mut avg_response_time = 0.0;
+
+            if elapsed > 0.0 {
+                if let Some(prev) = prev_map.get(&stat.name) {
+                    let delta_read_sectors = stat.sectors_read.saturating_sub(prev.sectors_read);
+                    let delta_write_sectors =
+                        stat.sectors_written.saturating_sub(prev.sectors_written);
+                    let delta_reads = stat.reads_completed.saturating_sub(prev.reads_completed);
+                    let delta_writes = stat.writes_completed.saturating_sub(prev.writes_completed);
+
+                    read_speed = (delta_read_sectors as f64 * 512.0) / (1024.0 * 1024.0) / elapsed;
+                    write_speed =
+                        (delta_write_sectors as f64 * 512.0) / (1024.0 * 1024.0) / elapsed;
+                    read_iops = delta_reads as f64 / elapsed;
+                    write_iops = delta_writes as f64 / elapsed;
+
+                    let delta_ms = stat.ms_reading.saturating_sub(prev.ms_reading)
+                        + stat.ms_writing.saturating_sub(prev.ms_writing);
+                    let total_ios = delta_reads + delta_writes;
+                    if total_ios > 0 {
+                        avg_response_time = delta_ms as f64 / total_ios as f64;
+                    }
+                }
+            }
+
+            out.push(DiskIOStats {
+                disk_number: idx as u32,
+                read_speed,
+                write_speed,
+                read_iops,
+                write_iops,
+                queue_depth: stat.io_in_progress as f64,
+                avg_response_time,
+                active_time: 0.0,
+            });
+        }
+
+        prev_map.clear();
+        for stat in current_stats {
+            prev_map.insert(stat.name.clone(), stat.clone());
+        }
+        *prev_ts = Some(now);
+
+        out
+    }
+
+    fn compute_linux_process_activity(
+        &self,
+        current: &[ProcessIoSample],
+    ) -> Vec<DiskProcessActivity> {
+        let mut prev = self.linux_proc_io_prev.lock();
+        let mut out = Vec::new();
+
+        for sample in current {
+            if let Some(old) = prev.get(&sample.pid) {
+                let dt = sample
+                    .timestamp
+                    .saturating_duration_since(old.timestamp)
+                    .as_secs_f64();
+                if dt > 0.0 {
+                    let delta_read = sample.read_bytes.saturating_sub(old.read_bytes) as f64;
+                    let delta_write = sample.write_bytes.saturating_sub(old.write_bytes) as f64;
+                    let read_per_sec = delta_read / dt;
+                    let write_per_sec = delta_write / dt;
+                    let total = read_per_sec + write_per_sec;
+
+                    if total > 0.0 {
+                        out.push(DiskProcessActivity {
+                            process_name: sample.name.clone(),
+                            pid: sample.pid,
+                            io_bytes_per_sec: total,
+                            read_bytes_per_sec: read_per_sec,
+                            write_bytes_per_sec: write_per_sec,
+                        });
+                    }
+                }
+            }
+        }
+
+        prev.clear();
+        for sample in current {
+            prev.insert(sample.pid, sample.clone());
+        }
+
+        out.sort_by(|a, b| {
+            b.io_bytes_per_sec
+                .partial_cmp(&a.io_bytes_per_sec)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(10);
+        out
+    }
+
+    fn update_io_history(&self, io_stats: &[DiskIOStats]) {
+        let mut history_map = self.io_history_map.lock();
+        for stat in io_stats {
+            let history = history_map
+                .entry(stat.disk_number)
+                .or_insert_with(|| DiskIOHistory {
+                    disk_number: stat.disk_number,
+                    read_history: VecDeque::with_capacity(60),
+                    write_history: VecDeque::with_capacity(60),
+                    iops_history: VecDeque::with_capacity(60),
+                });
+
+            history.read_history.push_back(stat.read_speed);
+            history.write_history.push_back(stat.write_speed);
+            history
+                .iops_history
+                .push_back(stat.read_iops + stat.write_iops);
+
+            if history.read_history.len() > 60 {
+                history.read_history.pop_front();
+            }
+            if history.write_history.len() > 60 {
+                history.write_history.pop_front();
+            }
+            if history.iops_history.len() > 60 {
+                history.iops_history.pop_front();
+            }
+        }
     }
 
     async fn collect_data_windows(&self) -> Result<DiskData> {
@@ -451,7 +651,9 @@ impl DiskMonitor {
             // Add new data points
             history.read_history.push_back(stat.read_speed);
             history.write_history.push_back(stat.write_speed);
-            history.iops_history.push_back(stat.read_iops + stat.write_iops);
+            history
+                .iops_history
+                .push_back(stat.read_iops + stat.write_iops);
 
             // Keep only last 60 samples
             if history.read_history.len() > 60 {
@@ -489,8 +691,8 @@ impl DiskMonitor {
         let disks: Vec<PhysicalDiskSample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse physical disks")?
         } else {
-            let single: PhysicalDiskSample = serde_json::from_str(output)
-                .context("Failed to parse single physical disk")?;
+            let single: PhysicalDiskSample =
+                serde_json::from_str(output).context("Failed to parse single physical disk")?;
             vec![single]
         };
 
@@ -533,8 +735,8 @@ impl DiskMonitor {
         let drives: Vec<DriveSample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse logical drives")?
         } else {
-            let single: DriveSample = serde_json::from_str(output)
-                .context("Failed to parse single logical drive")?;
+            let single: DriveSample =
+                serde_json::from_str(output).context("Failed to parse single logical drive")?;
             vec![single]
         };
 
@@ -571,8 +773,8 @@ impl DiskMonitor {
         let stats: Vec<IOStatsSample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse I/O stats")?
         } else {
-            let single: IOStatsSample = serde_json::from_str(output)
-                .context("Failed to parse single I/O stat")?;
+            let single: IOStatsSample =
+                serde_json::from_str(output).context("Failed to parse single I/O stat")?;
             vec![single]
         };
 
@@ -609,8 +811,8 @@ impl DiskMonitor {
         let activities: Vec<ProcessActivitySample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse process activity")?
         } else {
-            let single: ProcessActivitySample = serde_json::from_str(output)
-                .context("Failed to parse single process activity")?;
+            let single: ProcessActivitySample =
+                serde_json::from_str(output).context("Failed to parse single process activity")?;
             vec![single]
         };
 
