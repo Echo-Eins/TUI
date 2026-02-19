@@ -3,6 +3,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // Embedded default configuration that can be written next to the executable
@@ -275,19 +276,25 @@ impl Config {
 pub struct ConfigManager {
     config: Arc<RwLock<Config>>,
     config_path: std::path::PathBuf,
+    version: AtomicU64,
 }
 
 impl ConfigManager {
-    pub fn new(config: Config, config_path: std::path::PathBuf) -> Arc<Self> {
+    pub fn new(config: Arc<RwLock<Config>>, config_path: std::path::PathBuf) -> Arc<Self> {
         Arc::new(Self {
-            config: Arc::new(RwLock::new(config)),
+            config,
             config_path,
+            version: AtomicU64::new(0),
         })
     }
 
     #[allow(dead_code)]
     pub fn get_config(&self) -> Arc<RwLock<Config>> {
         Arc::clone(&self.config)
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
     }
 
     pub fn watch(self: Arc<Self>) -> Result<()> {
@@ -305,6 +312,7 @@ impl ConfigManager {
 
         let config = Arc::clone(&self.config);
         let config_path = self.config_path.clone();
+        let manager = Arc::clone(&self);
 
         // Spawn watcher thread
         std::thread::spawn(move || {
@@ -323,6 +331,7 @@ impl ConfigManager {
                                 match Config::load(&config_path) {
                                     Ok(new_config) => {
                                         *config.write() = new_config;
+                                        manager.version.fetch_add(1, Ordering::Relaxed);
                                         log::info!("Configuration reloaded successfully");
                                     }
                                     Err(e) => {

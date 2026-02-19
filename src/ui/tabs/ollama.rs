@@ -642,22 +642,28 @@ fn render_chat_view(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 fn format_chat_lines(messages: &[crate::app::state::ChatMessage]) -> Vec<Line<'_>> {
     let mut lines = Vec::new();
     for message in messages {
-        let (label, color) = match message.role {
-            ChatRole::User => ("You:", Color::Cyan),
-            ChatRole::Assistant => ("Assistant:", Color::Magenta),
+        let (label, color, text_color) = match message.role {
+            ChatRole::User => ("You:", Color::Cyan, Color::White),
+            ChatRole::Assistant => {
+                if message.text.trim_start().starts_with("Error:") {
+                    ("Assistant Error:", Color::Red, Color::Red)
+                } else {
+                    ("Assistant:", Color::Magenta, Color::White)
+                }
+            }
         };
         let mut message_lines = message.text.lines();
         if let Some(first) = message_lines.next() {
             lines.push(Line::from(vec![
                 Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 Span::raw(" "),
-                Span::styled(first, Style::default().fg(Color::White)),
+                Span::styled(first, Style::default().fg(text_color)),
             ]));
         }
         for line in message_lines {
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(line, Style::default().fg(Color::White)),
+                Span::styled(line, Style::default().fg(text_color)),
             ]));
         }
         lines.push(Line::from(""));
@@ -1512,7 +1518,6 @@ fn centered_rect(percent_width: u16, percent_height: u16, area: Rect) -> Rect {
 
     horizontal_layout[1]
 }
-
 
 
 

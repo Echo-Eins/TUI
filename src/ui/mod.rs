@@ -148,10 +148,12 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let help_text = if app.state.command_input.is_empty() {
-        "[F1] Help │ [F2] Compact │ [Tab] Next │ [Ctrl+F] History │ [Ctrl+C] Exit"
+    let help_text = if app.state.command_menu_active {
+        "History: [Up/Down] Select │ [Enter] Use │ [Esc] Close"
+    } else if app.state.command_input.is_empty() {
+        "[Type] Command │ [Up/Down] History │ [F2] Compact │ [Tab] Next │ [Ctrl+F] History │ [Ctrl+C] Exit"
     } else {
-        &format!("Command: {} [Enter] Execute [Esc] Cancel", app.state.command_input)
+        &format!("Command: {}_ [Enter] Execute [Esc] Cancel", app.state.command_input)
     };
 
     let block = Block::default().borders(Borders::ALL);

@@ -36,6 +36,16 @@ impl CommandHistory {
         self.selected_index = 0;
     }
 
+    pub fn set_max_size(&mut self, max_size: usize) {
+        self.max_size = max_size;
+        while self.commands.len() > self.max_size {
+            self.commands.pop_back();
+        }
+        if self.selected_index >= self.commands.len() {
+            self.selected_index = 0;
+        }
+    }
+
     pub fn get_selected(&self) -> Option<&String> {
         self.commands.get(self.selected_index)
     }

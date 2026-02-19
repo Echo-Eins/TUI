@@ -10,8 +10,9 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use super::{monitors_task, Config, TabManager, TabType};
+use super::{monitors_task, Config, ConfigManager, TabManager, TabType};
 use crate::integrations::{ChatLogMetadata, OllamaClient, OllamaData, PowerShellExecutor};
 use crate::integrations::ollama::{OllamaModel, RunningModel};
 use crate::monitors::{
@@ -19,6 +20,13 @@ use crate::monitors::{
 };
 use crate::utils::command_history::CommandHistory;
 use std::fs;
+
+#[derive(Debug)]
+enum AsyncUpdate {
+    OllamaCommandCompleted { title: String, lines: Vec<String> },
+    OllamaChatCompleted { response: String },
+    OllamaChatFailed { error: String },
+}
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
@@ -75,6 +83,10 @@ pub struct AppState {
 
     // Ollama UI state
     pub ollama_state: OllamaUIState,
+
+    async_tx: UnboundedSender<AsyncUpdate>,
+    async_rx: UnboundedReceiver<AsyncUpdate>,
+    last_config_version: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -262,6 +274,8 @@ pub struct OllamaUIState {
     pub paused_chats: Vec<ChatSession>,
     pub pending_delete: Option<OllamaDeleteTarget>,
     pub show_delete_confirm: bool,
+    pub chat_pending: bool,
+    pub command_pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +299,63 @@ impl AppState {
         Self::allow_with_throttle(&mut self.last_nav_input, Duration::from_millis(120))
     }
 
+    pub fn apply_config_updates(&mut self, manager: Option<&ConfigManager>) {
+        let Some(manager) = manager else {
+            return;
+        };
+
+        let version = manager.version();
+        if version == self.last_config_version {
+            return;
+        }
+
+        self.last_config_version = version;
+        let config_snapshot = self.config.read().clone();
+        let current_tab = self.tab_manager.current();
+        let mut new_tabs =
+            TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
+        new_tabs.select(current_tab);
+        self.tab_manager = new_tabs;
+        self.compact_mode = config_snapshot.general.compact_mode;
+        self.command_history
+            .set_max_size(config_snapshot.ui.command_history.max_entries);
+    }
+
+    fn apply_async_updates(&mut self) {
+        while let Ok(update) = self.async_rx.try_recv() {
+            match update {
+                AsyncUpdate::OllamaCommandCompleted { title, lines } => {
+                    self.ollama_state.activity_view = OllamaActivityView::Log;
+                    self.ollama_state.activity_log_lines = lines;
+                    self.ollama_state.activity_log_title = title;
+                    self.ollama_state.activity_log_scroll = 0;
+                    self.ollama_state.focused_panel = OllamaPanelFocus::Activity;
+                    self.ollama_state.command_pending = false;
+                    self.close_activity_additions();
+                }
+                AsyncUpdate::OllamaChatCompleted { response } => {
+                    self.ollama_state.chat_pending = false;
+                    if self.ollama_state.chat_active && !response.is_empty() {
+                        self.ollama_state.chat_messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            text: response,
+                        });
+                        self.ollama_state.chat_scroll = usize::MAX;
+                    }
+                }
+                AsyncUpdate::OllamaChatFailed { error } => {
+                    self.ollama_state.chat_pending = false;
+                    if self.ollama_state.chat_active {
+                        self.ollama_state.chat_messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            text: format!("Error: {error}"),
+                        });
+                        self.ollama_state.chat_scroll = usize::MAX;
+                    }
+                }
+            }
+        }
+    }
     fn allow_horizontal_nav(&mut self) -> bool {
         Self::allow_with_throttle(
             &mut self.last_horizontal_nav_input,
@@ -668,6 +739,7 @@ impl AppState {
         self.ollama_state.chat_prompt_scroll = 0;
         self.ollama_state.chat_prompt_height =
             self.suggested_chat_prompt_height(self.terminal_size.1);
+        self.ollama_state.chat_pending = false;
         self.ollama_state.input_mode = OllamaInputMode::Chat;
         self.ollama_state.input_buffer.clear();
         self.ollama_state.focused_panel = OllamaPanelFocus::Input;
@@ -737,6 +809,7 @@ impl AppState {
         self.ollama_state.active_chat_model = None;
         self.ollama_state.chat_messages.clear();
         self.ollama_state.chat_scroll = 0;
+        self.ollama_state.chat_pending = false;
         self.ollama_state.input_mode = OllamaInputMode::None;
         self.ollama_state.input_buffer.clear();
         self.ollama_state.chat_prompt_scroll = 0;
@@ -765,6 +838,7 @@ impl AppState {
         self.ollama_state.active_chat_model = Some(session.model);
         self.ollama_state.chat_messages = session.messages;
         self.ollama_state.chat_scroll = session.chat_scroll;
+        self.ollama_state.chat_pending = false;
         self.ollama_state.input_mode = OllamaInputMode::Chat;
         self.ollama_state.input_buffer = session.prompt_buffer;
         self.ollama_state.chat_prompt_scroll = session.prompt_scroll;
@@ -911,10 +985,14 @@ impl AppState {
         self.ollama_state.chat_scroll = usize::MAX;
     }
 
-    async fn send_ollama_chat_prompt(&mut self, prompt: String) -> Result<()> {
+    fn spawn_ollama_chat_prompt(&mut self, prompt: String) {
+        if self.ollama_state.chat_pending {
+            return;
+        }
+
         let model_name = match self.ollama_state.active_chat_model.clone() {
             Some(name) => name,
-            None => return Ok(()),
+            None => return,
         };
 
         let full_prompt = self.build_chat_prompt(&prompt);
@@ -922,24 +1000,31 @@ impl AppState {
             role: ChatRole::User,
             text: prompt,
         });
-
-        let response = OllamaClient::new(None)?
-            .run_model(&model_name, &full_prompt)
-            .await
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let response = Self::normalize_model_response(&response);
-
-        if !response.is_empty() {
-            self.ollama_state.chat_messages.push(ChatMessage {
-                role: ChatRole::Assistant,
-                text: response,
-            });
-        }
-
         self.ollama_state.chat_scroll = usize::MAX;
-        Ok(())
+        self.ollama_state.chat_pending = true;
+
+        let tx = self.async_tx.clone();
+        tokio::spawn(async move {
+            let response = match OllamaClient::new(None) {
+                Ok(client) => match client.run_model(&model_name, &full_prompt).await {
+                    Ok(text) => Ok(text),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error.to_string()),
+            };
+
+            match response {
+                Ok(text) => {
+                    let normalized = AppState::normalize_model_response(text.trim());
+                    let _ = tx.send(AsyncUpdate::OllamaChatCompleted {
+                        response: normalized,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(AsyncUpdate::OllamaChatFailed { error });
+                }
+            }
+        });
     }
 
     fn normalize_model_response(text: &str) -> String {
@@ -978,6 +1063,7 @@ impl AppState {
         self.ollama_state.chat_scroll = 0;
         self.ollama_state.chat_prompt_scroll = 0;
         self.ollama_state.chat_prompt_height = 3;
+        self.ollama_state.chat_pending = false;
         self.ollama_state.input_mode = OllamaInputMode::None;
         self.ollama_state.input_buffer.clear();
         self.ollama_state.focused_panel = OllamaPanelFocus::Main;
@@ -988,35 +1074,42 @@ impl AppState {
         self.close_activity_additions();
     }
 
-    async fn run_ollama_command(&mut self, command: String) {
-        let title = format!("Command: {}", command);
-        let output = match OllamaClient::new(None) {
-            Ok(client) => match client.execute_command(&command).await {
-                Ok(output) => output,
-                Err(error) => format!("Command failed: {error}"),
-            },
-            Err(error) => format!("Command failed: {error}"),
-        };
-
-        let mut lines: Vec<String> = output.lines().map(|line| line.to_string()).collect();
-        if lines.is_empty() {
-            lines.push("No output".to_string());
+    fn spawn_ollama_command(&mut self, command: String) {
+        if self.ollama_state.command_pending {
+            return;
         }
 
-        self.ollama_state.activity_view = OllamaActivityView::Log;
-        self.ollama_state.activity_log_lines = lines;
-        self.ollama_state.activity_log_title = title;
-        self.ollama_state.activity_log_scroll = 0;
-        self.ollama_state.focused_panel = OllamaPanelFocus::Activity;
-        self.close_activity_additions();
+        self.ollama_state.command_pending = true;
+        let tx = self.async_tx.clone();
+        tokio::spawn(async move {
+            let title = format!("Command: {}", command);
+            let output = match OllamaClient::new(None) {
+                Ok(client) => match client.execute_command(&command).await {
+                    Ok(output) => output,
+                    Err(error) => format!("Command failed: {error}"),
+                },
+                Err(error) => format!("Command failed: {error}"),
+            };
+
+            let mut lines: Vec<String> = output.lines().map(|line| line.to_string()).collect();
+            if lines.is_empty() {
+                lines.push("No output".to_string());
+            }
+
+            let _ = tx.send(AsyncUpdate::OllamaCommandCompleted { title, lines });
+        });
     }
 
-    pub async fn new(config: Config) -> Result<Self> {
-        let tab_manager = TabManager::new(config.tabs.enabled.clone(), &config.tabs.default);
+    pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
+        let config_snapshot = config.read().clone();
+        let tab_manager =
+            TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
 
-        let command_history = CommandHistory::new(config.ui.command_history.max_entries);
+        let command_history = CommandHistory::new(config_snapshot.ui.command_history.max_entries);
 
-        let config = Arc::new(RwLock::new(config));
+        let compact_mode = config_snapshot.general.compact_mode;
+
+        let (async_tx, async_rx) = unbounded_channel();
 
         let cpu_data = Arc::new(RwLock::new(None));
         let cpu_error = Arc::new(RwLock::new(None));
@@ -1064,7 +1157,7 @@ impl AppState {
         Ok(Self {
             config,
             tab_manager,
-            compact_mode: false,
+            compact_mode,
 
             cpu_data,
             cpu_error,
@@ -1160,11 +1253,17 @@ impl AppState {
                 paused_chats: Vec::new(),
                 pending_delete: None,
                 show_delete_confirm: false,
+                chat_pending: false,
+                command_pending: false,
             },
+            async_tx,
+            async_rx,
+            last_config_version: 0,
         })
     }
 
     pub async fn handle_event(&mut self, event: CrosstermEvent) -> Result<bool> {
+        self.apply_async_updates();
         match event {
             CrosstermEvent::Key(key_event) => self.handle_key_event(key_event).await,
             CrosstermEvent::Mouse(mouse_event) => self.handle_mouse_event(mouse_event).await,
@@ -1235,7 +1334,7 @@ impl AppState {
                 KeyCode::Backspace => {
                     self.command_input.pop();
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if key.modifiers.is_empty() => {
                     self.command_input.push(c);
                 }
                 _ => {}
@@ -1800,7 +1899,7 @@ impl AppState {
                         OllamaInputMode::Command => {
                             let command = self.ollama_state.input_buffer.trim().to_string();
                             if !command.is_empty() {
-                                self.run_ollama_command(command).await;
+                                self.spawn_ollama_command(command);
                             }
                             self.ollama_state.input_buffer.clear();
                             self.ollama_state.input_mode = OllamaInputMode::None;
@@ -1808,7 +1907,7 @@ impl AppState {
                         OllamaInputMode::Chat => {
                             let prompt = self.ollama_state.input_buffer.trim().to_string();
                             if !prompt.is_empty() {
-                                let _ = self.send_ollama_chat_prompt(prompt).await;
+                                self.spawn_ollama_chat_prompt(prompt);
                             }
                             self.ollama_state.input_buffer.clear();
                             self.ollama_state.chat_prompt_scroll = 0;
@@ -2482,6 +2581,15 @@ impl AppState {
             _ => {}
         }
 
+        // Start command input from any printable key when no other hotkey consumed it.
+        if is_initial_press && key.modifiers.is_empty() {
+            if let KeyCode::Char(c) = key.code {
+                if !c.is_ascii_digit() {
+                    self.command_input.push(c);
+                }
+            }
+        }
+
         Ok(true)
     }
 
@@ -2506,7 +2614,8 @@ impl AppState {
         }
 
         // Add to history
-        self.command_history.add(self.command_input.clone());
+        let command = self.command_input.clone();
+        self.command_history.add(command.clone());
 
         // Execute PowerShell command
         let ps = PowerShellExecutor::new(
@@ -2516,14 +2625,16 @@ impl AppState {
             self.config.read().powershell.use_cache,
         );
 
-        match ps.execute(&self.command_input).await {
-            Ok(output) => {
-                log::info!("Command output: {}", output);
+        tokio::spawn(async move {
+            match ps.execute(&command).await {
+                Ok(output) => {
+                    log::info!("Command output: {}", output);
+                }
+                Err(e) => {
+                    log::error!("Command failed: {}", e);
+                }
             }
-            Err(e) => {
-                log::error!("Command failed: {}", e);
-            }
-        }
+        });
 
         Ok(())
     }
@@ -2638,10 +2749,3 @@ fn params_sort_key(unit: Option<char>, value: Option<f64>) -> (u8, f64) {
     let val = value.unwrap_or(f64::MAX);
     (rank, val)
 }
-
-
-
-
-
-
-

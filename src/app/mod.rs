@@ -40,9 +40,10 @@ impl App {
         };
 
         let config = Config::load_or_default(&config_path)?;
+        let config = Arc::new(parking_lot::RwLock::new(config));
 
         // Create config manager with hot reload
-        let config_manager = ConfigManager::new(config.clone(), config_path);
+        let config_manager = ConfigManager::new(Arc::clone(&config), config_path);
 
         // Start watching for config changes
         if let Err(e) = config_manager.clone().watch() {
@@ -51,7 +52,7 @@ impl App {
             log::info!("Config hot reload enabled");
         }
 
-        let state = AppState::new(config).await?;
+        let state = AppState::new(Arc::clone(&config)).await?;
 
         Ok(Self {
             state,
@@ -60,6 +61,8 @@ impl App {
     }
 
     pub async fn handle_event(&mut self, event: CrosstermEvent) -> Result<bool> {
+        self.state
+            .apply_config_updates(self.config_manager.as_deref());
         self.state.handle_event(event).await
     }
 }

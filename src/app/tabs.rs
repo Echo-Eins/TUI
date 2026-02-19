@@ -70,10 +70,14 @@ pub struct TabManager {
 
 impl TabManager {
     pub fn new(enabled_tabs: Vec<String>, default_tab: &str) -> Self {
-        let tabs: Vec<TabType> = enabled_tabs
+        let mut tabs: Vec<TabType> = enabled_tabs
             .iter()
             .filter_map(|s| TabType::from_str(s))
             .collect();
+
+        if tabs.is_empty() {
+            tabs = TabType::all();
+        }
 
         let current_index = tabs
             .iter()
@@ -87,14 +91,23 @@ impl TabManager {
     }
 
     pub fn current(&self) -> TabType {
-        self.tabs[self.current_index]
+        self.tabs
+            .get(self.current_index)
+            .copied()
+            .unwrap_or(TabType::Cpu)
     }
 
     pub fn next(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
         self.current_index = (self.current_index + 1) % self.tabs.len();
     }
 
     pub fn previous(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
         if self.current_index == 0 {
             self.current_index = self.tabs.len() - 1;
         } else {
