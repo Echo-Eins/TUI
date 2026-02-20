@@ -66,7 +66,7 @@ fn render_full(
             Constraint::Length(3), // Overall usage
             Constraint::Length(7), // Performance metrics
             Constraint::Length(5), // VRAM usage
-            Constraint::Length(7), // GPU Processes
+            Constraint::Min(7),    // GPU Processes
         ])
         .split(area);
 

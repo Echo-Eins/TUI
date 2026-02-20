@@ -1358,28 +1358,6 @@ impl AppState {
             return Ok(true);
         }
 
-        // Handle command input
-        if !self.command_input.is_empty() {
-            match key.code {
-                KeyCode::Enter if is_initial_press => {
-                    // Execute command
-                    self.execute_command().await?;
-                    self.command_input.clear();
-                }
-                KeyCode::Esc => {
-                    self.command_input.clear();
-                }
-                KeyCode::Backspace => {
-                    self.command_input.pop();
-                }
-                KeyCode::Char(c) if key.modifiers.is_empty() => {
-                    self.command_input.push(c);
-                }
-                _ => {}
-            }
-            return Ok(true);
-        }
-
         // Handle tab-specific hotkeys first
         if self.tab_manager.current() == TabType::Cpu {
             let process_count = self
@@ -2701,29 +2679,7 @@ impl AppState {
             KeyCode::Char('8') => self.tab_manager.select(TabType::Services),
             KeyCode::Char('9') => self.tab_manager.select(TabType::DiskAnalyzer),
             KeyCode::Char('0') => self.tab_manager.select(TabType::Settings),
-            KeyCode::Up if is_initial_press => {
-                // Navigate command history with arrow keys (only when not on Processes tab)
-                self.command_history.previous();
-                if let Some(cmd) = self.command_history.get_selected() {
-                    self.command_input = cmd.clone();
-                }
-            }
-            KeyCode::Down if is_initial_press => {
-                self.command_history.next();
-                if let Some(cmd) = self.command_history.get_selected() {
-                    self.command_input = cmd.clone();
-                }
-            }
             _ => {}
-        }
-
-        // Start command input from any printable key when no other hotkey consumed it.
-        if is_initial_press && key.modifiers.is_empty() {
-            if let KeyCode::Char(c) = key.code {
-                if !c.is_ascii_digit() {
-                    self.command_input.push(c);
-                }
-            }
         }
 
         Ok(true)
@@ -2744,6 +2700,7 @@ impl AppState {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     async fn execute_command(&mut self) -> Result<()> {
         if self.command_input.is_empty() {
             return Ok(());

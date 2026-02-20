@@ -226,11 +226,17 @@ impl CpuMonitor {
             cpu_info.current_frequency_mhz
         };
 
+        // Determine boost state from sysfs (accurate), with frequency-based fallback
+        let boost_active = match self.linux_sys.is_boost_enabled() {
+            Some(enabled) => enabled,
+            None => avg_freq_mhz > cpu_info.base_frequency_mhz * 1.05,
+        };
+
         let frequency = FrequencyInfo {
             base_clock: cpu_info.base_frequency_mhz / 1000.0,
             avg_frequency: avg_freq_mhz / 1000.0,
             max_frequency: cpu_info.max_frequency_mhz / 1000.0,
-            boost_active: avg_freq_mhz > cpu_info.base_frequency_mhz * 1.05,
+            boost_active,
         };
 
         // Get real temperature

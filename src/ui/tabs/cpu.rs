@@ -108,7 +108,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
 
     f.render_widget(gauge, chunks[1]);
 
-    // Core usage
+    // Core/Thread usage
+    let is_hyperthreaded = data.thread_count > data.core_count;
     let core_text: Vec<Line> = data
         .core_usage
         .chunks(2)
@@ -117,8 +118,10 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                 .iter()
                 .map(|core| {
                     let bar = create_progress_bar(core.usage, 15);
+                    let label = if is_hyperthreaded { "Thread" } else { "Core" };
                     Span::raw(format!(
-                        "  Core {:2} [{}] {:>5}     ",
+                        "  {} {:2} [{}] {:>5}     ",
+                        label,
                         core.core_id,
                         bar,
                         format_percentage(core.usage)
@@ -129,8 +132,13 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         })
         .collect();
 
+    let core_title = if is_hyperthreaded {
+        format!("Thread Usage ({} cores / {} threads)", data.core_count, data.thread_count)
+    } else {
+        format!("Core Usage ({} cores)", data.core_count)
+    };
     let core_block = Block::default()
-        .title("Core Usage")
+        .title(core_title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.cpu_color));
 

@@ -346,6 +346,23 @@ impl LinuxSysMonitor {
         None
     }
 
+    /// Check if CPU boost/turbo is enabled via sysfs
+    pub fn is_boost_enabled(&self) -> Option<bool> {
+        // AMD/generic: /sys/devices/system/cpu/cpufreq/boost (1=enabled)
+        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpufreq/boost") {
+            if let Ok(val) = content.trim().parse::<u8>() {
+                return Some(val == 1);
+            }
+        }
+        // Intel pstate: /sys/devices/system/cpu/intel_pstate/no_turbo (0=enabled, 1=disabled)
+        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/intel_pstate/no_turbo") {
+            if let Ok(val) = content.trim().parse::<u8>() {
+                return Some(val == 0);
+            }
+        }
+        None
+    }
+
     /// Get per-core frequencies from sysfs
     pub fn get_per_core_frequencies(&self) -> Vec<f32> {
         let mut freqs = Vec::new();

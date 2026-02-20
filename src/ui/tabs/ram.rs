@@ -130,7 +130,16 @@ fn render_full(
     f.render_widget(gauge, chunks[1]);
 
     // Committed memory gauge
-    let commit_percent = data.commit_percent.min(100.0) as u16;
+    // On Linux, Committed_AS can exceed CommitLimit with overcommit
+    let commit_percent_raw = data.commit_percent;
+    let commit_gauge_pct = (commit_percent_raw.min(100.0).max(0.0)) as u16;
+    let commit_color = if commit_percent_raw > 100.0 {
+        Color::Red
+    } else if commit_percent_raw > 80.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
     let commit_gauge = Gauge::default()
         .block(
             Block::default()
@@ -139,13 +148,13 @@ fn render_full(
         )
         .gauge_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(commit_color)
                 .add_modifier(Modifier::BOLD),
         )
-        .percent(commit_percent)
+        .percent(commit_gauge_pct)
         .label(format!(
-            "{}% - {} / {} (Physical + Pagefile)",
-            commit_percent,
+            "{:.0}% - {} / {} (RAM + Swap)",
+            commit_percent_raw,
             format_bytes(data.committed),
             format_bytes(data.commit_limit)
         ));
