@@ -10,7 +10,7 @@ use std::sync::Arc;
 // when an external config file is missing. This prevents the application from
 // exiting immediately when launched from a location that doesn't include
 // `config.toml` (for example, by double-clicking the compiled binary).
-const DEFAULT_CONFIG: &str = include_str!("../../config.toml");
+const DEFAULT_CONFIG: &str = include_str!("default_config.toml");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -270,7 +270,6 @@ impl Config {
             }
         }
     }
-
 }
 
 pub struct ConfigManager {

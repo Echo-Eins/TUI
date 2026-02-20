@@ -1,17 +1,31 @@
-pub mod state;
 pub mod config;
-pub mod tabs;
 pub mod monitors_task;
+pub mod state;
+pub mod tabs;
 
-pub use state::AppState;
 pub use config::{Config, ConfigManager};
-pub use tabs::{TabType, TabManager};
+pub use state::AppState;
+pub use tabs::{TabManager, TabType};
 
 use anyhow::Result;
 use crossterm::event::Event as CrosstermEvent;
+use std::fs;
 use std::sync::Arc;
 
 use std::env;
+
+fn is_tui_config_file(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return false,
+    };
+
+    content.contains("[general]") && content.contains("[tabs]")
+}
 
 pub struct App {
     pub state: AppState,
@@ -21,22 +35,36 @@ pub struct App {
 
 impl App {
     pub async fn new() -> Result<Self> {
-        let exe_config_path = {
+        let exe_tui_config_path = {
             let mut path = env::current_exe()?;
-            path.set_file_name("config.toml");
+            path.set_file_name("tui-config.toml");
             path
         };
 
         let config_path = match env::current_dir() {
             Ok(cwd) => {
-                let candidate = cwd.join("config.toml");
-                if candidate.exists() {
-                    candidate
+                let cwd_tui_config = cwd.join("tui-config.toml");
+                let cwd_legacy_config = cwd.join("config.toml");
+                let exe_legacy_config = exe_tui_config_path
+                    .parent()
+                    .map(|dir| dir.join("config.toml"));
+
+                if cwd_tui_config.exists() {
+                    cwd_tui_config
+                } else if is_tui_config_file(&cwd_legacy_config) {
+                    cwd_legacy_config
+                } else if exe_tui_config_path.exists() {
+                    exe_tui_config_path.clone()
+                } else if exe_legacy_config
+                    .as_ref()
+                    .is_some_and(|path| is_tui_config_file(path))
+                {
+                    exe_legacy_config.expect("checked is_some_and")
                 } else {
-                    exe_config_path.clone()
+                    cwd_tui_config
                 }
             }
-            Err(_) => exe_config_path.clone(),
+            Err(_) => exe_tui_config_path.clone(),
         };
 
         let config = Config::load_or_default(&config_path)?;
