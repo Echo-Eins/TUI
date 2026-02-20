@@ -69,6 +69,9 @@ pub struct AppState {
     pub last_text_input: Option<Instant>,
     pub terminal_size: (u16, u16),
 
+    // CPU UI state
+    pub cpu_state: CpuUIState,
+
     // GPU UI state
     pub gpu_state: GpuUIState,
 
@@ -87,6 +90,22 @@ pub struct AppState {
     async_tx: UnboundedSender<AsyncUpdate>,
     async_rx: UnboundedReceiver<AsyncUpdate>,
     last_config_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CpuProcessSortColumn {
+    Pid,
+    Name,
+    Cpu,
+    Memory,
+    Threads,
+}
+
+pub struct CpuUIState {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub sort_column: CpuProcessSortColumn,
+    pub sort_ascending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -562,6 +581,18 @@ impl AppState {
         } else {
             self.ollama_state.running_sort_column = column;
             self.ollama_state.running_sort_ascending = true;
+        }
+    }
+
+    fn toggle_cpu_sort(&mut self, column: CpuProcessSortColumn) {
+        if self.cpu_state.sort_column == column {
+            self.cpu_state.sort_ascending = !self.cpu_state.sort_ascending;
+        } else {
+            self.cpu_state.sort_column = column;
+            self.cpu_state.sort_ascending = match column {
+                CpuProcessSortColumn::Name => true,
+                _ => false,
+            };
         }
     }
 
@@ -1191,6 +1222,13 @@ impl AppState {
             last_text_input: None,
             terminal_size: terminal::size().unwrap_or((120, 40)),
 
+            cpu_state: CpuUIState {
+                selected_index: 0,
+                scroll_offset: 0,
+                sort_column: CpuProcessSortColumn::Cpu,
+                sort_ascending: false,
+            },
+
             gpu_state: GpuUIState {
                 selected_index: 0,
                 sort_column: GpuProcessSortColumn::Gpu,
@@ -1343,6 +1381,104 @@ impl AppState {
         }
 
         // Handle tab-specific hotkeys first
+        if self.tab_manager.current() == TabType::Cpu {
+            let process_count = self
+                .cpu_data
+                .read()
+                .as_ref()
+                .map(|d| d.top_processes.len())
+                .unwrap_or(0);
+            match key.code {
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.cpu_state.selected_index > 0 {
+                        self.cpu_state.selected_index -= 1;
+                        if self.cpu_state.selected_index < self.cpu_state.scroll_offset {
+                            self.cpu_state.scroll_offset = self.cpu_state.selected_index;
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.cpu_state.selected_index + 1 < process_count {
+                        self.cpu_state.selected_index += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::PageUp => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    self.cpu_state.selected_index = self.cpu_state.selected_index.saturating_sub(10);
+                    self.cpu_state.scroll_offset = self.cpu_state.selected_index;
+                    return Ok(true);
+                }
+                KeyCode::PageDown => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.cpu_state.selected_index + 10 < process_count {
+                        self.cpu_state.selected_index += 10;
+                    } else if process_count > 0 {
+                        self.cpu_state.selected_index = process_count - 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_cpu_sort(CpuProcessSortColumn::Pid);
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_cpu_sort(CpuProcessSortColumn::Name);
+                    return Ok(true);
+                }
+                KeyCode::Char('c') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_cpu_sort(CpuProcessSortColumn::Cpu);
+                    return Ok(true);
+                }
+                KeyCode::Char('m') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_cpu_sort(CpuProcessSortColumn::Memory);
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    if !is_initial_press || !self.allow_sort_toggle() {
+                        return Ok(true);
+                    }
+                    self.toggle_cpu_sort(CpuProcessSortColumn::Threads);
+                    return Ok(true);
+                }
+                KeyCode::Home => {
+                    self.cpu_state.selected_index = 0;
+                    self.cpu_state.scroll_offset = 0;
+                    return Ok(true);
+                }
+                KeyCode::End => {
+                    if process_count > 0 {
+                        self.cpu_state.selected_index = process_count - 1;
+                    }
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         if self.tab_manager.current() == TabType::Processes {
             match key.code {
                 KeyCode::Up => {

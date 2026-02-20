@@ -59,16 +59,31 @@ fn render_full(
     app: &App,
     theme: &Theme,
 ) {
+    let has_zram = !data.zram_devices.is_empty();
+    let zram_height = if has_zram { 4 + data.zram_devices.len() as u16 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(3), // Overall usage
-            Constraint::Length(3), // Committed memory
-            Constraint::Length(3), // Pagefile gauge
-            Constraint::Length(9), // Memory breakdown
-            Constraint::Min(8),    // Top processes
-        ])
+        .constraints(if has_zram {
+            vec![
+                Constraint::Length(3),           // Header
+                Constraint::Length(3),           // Overall usage
+                Constraint::Length(3),           // Committed memory
+                Constraint::Length(3),           // Pagefile/Swap gauge
+                Constraint::Length(zram_height), // Zram info
+                Constraint::Length(9),           // Memory breakdown
+                Constraint::Min(8),             // Top processes
+            ]
+        } else {
+            vec![
+                Constraint::Length(3), // Header
+                Constraint::Length(3), // Overall usage
+                Constraint::Length(3), // Committed memory
+                Constraint::Length(3), // Pagefile gauge
+                Constraint::Length(9), // Memory breakdown
+                Constraint::Min(8),    // Top processes
+            ]
+        })
         .split(area);
 
     // Header
@@ -137,16 +152,24 @@ fn render_full(
 
     f.render_widget(commit_gauge, chunks[2]);
 
-    // Pagefile gauge
+    // Pagefile/Swap gauge
     render_pagefile_gauge(f, chunks[3], data, theme);
+
+    // Zram info (if present) and remaining sections
+    let (breakdown_idx, processes_idx) = if has_zram {
+        render_zram_info(f, chunks[4], data, theme);
+        (5, 6)
+    } else {
+        (4, 5)
+    };
 
     // Memory breakdown
     let breakdown_focused = app.state.ram_state.focused_panel == RamPanelFocus::Breakdown;
-    render_memory_breakdown(f, chunks[4], data, theme, breakdown_focused);
+    render_memory_breakdown(f, chunks[breakdown_idx], data, theme, breakdown_focused);
 
     // Top processes
     let processes_focused = app.state.ram_state.focused_panel == RamPanelFocus::TopProcesses;
-    render_top_processes(f, chunks[5], data, app, theme, processes_focused);
+    render_top_processes(f, chunks[processes_idx], data, app, theme, processes_focused);
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
@@ -237,6 +260,60 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
         .style(Style::default().fg(Color::White));
 
     f.render_widget(info_para, chunks[1]);
+}
+
+fn render_zram_info(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::RamData,
+    theme: &Theme,
+) {
+    let mut lines = Vec::new();
+    for z in &data.zram_devices {
+        let usage_pct = if z.disksize > 0 {
+            (z.orig_data_size as f64 / z.disksize as f64 * 100.0) as f32
+        } else {
+            0.0
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", z.name)),
+            Span::styled(
+                format!("{} / {} ", format_bytes(z.orig_data_size), format_bytes(z.disksize)),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(create_progress_bar(usage_pct, 15)),
+            Span::styled(
+                format!("  ratio: {:.1}x", z.compression_ratio),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("  algo: {}", z.algorithm),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!(
+                    "Compressed: {}  RAM used: {}",
+                    format_bytes(z.compr_data_size),
+                    format_bytes(z.mem_used_total)
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("ZRAM ({} devices)", data.zram_devices.len()))
+        .border_style(Style::default().fg(theme.ram_color));
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(para, area);
 }
 
 fn render_memory_breakdown(

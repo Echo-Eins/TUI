@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::app::state::CpuProcessSortColumn;
 use crate::app::App;
 use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes, format_percentage};
@@ -34,7 +35,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         if app.state.compact_mode {
             render_compact(f, area, data, &theme);
         } else {
-            render_full(f, area, data, &theme);
+            render_full(f, area, data, &theme, app);
         }
     } else {
         let block = Block::default()
@@ -50,7 +51,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme: &Theme) {
+fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme: &Theme, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -58,16 +59,18 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
             Constraint::Length(3), // Overall usage
             Constraint::Min(8),    // Core usage
             Constraint::Length(5), // Frequency & Power
-            Constraint::Length(9), // Top Processes
+            Constraint::Min(12),   // Processes (sortable, scrollable)
         ])
         .split(area);
 
     // Header
     let header = format!(
-        "CPU: {}{}",
+        "CPU: {}  |  {} cores / {} threads{}",
         data.name,
+        data.core_count,
+        data.thread_count,
         if let Some(temp) = data.temperature {
-            format!("  Temp: {:.1}°C", temp)
+            format!("  |  Temp: {:.1}\u{00b0}C", temp)
         } else {
             String::new()
         }
@@ -97,7 +100,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                 .fg(theme.cpu_color)
                 .add_modifier(Modifier::BOLD),
         )
-        .percent(data.overall_usage as u16)
+        .percent(data.overall_usage.clamp(0.0, 100.0) as u16)
         .label(format!(
             "{}% - Cores: {}/{}",
             data.overall_usage as u16, data.core_count, data.thread_count
@@ -147,7 +150,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  │  Max Frequency: "),
+            Span::raw("  \u{2502}  Max Frequency: "),
             Span::styled(
                 format!("{:.2} GHz", data.frequency.max_frequency),
                 Style::default()
@@ -161,7 +164,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                 format!("{:.2} GHz", data.frequency.base_clock),
                 Style::default().fg(Color::White),
             ),
-            Span::raw("  │  Power: "),
+            Span::raw("  \u{2502}  Power: "),
             Span::styled(
                 format!(
                     "{:.0}W/{:.0}W",
@@ -171,6 +174,16 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             ),
+            if data.frequency.boost_active {
+                Span::styled(
+                    "  [BOOST]",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            },
         ]),
     ];
 
@@ -185,11 +198,43 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
 
     f.render_widget(freq_paragraph, chunks[3]);
 
-    // Top Processes
-    let rows: Vec<Row> = data
-        .top_processes
+    // Processes - sortable, scrollable
+    let sort_col = app.state.cpu_state.sort_column;
+    let sort_asc = app.state.cpu_state.sort_ascending;
+    let selected_idx = app.state.cpu_state.selected_index;
+
+    // Sort processes
+    let mut processes = data.top_processes.clone();
+    processes.sort_by(|a, b| {
+        let ord = match sort_col {
+            CpuProcessSortColumn::Pid => a.pid.cmp(&b.pid),
+            CpuProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            CpuProcessSortColumn::Cpu => a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(std::cmp::Ordering::Equal),
+            CpuProcessSortColumn::Memory => a.memory.cmp(&b.memory),
+            CpuProcessSortColumn::Threads => a.threads.cmp(&b.threads),
+        };
+        if sort_asc { ord } else { ord.reverse() }
+    });
+
+    // Calculate visible area (subtract 3 for block border + header row)
+    let visible_rows = chunks[4].height.saturating_sub(3) as usize;
+    let scroll_offset = if selected_idx >= visible_rows {
+        selected_idx - visible_rows + 1
+    } else {
+        0
+    };
+
+    let rows: Vec<Row> = processes
         .iter()
-        .map(|p| {
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows.max(1))
+        .map(|(idx, p)| {
+            let style = if idx == selected_idx {
+                Style::default().fg(Color::Black).bg(theme.cpu_color)
+            } else {
+                Style::default().fg(Color::White)
+            };
             Row::new(vec![
                 format!("{}", p.pid),
                 p.name.clone(),
@@ -197,9 +242,36 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
                 format!("{}", p.threads),
                 format_bytes(p.memory),
             ])
-            .style(Style::default().fg(Color::White))
+            .style(style)
         })
         .collect();
+
+    // Build header with sort indicators
+    let sort_indicator = |col: CpuProcessSortColumn| -> &str {
+        if sort_col == col {
+            if sort_asc { " \u{25b2}" } else { " \u{25bc}" }
+        } else {
+            ""
+        }
+    };
+
+    let header_row = Row::new(vec![
+        format!("PID(p){}", sort_indicator(CpuProcessSortColumn::Pid)),
+        format!("Name(n){}", sort_indicator(CpuProcessSortColumn::Name)),
+        format!("CPU%(c){}", sort_indicator(CpuProcessSortColumn::Cpu)),
+        format!("Threads(t){}", sort_indicator(CpuProcessSortColumn::Threads)),
+        format!("Memory(m){}", sort_indicator(CpuProcessSortColumn::Memory)),
+    ]).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let process_title = format!(
+        "Processes [{}/{}]  \u{2191}\u{2193}:Navigate  p/n/c/t/m:Sort",
+        processes.len(),
+        processes.len()
+    );
 
     let table = Table::new(
         rows,
@@ -207,20 +279,14 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
             Constraint::Length(8),
             Constraint::Min(20),
             Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(12),
         ],
     )
-    .header(
-        Row::new(vec!["PID", "Name", "CPU%", "Threads", "Memory"]).style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
+    .header(header_row)
     .block(
         Block::default()
-            .title("Top Processes")
+            .title(process_title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.cpu_color)),
     );
@@ -230,7 +296,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme: &Theme) {
     let compact_text = format!(
-        "CPU: {} │ {}% │ {:.2} GHz │ {}°C │ {:.0}W/{:.0}W",
+        "CPU: {} \u{2502} {}% \u{2502} {:.2} GHz \u{2502} {}°C \u{2502} {:.0}W/{:.0}W",
         data.name.split_whitespace().next().unwrap_or("CPU"),
         data.overall_usage as u16,
         data.frequency.avg_frequency,
