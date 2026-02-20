@@ -20,15 +20,21 @@
 //! - Mutual authentication via ECDSA signatures
 //! - Constant-time comparison for cryptographic values
 
+pub mod app;
 pub mod capture;
 pub mod config;
 pub mod crypto;
+pub mod events;
 pub mod input;
+pub mod integrations;
+pub mod monitors;
 pub mod network;
 pub mod protocol;
+pub mod ui;
+pub mod utils;
 
 pub use config::Config;
-pub use network::{Session, Server};
+pub use network::{Server, Session};
 
 /// Application version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

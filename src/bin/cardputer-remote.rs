@@ -1,7 +1,7 @@
 //! Cardputer Remote Desktop Server - Main Entry Point
 //!
 //! Usage:
-//!   TUI [OPTIONS]
+//!   cardputer-remote [OPTIONS]
 //!
 //! Options:
 //!   -c, --config <FILE>  Path to config file (default: config.toml)
@@ -71,9 +71,9 @@ impl Args {
     }
 
     fn print_help() {
-        println!("TUI+ Remote Desktop Server v{}", VERSION);
+        println!("Cardputer Remote Desktop Server v{}", VERSION);
         println!();
-        println!("Usage: TUI [OPTIONS]");
+        println!("Usage: {} [OPTIONS]", executable_name());
         println!();
         println!("Options:");
         println!("  -c, --config <FILE>  Path to config file (default: config.toml)");
@@ -111,14 +111,11 @@ fn init_logging(config: &Config, verbose: bool) {
             .init();
     }
 
-    // Log to file if configured
     if let Some(ref log_file) = config.logging.log_file {
-        // Note: In production, we'd use tracing-appender for file logging
         info!("Logging to file: {}", log_file);
     }
 }
 
-/// Application state
 struct App {
     config: Arc<Config>,
     discovery: DiscoveryService,
@@ -138,18 +135,15 @@ impl App {
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("TUI+ Remote Desktop Server v{}", VERSION);
+        info!("Cardputer Remote Desktop Server v{}", VERSION);
         info!("Protocol version: {}", cardputer_remote::PROTOCOL_VERSION);
         info!("Listening on port {}", self.config.server.port);
 
-        // Start mDNS discovery
         self.discovery.start().await?;
         info!("mDNS discovery started");
 
-        // Channel for new sessions
         let (session_tx, mut session_rx) = mpsc::channel::<Session>(4);
 
-        // Start server in background
         let server_handle = {
             let config = self.config.clone();
             tokio::spawn(async move {
@@ -166,7 +160,6 @@ impl App {
             })
         };
 
-        // Handle Ctrl+C
         let shutdown = tokio::signal::ctrl_c();
         tokio::pin!(shutdown);
 
@@ -174,15 +167,12 @@ impl App {
 
         loop {
             tokio::select! {
-                // Handle new sessions
                 Some(mut session) = session_rx.recv() => {
                     let addr = session.addr();
                     info!("New session from {}", addr);
 
-                    // Log session start
                     self.log_event("session_start", &format!("Client: {}", addr));
 
-                    // Run session in background
                     let handle = tokio::spawn(async move {
                         if let Err(e) = session.run().await {
                             warn!("Session {} error: {}", addr, e);
@@ -191,12 +181,8 @@ impl App {
                     });
 
                     self.active_sessions.push(handle);
-
-                    // Clean up finished sessions
                     self.active_sessions.retain(|h| !h.is_finished());
                 }
-
-                // Handle shutdown
                 _ = &mut shutdown => {
                     info!("Shutting down...");
                     break;
@@ -204,11 +190,9 @@ impl App {
             }
         }
 
-        // Cleanup
         self.discovery.stop();
         server_handle.abort();
 
-        // Wait for active sessions to finish (with timeout)
         for handle in self.active_sessions.drain(..) {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         }
@@ -217,7 +201,6 @@ impl App {
         Ok(())
     }
 
-    /// Log an event for auditing
     fn log_event(&self, event_type: &str, details: &str) {
         let timestamp = chrono::Utc::now().to_rfc3339();
         info!(
@@ -268,54 +251,46 @@ fn find_config_in_project(root: &Path) -> Option<PathBuf> {
     None
 }
 
+fn resolve_config_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_candidate = cwd.join(path);
+    if cwd_candidate.exists() {
+        return cwd_candidate;
+    }
+
+    if let Some(project_root) = find_config_in_project(&cwd) {
+        return project_root;
+    }
+
+    cwd_candidate
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    // Load config
-    let config = match Config::load(&args.config_path) {
-        Ok(c) => c,
+    let config_path = resolve_config_path(&args.config_path);
+
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
         Err(e) => {
-            eprintln!("Failed to load config from {:?}: {}", args.config_path, e);
-
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            if let Some(existing_config) = find_config_in_project(&project_root) {
-                eprintln!(
-                    "Found existing config at {:?}. Auto-generation is disabled while any project config exists.",
-                    existing_config
-                );
-                eprintln!("Please fix that config file and restart.");
-                std::process::exit(1);
-            }
-
-            eprintln!(
-                "No existing config found in project folders. Creating default config file..."
-            );
-
-            let default_config = Config::default();
-            let toml_str = match toml::to_string_pretty(&default_config) {
-                Ok(value) => value,
-                Err(e) => {
-                    eprintln!("Failed to serialize default config: {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            if let Err(e) = std::fs::write(&args.config_path, toml_str) {
-                eprintln!("Failed to write default config: {}", e);
-                std::process::exit(1);
-            }
-
-            eprintln!("Default config created at {:?}", args.config_path);
-            eprintln!("Please edit the config file and restart.");
+            eprintln!("Failed to load config from {:?}: {}", config_path, e);
             std::process::exit(1);
         }
     };
 
-    // Initialize logging
     init_logging(&config, args.verbose);
 
-    // Create and run application
+    info!("Configuration loaded from {:?}", config_path);
+
     let mut app = match App::new(config).await {
         Ok(app) => app,
         Err(e) => {
@@ -327,13 +302,5 @@ async fn main() {
     if let Err(e) = app.run().await {
         error!("Application error: {}", e);
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_args_parse() {
-        // Basic test - would need more comprehensive testing with actual args
     }
 }
