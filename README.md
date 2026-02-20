@@ -76,7 +76,12 @@ Or use the ESP32's key generation (via Serial):
 
 **PC Server:**
 ```bash
-cargo run --release
+cargo run --release --bin cardputer-remote
+```
+
+**TUI console (separate app):**
+```bash
+cargo run --release --bin TUI
 ```
 
 **Cardputer:**

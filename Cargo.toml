@@ -69,7 +69,11 @@ scrap = "0.5"
 
 [[bin]]
 name = "TUI"
-path = "src/main.rs"
+path = "src/bin/TUI.rs"
+
+[[bin]]
+name = "cardputer-remote"
+path = "src/bin/cardputer-remote.rs"
 
 [profile.release]
 opt-level = 3
