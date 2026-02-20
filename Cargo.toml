@@ -42,6 +42,16 @@ chrono = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 
+
+# TUI runtime
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.28"
+futures = "0.3"
+parking_lot = "0.12"
+notify = "6.1"
+base64 = "0.22"
+log = "0.4"
+
 # Hex encoding for keys
 hex = "0.4"
 
