@@ -1,6 +1,6 @@
+use crate::integrations::{LinuxSysMonitor, PowerShellExecutor};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RamData {
@@ -314,22 +314,63 @@ impl RamMonitor {
     async fn collect_data_linux(&self) -> Result<RamData> {
         let mem_info = self.linux_sys.get_memory_info()?;
 
+        let mut processes = self.linux_sys.get_processes().unwrap_or_default();
+        processes.sort_by(|a, b| b.memory.cmp(&a.memory));
+        let top_processes: Vec<ProcessMemoryInfo> = processes
+            .into_iter()
+            .take(10)
+            .map(|proc| ProcessMemoryInfo {
+                pid: proc.pid,
+                name: proc.name,
+                working_set: proc.memory,
+                private_bytes: proc.memory,
+            })
+            .collect();
+
+        let commit_limit = if mem_info.commit_limit > 0 {
+            mem_info.commit_limit
+        } else {
+            mem_info.total + mem_info.swap_total
+        };
+        let committed = if mem_info.committed_as > 0 {
+            mem_info.committed_as
+        } else {
+            mem_info.used + mem_info.swap_used
+        };
+        let commit_percent = if commit_limit > 0 {
+            (committed as f64 / commit_limit as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let pagefiles = vec![PagefileInfo {
+            name: "swap".to_string(),
+            total_size: mem_info.swap_total,
+            current_usage: mem_info.swap_used,
+            peak_usage: mem_info.swap_used,
+            usage_percent: if mem_info.swap_total > 0 {
+                (mem_info.swap_used as f64 / mem_info.swap_total as f64) * 100.0
+            } else {
+                0.0
+            },
+        }];
+
         Ok(RamData {
             total: mem_info.total,
             used: mem_info.used,
             available: mem_info.available,
-            cached: mem_info.cached,
+            cached: mem_info.cached + mem_info.sreclaimable,
             free: mem_info.free,
             speed: String::from("Unknown"),
-            type_name: String::from("DDR4"),
-            in_use: mem_info.used,
-            standby: 0,
-            modified: 0,
-            committed: mem_info.used,
-            commit_limit: mem_info.total + mem_info.swap_total,
-            commit_percent: (mem_info.used as f64 / mem_info.total as f64) * 100.0,
-            top_processes: Vec::new(),
-            pagefiles: Vec::new(),
+            type_name: String::from("Linux"),
+            in_use: mem_info.active,
+            standby: mem_info.inactive,
+            modified: mem_info.dirty,
+            committed,
+            commit_limit,
+            commit_percent,
+            top_processes,
+            pagefiles,
             total_pagefile_size: mem_info.swap_total,
             total_pagefile_used: mem_info.swap_used,
         })
@@ -394,8 +435,8 @@ impl RamMonitor {
 
     fn parse_physical_memory_info(output: &str) -> Result<PhysicalMemoryInfo> {
         let trimmed = output.trim_start_matches('\u{feff}').trim();
-        let info: PhysicalMemory = serde_json::from_str(trimmed)
-            .context("Failed to parse physical memory info")?;
+        let info: PhysicalMemory =
+            serde_json::from_str(trimmed).context("Failed to parse physical memory info")?;
 
         Ok(PhysicalMemoryInfo {
             speed: info.Speed,
@@ -423,8 +464,8 @@ impl RamMonitor {
         let samples: Vec<ProcessMemorySample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse top processes")?
         } else {
-            let single: ProcessMemorySample = serde_json::from_str(output)
-                .context("Failed to parse single process")?;
+            let single: ProcessMemorySample =
+                serde_json::from_str(output).context("Failed to parse single process")?;
             vec![single]
         };
 
@@ -451,8 +492,8 @@ impl RamMonitor {
         let samples: Vec<PagefileSample> = if trimmed.starts_with('[') {
             serde_json::from_str(output).context("Failed to parse pagefiles")?
         } else {
-            let single: PagefileSample = serde_json::from_str(output)
-                .context("Failed to parse single pagefile")?;
+            let single: PagefileSample =
+                serde_json::from_str(output).context("Failed to parse single pagefile")?;
             vec![single]
         };
 
@@ -502,11 +543,21 @@ struct DetailedMemory {
 }
 
 impl DetailedMemory {
-    fn in_use(&self) -> u64 { self.InUse }
-    fn cached(&self) -> u64 { self.Cached }
-    fn standby(&self) -> u64 { self.Standby }
-    fn free(&self) -> u64 { self.Free }
-    fn modified(&self) -> u64 { self.Modified }
+    fn in_use(&self) -> u64 {
+        self.InUse
+    }
+    fn cached(&self) -> u64 {
+        self.Cached
+    }
+    fn standby(&self) -> u64 {
+        self.Standby
+    }
+    fn free(&self) -> u64 {
+        self.Free
+    }
+    fn modified(&self) -> u64 {
+        self.Modified
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -518,9 +569,15 @@ struct CommittedMemory {
 }
 
 impl CommittedMemory {
-    fn committed(&self) -> u64 { self.Committed }
-    fn commit_limit(&self) -> u64 { self.CommitLimit }
-    fn commit_percent(&self) -> f64 { self.CommitPercent }
+    fn committed(&self) -> u64 {
+        self.Committed
+    }
+    fn commit_limit(&self) -> u64 {
+        self.CommitLimit
+    }
+    fn commit_percent(&self) -> f64 {
+        self.CommitPercent
+    }
 }
 
 #[derive(Debug, Deserialize)]

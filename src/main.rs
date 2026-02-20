@@ -13,11 +13,22 @@ use cardputer_remote::{
     network::{DiscoveryService, Server, Session},
     VERSION,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn executable_name() -> String {
+    std::env::args()
+        .next()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "cardputer-remote".to_string())
+}
 
 /// Command line arguments
 struct Args {
@@ -62,7 +73,7 @@ impl Args {
     fn print_help() {
         println!("Cardputer Remote Desktop Server v{}", VERSION);
         println!();
-        println!("Usage: cardputer-remote [OPTIONS]");
+        println!("Usage: {} [OPTIONS]", executable_name());
         println!();
         println!("Options:");
         println!("  -c, --config <FILE>  Path to config file (default: config.toml)");
@@ -218,6 +229,45 @@ impl App {
     }
 }
 
+fn find_config_in_project(root: &Path) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default();
+
+                if matches!(name, ".git" | "target") {
+                    continue;
+                }
+
+                stack.push(path);
+                continue;
+            }
+
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("config.toml"))
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -227,9 +277,21 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to load config from {:?}: {}", args.config_path, e);
-            eprintln!("Creating default config file...");
 
-            // Create default config
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(existing_config) = find_config_in_project(&project_root) {
+                eprintln!(
+                    "Found existing config at {:?}. Auto-generation is disabled while any project config exists.",
+                    existing_config
+                );
+                eprintln!("Please fix that config file and restart.");
+                std::process::exit(1);
+            }
+
+            eprintln!(
+                "No existing config found in project folders. Creating default config file..."
+            );
+
             let default_config = Config::default();
             let toml_str = match toml::to_string_pretty(&default_config) {
                 Ok(value) => value,

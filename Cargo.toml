@@ -2,6 +2,7 @@
 name = "cardputer-remote"
 version = "1.0.0"
 edition = "2021"
+default-run = "cardputer-remote"
 authors = ["CardputerADV Team"]
 description = "Secure remote desktop server for M5Stack Cardputer"
 license = "MIT"
@@ -21,14 +22,10 @@ hmac = "0.12"
 # Networking
 mdns-sd = "0.10"
 
-# Screen capture (Windows)
-scrap = "0.5"
 
 # Image processing
 image = { version = "0.24", features = ["jpeg"] }
 
-# Input simulation (Windows)
-enigo = "0.2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -45,6 +42,16 @@ chrono = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 
+
+# TUI runtime
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.28"
+futures = "0.3"
+parking_lot = "0.12"
+notify = "6.1"
+base64 = "0.22"
+log = "0.4"
+
 # Hex encoding for keys
 hex = "0.4"
 
@@ -57,9 +64,24 @@ windows = { version = "0.52", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ]}
+enigo = "0.2"
+scrap = "0.5"
+
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[[bin]]
+name = "cardputer-remote"
+path = "src/main.rs"
+
+[[bin]]
+name = "TUI"
+path = "src/bin/TUI.rs"
+
+[[bin]]
+name = "keygen"
+path = "src/bin/keygen.rs"

@@ -1,11 +1,11 @@
-pub mod state;
 pub mod config;
-pub mod tabs;
 pub mod monitors_task;
+pub mod state;
+pub mod tabs;
 
-pub use state::AppState;
 pub use config::{Config, ConfigManager};
-pub use tabs::{TabType, TabManager};
+pub use state::AppState;
+pub use tabs::{TabManager, TabType};
 
 use anyhow::Result;
 use crossterm::event::Event as CrosstermEvent;
@@ -21,22 +21,18 @@ pub struct App {
 
 impl App {
     pub async fn new() -> Result<Self> {
-        let exe_config_path = {
+        let exe_tui_config_path = {
             let mut path = env::current_exe()?;
-            path.set_file_name("config.toml");
+            path.set_file_name("tui.toml");
             path
         };
 
-        let config_path = match env::current_dir() {
-            Ok(cwd) => {
-                let candidate = cwd.join("config.toml");
-                if candidate.exists() {
-                    candidate
-                } else {
-                    exe_config_path.clone()
-                }
-            }
-            Err(_) => exe_config_path.clone(),
+        let cwd_tui_config = env::current_dir().ok().map(|cwd| cwd.join("tui.toml"));
+
+        let config_path = if let Some(path) = cwd_tui_config {
+            path
+        } else {
+            exe_tui_config_path.clone()
         };
 
         let config = Config::load_or_default(&config_path)?;
