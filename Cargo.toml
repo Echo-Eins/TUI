@@ -2,7 +2,7 @@
 name = "cardputer-remote"
 version = "1.0.0"
 edition = "2021"
-default-run = "cardputer-remote"
+default-run = "TUI"
 authors = ["CardputerADV Team"]
 description = "Secure remote desktop server for M5Stack Cardputer"
 license = "MIT"
@@ -67,6 +67,9 @@ windows = { version = "0.52", features = [
 enigo = "0.2"
 scrap = "0.5"
 
+[[bin]]
+name = "TUI"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3

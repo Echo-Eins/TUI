@@ -1,84 +1,339 @@
-use anyhow::Result;
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+//! Cardputer Remote Desktop Server - Main Entry Point
+//!
+//! Usage:
+//!   cardputer-remote [OPTIONS]
+//!
+//! Options:
+//!   -c, --config <FILE>  Path to config file (default: config.toml)
+//!   -v, --verbose        Enable verbose logging
+//!   -h, --help           Show help
+
+use cardputer_remote::{
+    config::Config,
+    network::{DiscoveryService, Server, Session},
+    VERSION,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{error, info, warn, Level};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-#[path = "../app/mod.rs"]
-mod app;
-#[path = "../events/mod.rs"]
-mod events;
-#[path = "../integrations/mod.rs"]
-mod integrations;
-#[path = "../monitors/mod.rs"]
-mod monitors;
-#[path = "../ui/mod.rs"]
-mod ui;
-#[path = "../utils/mod.rs"]
-mod utils;
-
-use app::App;
-use events::{AppEvent, EventHandler};
-
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+fn executable_name() -> String {
+    std::env::args()
+        .next()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "cardputer-remote".to_string())
 }
 
-impl TerminalGuard {
-    fn new() -> Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-
-        Ok(Self { terminal })
-    }
-
-    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
-        &mut self.terminal
-    }
+/// Command line arguments
+struct Args {
+    config_path: PathBuf,
+    verbose: bool,
 }
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
-        let _ = self.terminal.show_cursor();
-    }
-}
+impl Args {
+    fn parse() -> Self {
+        let mut args = std::env::args().skip(1);
+        let mut config_path = PathBuf::from("config.toml");
+        let mut verbose = false;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut app = App::new().await?;
-    let mut terminal = TerminalGuard::new()?;
-    let mut events = EventHandler::new(250);
-
-    loop {
-        terminal
-            .terminal_mut()
-            .draw(|frame| ui::render(frame, &app))?;
-
-        match events.next().await {
-            AppEvent::Input(event) => {
-                if let Event::Key(_) | Event::Mouse(_) | Event::Resize(_, _) = event {
-                    if !app.handle_event(event).await? {
-                        break;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-c" | "--config" => {
+                    if let Some(path) = args.next() {
+                        config_path = PathBuf::from(path);
                     }
                 }
+                "-v" | "--verbose" => {
+                    verbose = true;
+                }
+                "-h" | "--help" => {
+                    Self::print_help();
+                    std::process::exit(0);
+                }
+                _ => {
+                    eprintln!("Unknown argument: {}", arg);
+                    Self::print_help();
+                    std::process::exit(1);
+                }
             }
-            AppEvent::Tick => {
-                app.state.apply_config_updates(app.config_manager.as_deref());
+        }
+
+        Self {
+            config_path,
+            verbose,
+        }
+    }
+
+    fn print_help() {
+        println!("Cardputer Remote Desktop Server v{}", VERSION);
+        println!();
+        println!("Usage: {} [OPTIONS]", executable_name());
+        println!();
+        println!("Options:");
+        println!("  -c, --config <FILE>  Path to config file (default: config.toml)");
+        println!("  -v, --verbose        Enable verbose logging");
+        println!("  -h, --help           Show this help");
+    }
+}
+
+/// Initialize logging based on config
+fn init_logging(config: &Config, verbose: bool) {
+    let level = if verbose {
+        Level::DEBUG
+    } else {
+        match config.logging.level.to_lowercase().as_str() {
+            "trace" => Level::TRACE,
+            "debug" => Level::DEBUG,
+            "info" => Level::INFO,
+            "warn" => Level::WARN,
+            "error" => Level::ERROR,
+            _ => Level::INFO,
+        }
+    };
+
+    let filter = EnvFilter::new(format!("cardputer_remote={}", level));
+
+    if config.logging.json_format {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().with_target(false).with_thread_ids(false))
+            .init();
+    }
+
+    // Log to file if configured
+    if let Some(ref log_file) = config.logging.log_file {
+        // Note: In production, we'd use tracing-appender for file logging
+        info!("Logging to file: {}", log_file);
+    }
+}
+
+/// Application state
+struct App {
+    config: Arc<Config>,
+    discovery: DiscoveryService,
+    active_sessions: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl App {
+    async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = Arc::new(config);
+        let discovery = DiscoveryService::new(&config)?;
+
+        Ok(Self {
+            config,
+            discovery,
+            active_sessions: Vec::new(),
+        })
+    }
+
+    async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Cardputer Remote Desktop Server v{}", VERSION);
+        info!("Protocol version: {}", cardputer_remote::PROTOCOL_VERSION);
+        info!("Listening on port {}", self.config.server.port);
+
+        // Start mDNS discovery
+        self.discovery.start().await?;
+        info!("mDNS discovery started");
+
+        // Channel for new sessions
+        let (session_tx, mut session_rx) = mpsc::channel::<Session>(4);
+
+        // Start server in background
+        let server_handle = {
+            let config = self.config.clone();
+            tokio::spawn(async move {
+                match Server::new(config).await {
+                    Ok(server) => {
+                        if let Err(e) = server.run(session_tx).await {
+                            error!("Server error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create server: {}", e);
+                    }
+                }
+            })
+        };
+
+        // Handle Ctrl+C
+        let shutdown = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown);
+
+        info!("Server running. Press Ctrl+C to stop.");
+
+        loop {
+            tokio::select! {
+                // Handle new sessions
+                Some(mut session) = session_rx.recv() => {
+                    let addr = session.addr();
+                    info!("New session from {}", addr);
+
+                    // Log session start
+                    self.log_event("session_start", &format!("Client: {}", addr));
+
+                    // Run session in background
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = session.run().await {
+                            warn!("Session {} error: {}", addr, e);
+                        }
+                        info!("Session {} ended", addr);
+                    });
+
+                    self.active_sessions.push(handle);
+
+                    // Clean up finished sessions
+                    self.active_sessions.retain(|h| !h.is_finished());
+                }
+
+                // Handle shutdown
+                _ = &mut shutdown => {
+                    info!("Shutting down...");
+                    break;
+                }
+            }
+        }
+
+        // Cleanup
+        self.discovery.stop();
+        server_handle.abort();
+
+        // Wait for active sessions to finish (with timeout)
+        for handle in self.active_sessions.drain(..) {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        }
+
+        info!("Server stopped");
+        Ok(())
+    }
+
+    /// Log an event for auditing
+    fn log_event(&self, event_type: &str, details: &str) {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        info!(
+            event_type = event_type,
+            details = details,
+            timestamp = timestamp,
+            "Event"
+        );
+    }
+}
+
+fn find_config_in_project(root: &Path) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default();
+
+                if matches!(name, ".git" | "target") {
+                    continue;
+                }
+
+                stack.push(path);
+                continue;
+            }
+
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("config.toml"))
+            {
+                return Some(path);
             }
         }
     }
 
-    Ok(())
+    None
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    // Load config
+    let config = match Config::load(&args.config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load config from {:?}: {}", args.config_path, e);
+
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(existing_config) = find_config_in_project(&project_root) {
+                eprintln!(
+                    "Found existing config at {:?}. Auto-generation is disabled while any project config exists.",
+                    existing_config
+                );
+                eprintln!("Please fix that config file and restart.");
+                std::process::exit(1);
+            }
+
+            eprintln!(
+                "No existing config found in project folders. Creating default config file..."
+            );
+
+            let default_config = Config::default();
+            let toml_str = match toml::to_string_pretty(&default_config) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("Failed to serialize default config: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Err(e) = std::fs::write(&args.config_path, toml_str) {
+                eprintln!("Failed to write default config: {}", e);
+                std::process::exit(1);
+            }
+
+            eprintln!("Default config created at {:?}", args.config_path);
+            eprintln!("Please edit the config file and restart.");
+            std::process::exit(1);
+        }
+    };
+
+    // Initialize logging
+    init_logging(&config, args.verbose);
+
+    // Create and run application
+    let mut app = match App::new(config).await {
+        Ok(app) => app,
+        Err(e) => {
+            error!("Failed to initialize application: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = app.run().await {
+        error!("Application error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_args_parse() {
+        // Basic test - would need more comprehensive testing with actual args
+    }
 }
