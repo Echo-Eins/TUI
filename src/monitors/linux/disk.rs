@@ -26,16 +26,36 @@ impl LinuxDiskMonitor {
 
 impl DiskMonitorTrait for LinuxDiskMonitor {
     async fn collect_data(&self) -> Result<DiskData> {
-        let logical_drives = self.get_logical_drives()?;
+        let mut logical_drives = self.get_logical_drives()?;
         let mut physical_disks = self.get_physical_disks()?;
 
-        // Link mount points from logical drives to physical disks
-        for drive in &logical_drives {
-            let dev_name = drive.name.trim_start_matches("/dev/");
-            let disk_name = dev_name.trim_end_matches(|c: char| c.is_ascii_digit());
-            if let Some(disk) = physical_disks.iter_mut().find(|d| d.friendly_name == disk_name) {
-                if !disk.partitions.contains(&drive.letter) {
-                    disk.partitions.push(drive.letter.clone());
+        // Link logical drives to physical disks using device names from DiskInfo
+        let disk_info = self.linux_sys.get_disk_info()?;
+        for d in &disk_info {
+            // d.name is e.g. "/dev/sda1", "/dev/nvme0n1p2"
+            let dev_name = d.name.trim_start_matches("/dev/");
+            // Strip trailing partition number: sda1 -> sda, nvme0n1p2 -> nvme0n1
+            let disk_name = if dev_name.contains("nvme") || dev_name.contains("mmc") {
+                // NVMe: nvme0n1p2 -> nvme0n1
+                dev_name.rsplit_once('p')
+                    .filter(|(base, _)| base.ends_with(|c: char| c.is_ascii_digit()))
+                    .map(|(base, _)| base)
+                    .unwrap_or(dev_name)
+            } else {
+                // SATA/SCSI: sda1 -> sda
+                dev_name.trim_end_matches(|c: char| c.is_ascii_digit())
+            };
+
+            if let Some(phys) = physical_disks.iter().find(|p| p.friendly_name == disk_name) {
+                if let Some(drive) = logical_drives.iter_mut().find(|l| l.letter == d.mount_point) {
+                    drive.disk_number = Some(phys.disk_number);
+                }
+            }
+
+            // Also update partitions on physical disks
+            if let Some(phys) = physical_disks.iter_mut().find(|p| p.friendly_name == disk_name) {
+                if !phys.partitions.contains(&d.mount_point) {
+                    phys.partitions.push(d.mount_point.clone());
                 }
             }
         }
