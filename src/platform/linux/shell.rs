@@ -1,4 +1,4 @@
-﻿use crate::platform::executor::CommandExecutor;
+﻿use crate::platform::executor::{CommandExecutor, StreamMessage};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::Read;
@@ -15,13 +15,14 @@ impl LinuxCommandExecutor {
 
 #[async_trait::async_trait]
 impl CommandExecutor for LinuxCommandExecutor {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
     async fn execute(&self, cmd: &str) -> Result<String> {
-        let (tx, mut rx) = mpsc::channel(32);
-        
         let cmd_owned = cmd.to_string();
-        
-        // Run blocking PTY operations in a spawn_blocking task
-        let handle = task::spawn_blocking(move || {
+
+        let output = task::spawn_blocking(move || {
             let pty_system = NativePtySystem::default();
             let pair = pty_system.openpty(PtySize {
                 rows: 24,
@@ -32,37 +33,27 @@ impl CommandExecutor for LinuxCommandExecutor {
 
             let mut command = CommandBuilder::new("bash");
             command.args(["-lc", &cmd_owned]);
-            
+
             let mut child = pair.slave.spawn_command(command).context("Failed to spawn command")?;
-            drop(pair.slave); // Close the slave side in the parent
+            drop(pair.slave);
 
             let mut reader = pair.master.try_clone_reader().context("Failed to clone reader")?;
-            
-            // Read output in smaller chunks and send them over
-            let mut buf = [0u8; 1024];
+
+            let mut buf = [0u8; 4096];
+            let mut output = String::new();
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                let _ = tx.blocking_send(text);
+                if n == 0 { break; }
+                output.push_str(&String::from_utf8_lossy(&buf[..n]));
             }
 
             let _ = child.wait();
-            Ok::<(), anyhow::Error>(())
-        });
-        
-        let mut output = String::new();
-        while let Some(chunk) = rx.recv().await {
-            output.push_str(&chunk);
-        }
-        
-        handle.await.context("Task panicked")??;
-        
+            Ok::<String, anyhow::Error>(output)
+        }).await.context("Task panicked")??;
+
         Ok(output)
     }
 
-    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<String>> {
+    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<StreamMessage>> {
         let (tx, rx) = mpsc::channel(100);
         let cmd_owned = cmd.to_string();
 
@@ -76,7 +67,8 @@ impl CommandExecutor for LinuxCommandExecutor {
             }) {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.blocking_send(format!("Error: {}", e));
+                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Error: {}", e)));
+                    let _ = tx.blocking_send(StreamMessage::Exit(1));
                     return;
                 }
             };
@@ -87,7 +79,8 @@ impl CommandExecutor for LinuxCommandExecutor {
             let mut child = match pair.slave.spawn_command(command) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.blocking_send(format!("Failed to spawn command: {}", e));
+                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Failed to spawn: {}", e)));
+                    let _ = tx.blocking_send(StreamMessage::Exit(1));
                     return;
                 }
             };
@@ -96,7 +89,8 @@ impl CommandExecutor for LinuxCommandExecutor {
             let mut reader = match pair.master.try_clone_reader() {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.blocking_send(format!("Failed to clone reader: {}", e));
+                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Reader error: {}", e)));
+                    let _ = tx.blocking_send(StreamMessage::Exit(1));
                     return;
                 }
             };
@@ -105,27 +99,36 @@ impl CommandExecutor for LinuxCommandExecutor {
             let mut line_buffer = String::new();
 
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                
+                if n == 0 { break; }
+
                 let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                
-                // Extremely simple line splitting without losing characters
+
                 for c in text.chars() {
                     line_buffer.push(c);
                     if c == '\n' {
-                        let _ = tx.blocking_send(line_buffer.clone());
+                        // PTY merges stdout/stderr; treat as Stdout for now
+                        let _ = tx.blocking_send(StreamMessage::Stdout(line_buffer.clone()));
                         line_buffer.clear();
                     }
                 }
             }
-            
+
             if !line_buffer.is_empty() {
-                let _ = tx.blocking_send(line_buffer);
+                let _ = tx.blocking_send(StreamMessage::Stdout(line_buffer));
             }
 
-            let _ = child.wait();
+            // Get exit code
+            let exit_code = match child.wait() {
+                Ok(status) => {
+                    if status.success() { 0 } else {
+                        // portable-pty ExitStatus doesn't always give code, default to 1
+                        1
+                    }
+                }
+                Err(_) => 1,
+            };
+
+            let _ = tx.blocking_send(StreamMessage::Exit(exit_code));
         });
 
         Ok(rx)
@@ -137,7 +140,6 @@ impl CommandExecutor for LinuxCommandExecutor {
     }
 
     async fn validate(&self, cmd: &str) -> Result<bool> {
-        // Use bash -n to test syntax validity
         let status = tokio::process::Command::new("bash")
             .args(["-n", "-c", cmd])
             .output()

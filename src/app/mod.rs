@@ -1,7 +1,11 @@
 ﻿pub mod config;
 pub mod console_state;
+pub mod history;
 pub mod monitors_task;
 pub mod state;
+pub mod sudo;
+pub mod suggestions;
+pub mod syntax;
 pub mod tabs;
 
 pub use config::{Config, ConfigManager};

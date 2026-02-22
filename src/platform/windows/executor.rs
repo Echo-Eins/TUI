@@ -205,12 +205,16 @@ impl PowerShellExecutor {
     }
 }
 
-use crate::platform::executor::CommandExecutor;
+use crate::platform::executor::{CommandExecutor, StreamMessage};
 use tokio::sync::mpsc;
 use async_trait::async_trait;
 
 #[async_trait]
 impl CommandExecutor for PowerShellExecutor {
+    fn name(&self) -> &str {
+        "powershell"
+    }
+
     async fn execute(&self, command: &str) -> Result<String> {
         let cache_key = command.to_string();
         // Check cache
@@ -323,13 +327,14 @@ impl CommandExecutor for PowerShellExecutor {
         Ok(stdout)
     }
 
-    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<String>> {
+    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<StreamMessage>> {
         let (tx, rx) = mpsc::channel(100);
         let cmd_owned = cmd.to_string();
         let exec = self.executable.clone();
-        
+
         tokio::spawn(async move {
-            let encoded_command = encode_powershell_command(&cmd_owned);
+            let full_cmd = format!("{}{}", PS_ENCODING_PREFIX, cmd_owned);
+            let encoded_command = encode_powershell_command(&full_cmd);
             let mut child = match TokioCommand::new(&exec)
                 .args(&[
                     "-NoProfile",
@@ -343,39 +348,68 @@ impl CommandExecutor for PowerShellExecutor {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(format!("Failed to spawn process: {}", e)).await;
+                    let _ = tx.send(StreamMessage::Stderr(format!("Failed to spawn: {}", e))).await;
+                    let _ = tx.send(StreamMessage::Exit(1)).await;
                     return;
                 }
             };
 
-            let mut stdout = match child.stdout.take() {
-                Some(s) => s,
-                None => return,
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            // Read stdout
+            if let Some(mut stdout) = stdout {
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let mut line_buffer = String::new();
+                    while let Ok(n) = stdout.read(&mut buf).await {
+                        if n == 0 { break; }
+                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        for c in text.chars() {
+                            line_buffer.push(c);
+                            if c == '\n' {
+                                let _ = tx_clone.send(StreamMessage::Stdout(line_buffer.clone())).await;
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+                    if !line_buffer.is_empty() {
+                        let _ = tx_clone.send(StreamMessage::Stdout(line_buffer)).await;
+                    }
+                });
+            }
+
+            // Read stderr
+            if let Some(mut stderr) = stderr {
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let mut line_buffer = String::new();
+                    while let Ok(n) = stderr.read(&mut buf).await {
+                        if n == 0 { break; }
+                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        for c in text.chars() {
+                            line_buffer.push(c);
+                            if c == '\n' {
+                                let _ = tx_clone.send(StreamMessage::Stderr(line_buffer.clone())).await;
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+                    if !line_buffer.is_empty() {
+                        let _ = tx_clone.send(StreamMessage::Stderr(line_buffer)).await;
+                    }
+                });
+            }
+
+            // Wait for exit
+            let exit_code = match child.wait().await {
+                Ok(status) => status.code().unwrap_or(1),
+                Err(_) => 1,
             };
 
-            let mut buf = [0u8; 1024];
-            let mut line_buffer = String::new();
-
-            while let Ok(n) = stdout.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                
-                let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                for c in text.chars() {
-                    line_buffer.push(c);
-                    if c == '\n' {
-                        let _ = tx.send(line_buffer.clone()).await;
-                        line_buffer.clear();
-                    }
-                }
-            }
-
-            if !line_buffer.is_empty() {
-                let _ = tx.send(line_buffer).await;
-            }
-
-            let _ = child.wait().await;
+            let _ = tx.send(StreamMessage::Exit(exit_code)).await;
         });
 
         Ok(rx)
