@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::app::state::{RamPanelFocus, RamProcessSortColumn};
-use crate::monitors::ram::ProcessMemoryInfo;
+use crate::monitors::ProcessMemoryInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes};
 

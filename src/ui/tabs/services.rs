@@ -10,7 +10,7 @@ use crate::app::{
     state::{ServiceSortColumn, ServiceStatusFilter, ServicesPanelFocus},
     App,
 };
-use crate::monitors::services::{ServiceEntry, ServiceStatus};
+use crate::monitors::{ServiceEntry, ServiceStartType, ServiceStatus};
 use crate::ui::theme::Theme;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -597,18 +597,18 @@ fn sort_services(services: &mut Vec<ServiceEntry>, column: ServiceSortColumn, as
             ServiceSortColumn::StartType => {
                 // Sort by start type priority: Automatic > Auto (Delayed) > Manual > Disabled
                 let a_priority = match a.start_type {
-                    crate::monitors::services::ServiceStartType::Automatic => 0,
-                    crate::monitors::services::ServiceStartType::AutomaticDelayedStart => 1,
-                    crate::monitors::services::ServiceStartType::Manual => 2,
-                    crate::monitors::services::ServiceStartType::Disabled => 3,
-                    crate::monitors::services::ServiceStartType::Unknown => 4,
+                    ServiceStartType::Automatic => 0,
+                    ServiceStartType::AutomaticDelayedStart => 1,
+                    ServiceStartType::Manual => 2,
+                    ServiceStartType::Disabled => 3,
+                    ServiceStartType::Unknown => 4,
                 };
                 let b_priority = match b.start_type {
-                    crate::monitors::services::ServiceStartType::Automatic => 0,
-                    crate::monitors::services::ServiceStartType::AutomaticDelayedStart => 1,
-                    crate::monitors::services::ServiceStartType::Manual => 2,
-                    crate::monitors::services::ServiceStartType::Disabled => 3,
-                    crate::monitors::services::ServiceStartType::Unknown => 4,
+                    ServiceStartType::Automatic => 0,
+                    ServiceStartType::AutomaticDelayedStart => 1,
+                    ServiceStartType::Manual => 2,
+                    ServiceStartType::Disabled => 3,
+                    ServiceStartType::Unknown => 4,
                 };
                 a_priority.cmp(&b_priority)
             }

@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::app::state::GpuProcessSortColumn;
-use crate::monitors::gpu::GpuProcessInfo;
+use crate::monitors::GpuProcessInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
 

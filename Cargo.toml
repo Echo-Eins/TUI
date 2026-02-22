@@ -42,6 +42,9 @@ chrono = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 
+# PTY support for terminal execution
+portable-pty = "0.8.1"
+
 
 # TUI runtime
 crossterm = { version = "0.28", features = ["event-stream"] }
