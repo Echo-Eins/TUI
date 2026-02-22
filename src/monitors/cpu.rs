@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use crate::integrations::{PowerShellExecutor, LinuxSysMonitor};
 use crate::utils::parse_json_array;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuData {
@@ -49,6 +52,8 @@ pub struct CpuMonitor {
     ps: PowerShellExecutor,
     #[allow(dead_code)]
     linux_sys: LinuxSysMonitor,
+    linux_prev_ticks: Mutex<HashMap<u32, u64>>,
+    linux_prev_timestamp: Mutex<Option<Instant>>,
 }
 
 const CPU_INFO_SCRIPT: &str = r#"
@@ -181,11 +186,12 @@ impl CpuMonitor {
         Ok(Self {
             ps,
             linux_sys: LinuxSysMonitor::new(),
+            linux_prev_ticks: Mutex::new(HashMap::new()),
+            linux_prev_timestamp: Mutex::new(None),
         })
     }
 
     pub async fn collect_data(&self) -> Result<CpuData> {
-        // Check if we're on Linux - use linux_sys, otherwise use PowerShell
         #[cfg(target_os = "linux")]
         {
             self.collect_data_linux().await
@@ -201,7 +207,7 @@ impl CpuMonitor {
     async fn collect_data_linux(&self) -> Result<CpuData> {
         let cpu_info = self.linux_sys.get_cpu_info()?;
         let overall_usage = self.linux_sys.get_cpu_usage()?;
-        let core_usage_values = self.linux_sys.get_core_usage()?;
+        let core_usage_values = self.linux_sys.get_per_core_usage()?;
 
         let core_usage: Vec<CoreUsage> = core_usage_values
             .iter()
@@ -212,27 +218,116 @@ impl CpuMonitor {
             })
             .collect();
 
-        let frequency = FrequencyInfo {
-            base_clock: cpu_info.frequency_mhz / 1000.0,
-            avg_frequency: cpu_info.frequency_mhz / 1000.0,
-            max_frequency: cpu_info.frequency_mhz / 1000.0,
-            boost_active: false,
+        // Get per-core frequencies for avg calculation
+        let per_core_freqs = self.linux_sys.get_per_core_frequencies();
+        let avg_freq_mhz = if !per_core_freqs.is_empty() {
+            per_core_freqs.iter().sum::<f32>() / per_core_freqs.len() as f32
+        } else {
+            cpu_info.current_frequency_mhz
         };
+
+        // Determine boost state from sysfs (accurate), with frequency-based fallback
+        let boost_active = match self.linux_sys.is_boost_enabled() {
+            Some(enabled) => enabled,
+            None => avg_freq_mhz > cpu_info.base_frequency_mhz * 1.05,
+        };
+
+        let frequency = FrequencyInfo {
+            base_clock: cpu_info.base_frequency_mhz / 1000.0,
+            avg_frequency: avg_freq_mhz / 1000.0,
+            max_frequency: cpu_info.max_frequency_mhz / 1000.0,
+            boost_active,
+        };
+
+        // Get real temperature
+        let temperature = self.linux_sys.get_cpu_temperature();
+
+        // Get power info from RAPL if available
+        let (current_power, max_power) = match self.linux_sys.get_cpu_power() {
+            Some((_, tdp)) => {
+                // Estimate current power from usage and TDP
+                let estimated = (overall_usage / 100.0) * tdp;
+                (estimated, tdp)
+            }
+            None => {
+                // Fallback: estimate with 65W TDP
+                let tdp = 65.0;
+                ((overall_usage / 100.0) * tdp, tdp)
+            }
+        };
+
+        // Get all processes with CPU usage
+        let top_processes = self.get_linux_processes()?;
 
         Ok(CpuData {
             name: cpu_info.name,
             overall_usage,
             core_count: cpu_info.core_count,
-            thread_count: cpu_info.core_count,
+            thread_count: cpu_info.thread_count,
             core_usage,
             frequency,
             power: PowerInfo {
-                current_power: (overall_usage / 100.0) * 65.0,  // Assume 65W TDP
-                max_power: 65.0,
+                current_power,
+                max_power,
             },
-            temperature: Some(50.0),  // Placeholder
-            top_processes: Vec::new(),  // Will implement later
+            temperature,
+            top_processes,
         })
+    }
+
+    fn get_linux_processes(&self) -> Result<Vec<ProcessInfo>> {
+        let processes = self.linux_sys.get_processes()?;
+        let now = Instant::now();
+
+        let clock_ticks_per_sec = 100u64; // sysconf(_SC_CLK_TCK) is typically 100 on Linux
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+
+        let mut prev_ticks = self.linux_prev_ticks.lock();
+        let mut prev_ts = self.linux_prev_timestamp.lock();
+
+        let elapsed_secs = prev_ts
+            .map(|t| now.saturating_duration_since(t).as_secs_f64())
+            .unwrap_or(0.0);
+
+        let mut result: Vec<ProcessInfo> = processes
+            .iter()
+            .map(|p| {
+                let cpu_usage = if elapsed_secs > 0.0 {
+                    if let Some(&prev) = prev_ticks.get(&p.pid) {
+                        let delta_ticks = p.cpu_ticks.saturating_sub(prev);
+                        let delta_secs = delta_ticks as f64 / clock_ticks_per_sec as f64;
+                        let usage = (delta_secs / elapsed_secs / num_cpus) * 100.0;
+                        (usage.clamp(0.0, 100.0)) as f32
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                ProcessInfo {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    cpu_usage,
+                    threads: p.threads,
+                    memory: p.memory,
+                }
+            })
+            .collect();
+
+        // Update previous ticks
+        prev_ticks.clear();
+        for p in &processes {
+            prev_ticks.insert(p.pid, p.cpu_ticks);
+        }
+        *prev_ts = Some(now);
+
+        // Sort by CPU usage descending
+        result.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(result)
     }
 
     async fn collect_data_windows(&self) -> Result<CpuData> {
@@ -272,17 +367,17 @@ impl CpuMonitor {
         })
     }
 
-    fn parse_cpu_info(output: &str) -> Result<CpuInfo> {
+    fn parse_cpu_info(output: &str) -> Result<CpuInfoParsed> {
         let info: Win32Processor = serde_json::from_str(output)
             .context("Failed to parse CPU info")?;
 
-        Ok(CpuInfo {
+        Ok(CpuInfoParsed {
             name: info.Name,
             max_clock_speed: info.MaxClockSpeed,
             current_clock_speed: info.CurrentClockSpeed,
             number_of_cores: info.NumberOfCores,
             number_of_logical_processors: info.NumberOfLogicalProcessors,
-            tdp: info.TDP.unwrap_or(65.0), // Default TDP if not available
+            tdp: info.TDP.unwrap_or(65.0),
         })
     }
 
@@ -315,7 +410,7 @@ impl CpuMonitor {
             .collect())
     }
 
-    fn get_frequency_info(&self, cpu_info: &CpuInfo, perf: &PerfInfo) -> Result<FrequencyInfo> {
+    fn get_frequency_info(&self, cpu_info: &CpuInfoParsed, perf: &PerfInfo) -> Result<FrequencyInfo> {
         let base_mhz = cpu_info.max_clock_speed.max(1) as f32;
         let avg_mhz = perf
             .avg_frequency()
@@ -335,7 +430,7 @@ impl CpuMonitor {
         })
     }
 
-    fn get_power_info(&self, cpu_info: &CpuInfo, overall_usage: f32, perf: &PerfInfo) -> PowerInfo {
+    fn get_power_info(&self, cpu_info: &CpuInfoParsed, overall_usage: f32, perf: &PerfInfo) -> PowerInfo {
         let util = perf
             .avg_utility()
             .unwrap_or(overall_usage)
@@ -375,7 +470,7 @@ impl CpuMonitor {
         Ok(temp)
     }
 
-    fn get_core_counts(&self, cpu_info: &CpuInfo) -> Result<(usize, usize)> {
+    fn get_core_counts(&self, cpu_info: &CpuInfoParsed) -> Result<(usize, usize)> {
         Ok((
             cpu_info.number_of_cores as usize,
             cpu_info.number_of_logical_processors as usize,
@@ -396,7 +491,7 @@ struct Win32Processor {
 }
 
 #[derive(Debug)]
-struct CpuInfo {
+struct CpuInfoParsed {
     name: String,
     max_clock_speed: u32,
     current_clock_speed: u32,

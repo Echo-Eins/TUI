@@ -416,59 +416,178 @@ impl DiskMonitor {
         let disk_stats = self.linux_sys.get_disk_stats().unwrap_or_default();
         let process_samples = self.linux_sys.get_process_io_samples().unwrap_or_default();
 
-        let physical_disks: Vec<PhysicalDiskInfo> = block_devices
+        // Build a mapping from device name to its block device info
+        let disk_devices: Vec<_> = block_devices
             .iter()
             .filter(|d| d.dev_type == "disk")
+            .collect();
+
+        // Build a mapping: partition device name -> parent disk name
+        let mut partition_to_disk: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for bd in &block_devices {
+            if let Some(ref parent) = bd.parent {
+                partition_to_disk.insert(bd.name.clone(), parent.clone());
+            }
+        }
+
+        // Build physical disks from block devices
+        let mut physical_disks: Vec<PhysicalDiskInfo> = disk_devices
+            .iter()
             .enumerate()
-            .map(|(idx, d)| PhysicalDiskInfo {
-                disk_number: idx as u32,
-                friendly_name: if d.model.trim().is_empty() {
-                    d.name.clone()
-                } else {
-                    d.model.clone()
-                },
-                model: d.model.clone(),
-                media_type: if d.rotational {
-                    "HDD".to_string()
-                } else {
-                    "SSD/NVMe".to_string()
-                },
-                bus_type: if d.transport.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    d.transport.clone()
-                },
-                size: d.size,
-                health_status: "Unknown".to_string(),
-                operational_status: "Online".to_string(),
-                temperature: None,
-                write_cache_enabled: false,
-                power_on_hours: None,
-                tbw: None,
-                wear_level: None,
-                partitions: block_devices
+            .map(|(idx, d)| {
+                // Collect mount points from all child devices (partitions)
+                let child_mounts: Vec<String> = block_devices
+                    .iter()
+                    .filter(|child| {
+                        child.parent.as_deref() == Some(d.name.as_str())
+                            || child.name == d.name
+                    })
+                    .filter_map(|child| child.mount_point.clone())
+                    .filter(|mp| !mp.is_empty())
+                    .collect();
+
+                // Also collect partition info with filesystem type
+                let partition_labels: Vec<String> = block_devices
                     .iter()
                     .filter(|child| child.parent.as_deref() == Some(d.name.as_str()))
-                    .filter_map(|child| child.mount_point.clone())
-                    .collect(),
+                    .map(|child| {
+                        let mount = child.mount_point.as_deref().unwrap_or("-");
+                        let fs = child.filesystem.as_deref().unwrap_or("-");
+                        let label = child.label.as_deref().unwrap_or("");
+                        if !label.is_empty() {
+                            format!("{} [{}] ({}) {}", child.name, fs, mount, label)
+                        } else {
+                            format!("{} [{}] ({})", child.name, fs, mount)
+                        }
+                    })
+                    .collect();
+
+                // Determine media type more precisely
+                let media_type = if d.rotational {
+                    "HDD".to_string()
+                } else if d.transport == "nvme" || d.name.starts_with("nvme") {
+                    "NVMe SSD".to_string()
+                } else {
+                    "SSD".to_string()
+                };
+
+                let bus_type = if d.transport.is_empty() {
+                    // Try to infer from device name
+                    if d.name.starts_with("nvme") {
+                        "NVMe".to_string()
+                    } else if d.name.starts_with("sd") {
+                        "SATA/SAS".to_string()
+                    } else {
+                        "Unknown".to_string()
+                    }
+                } else {
+                    d.transport.to_uppercase()
+                };
+
+                // Try to get SMART data
+                let smart = self.linux_sys.get_smart_data(&d.name);
+
+                PhysicalDiskInfo {
+                    disk_number: idx as u32,
+                    friendly_name: if d.model.trim().is_empty() {
+                        d.name.clone()
+                    } else {
+                        d.model.trim().to_string()
+                    },
+                    model: if d.model.trim().is_empty() {
+                        d.name.clone()
+                    } else {
+                        d.model.trim().to_string()
+                    },
+                    media_type,
+                    bus_type,
+                    size: d.size,
+                    health_status: smart
+                        .as_ref()
+                        .map(|s| s.health_status.clone())
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    operational_status: "Online".to_string(),
+                    temperature: smart.as_ref().and_then(|s| s.temperature),
+                    write_cache_enabled: false,
+                    power_on_hours: smart.as_ref().and_then(|s| s.power_on_hours),
+                    tbw: None,
+                    wear_level: None,
+                    partitions: if partition_labels.is_empty() {
+                        child_mounts
+                    } else {
+                        partition_labels
+                    },
+                }
             })
             .collect();
 
+        // If no block devices found (e.g., in a container), create physical disks from df output
+        if physical_disks.is_empty() && !disks.is_empty() {
+            // Group disks by device name to avoid duplicates (btrfs, etc.)
+            let mut seen_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (idx, d) in disks.iter().enumerate() {
+                if !d.is_primary_mount {
+                    continue; // Skip duplicate mounts (btrfs subvolumes)
+                }
+                if seen_devices.contains(&d.name) {
+                    continue;
+                }
+                seen_devices.insert(d.name.clone());
+
+                physical_disks.push(PhysicalDiskInfo {
+                    disk_number: idx as u32,
+                    friendly_name: d.name.clone(),
+                    model: d.name.clone(),
+                    media_type: d.fs_type.clone(),
+                    bus_type: d.fs_type.clone(),
+                    size: d.total,
+                    health_status: "Unknown".to_string(),
+                    operational_status: "Online".to_string(),
+                    temperature: None,
+                    write_cache_enabled: false,
+                    power_on_hours: None,
+                    tbw: None,
+                    wear_level: None,
+                    partitions: vec![d.mount_point.clone()],
+                });
+            }
+        }
+
+        // Build logical drives from df output, linking to physical disks
         let logical_drives: Vec<DriveInfo> = disks
             .iter()
-            .map(|d| DriveInfo {
-                letter: d.mount_point.clone(),
-                name: d.name.clone(),
-                drive_type: d.fs_type.clone(),
-                file_system: d.fs_type.clone(),
-                total: d.total,
-                used: d.used,
-                free: d.available,
-                disk_number: None,
+            .filter(|d| d.is_primary_mount)
+            .map(|d| {
+                // Try to determine which physical disk this belongs to
+                let device_basename = d.name.trim_start_matches("/dev/").to_string();
+                let disk_number = if let Some(parent) = partition_to_disk.get(&device_basename) {
+                    disk_devices.iter().position(|dd| dd.name == *parent).map(|i| i as u32)
+                } else {
+                    // Try matching by prefix (e.g., sda1 -> sda)
+                    disk_devices.iter().position(|dd| device_basename.starts_with(&dd.name)).map(|i| i as u32)
+                };
+
+                DriveInfo {
+                    letter: d.mount_point.clone(),
+                    name: d.name.clone(),
+                    drive_type: d.fs_type.clone(),
+                    file_system: d.fs_type.clone(),
+                    total: d.total,
+                    used: d.used,
+                    free: d.available,
+                    disk_number,
+                }
             })
             .collect();
 
-        let io_stats = self.compute_linux_io_stats(&disk_stats);
+        // Compute I/O stats - only for actual disk devices (not partitions)
+        let disk_device_names: Vec<String> = disk_devices.iter().map(|d| d.name.clone()).collect();
+        let relevant_stats: Vec<_> = disk_stats
+            .iter()
+            .filter(|s| disk_device_names.contains(&s.name))
+            .collect();
+
+        let io_stats = self.compute_linux_io_stats_named(&relevant_stats, &disk_device_names);
         let process_activity = self.compute_linux_process_activity(&process_samples);
         self.update_io_history(&io_stats);
         let io_history = self.io_history_map.lock().values().cloned().collect();
@@ -483,6 +602,12 @@ impl DiskMonitor {
     }
 
     fn compute_linux_io_stats(&self, current_stats: &[RawDiskStats]) -> Vec<DiskIOStats> {
+        let stats_refs: Vec<&RawDiskStats> = current_stats.iter().collect();
+        let names: Vec<String> = current_stats.iter().map(|s| s.name.clone()).collect();
+        self.compute_linux_io_stats_named(&stats_refs, &names)
+    }
+
+    fn compute_linux_io_stats_named(&self, current_stats: &[&RawDiskStats], device_names: &[String]) -> Vec<DiskIOStats> {
         let now = Instant::now();
         let mut prev_map = self.linux_diskstats_prev.lock();
         let mut prev_ts = self.linux_diskstats_ts.lock();
@@ -491,12 +616,19 @@ impl DiskMonitor {
             .unwrap_or(0.0);
 
         let mut out = Vec::new();
-        for (idx, stat) in current_stats.iter().enumerate() {
+        for stat in current_stats.iter() {
+            // Map disk_number based on position in device_names
+            let disk_number = device_names
+                .iter()
+                .position(|n| n == &stat.name)
+                .unwrap_or(0) as u32;
+
             let mut read_speed = 0.0;
             let mut write_speed = 0.0;
             let mut read_iops = 0.0;
             let mut write_iops = 0.0;
             let mut avg_response_time = 0.0;
+            let mut active_time = 0.0;
 
             if elapsed > 0.0 {
                 if let Some(prev) = prev_map.get(&stat.name) {
@@ -505,12 +637,19 @@ impl DiskMonitor {
                         stat.sectors_written.saturating_sub(prev.sectors_written);
                     let delta_reads = stat.reads_completed.saturating_sub(prev.reads_completed);
                     let delta_writes = stat.writes_completed.saturating_sub(prev.writes_completed);
+                    let delta_io_ms = stat.ms_doing_io.saturating_sub(prev.ms_doing_io);
 
                     read_speed = (delta_read_sectors as f64 * 512.0) / (1024.0 * 1024.0) / elapsed;
                     write_speed =
                         (delta_write_sectors as f64 * 512.0) / (1024.0 * 1024.0) / elapsed;
                     read_iops = delta_reads as f64 / elapsed;
                     write_iops = delta_writes as f64 / elapsed;
+
+                    // active_time: ms_doing_io / elapsed_ms * 100 = % of time doing I/O
+                    let elapsed_ms = elapsed * 1000.0;
+                    if elapsed_ms > 0.0 {
+                        active_time = (delta_io_ms as f64 / elapsed_ms * 100.0).min(100.0);
+                    }
 
                     let delta_ms = stat.ms_reading.saturating_sub(prev.ms_reading)
                         + stat.ms_writing.saturating_sub(prev.ms_writing);
@@ -522,20 +661,20 @@ impl DiskMonitor {
             }
 
             out.push(DiskIOStats {
-                disk_number: idx as u32,
+                disk_number,
                 read_speed,
                 write_speed,
                 read_iops,
                 write_iops,
                 queue_depth: stat.io_in_progress as f64,
                 avg_response_time,
-                active_time: 0.0,
+                active_time,
             });
         }
 
         prev_map.clear();
         for stat in current_stats {
-            prev_map.insert(stat.name.clone(), stat.clone());
+            prev_map.insert(stat.name.clone(), (*stat).clone());
         }
         *prev_ts = Some(now);
 

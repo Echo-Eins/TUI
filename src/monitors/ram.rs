@@ -25,10 +25,24 @@ pub struct RamData {
     // Top Memory Consumers
     pub top_processes: Vec<ProcessMemoryInfo>,
 
-    // Pagefile Information
+    // Pagefile / Swap Information
     pub pagefiles: Vec<PagefileInfo>,
     pub total_pagefile_size: u64,
     pub total_pagefile_used: u64,
+
+    // Zram Information (Linux)
+    pub zram_devices: Vec<ZramDeviceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZramDeviceInfo {
+    pub name: String,
+    pub disksize: u64,
+    pub orig_data_size: u64,
+    pub compr_data_size: u64,
+    pub mem_used_total: u64,
+    pub compression_ratio: f64,
+    pub algorithm: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,11 +328,12 @@ impl RamMonitor {
     async fn collect_data_linux(&self) -> Result<RamData> {
         let mem_info = self.linux_sys.get_memory_info()?;
 
+        // Get processes sorted by memory
         let mut processes = self.linux_sys.get_processes().unwrap_or_default();
         processes.sort_by(|a, b| b.memory.cmp(&a.memory));
         let top_processes: Vec<ProcessMemoryInfo> = processes
             .into_iter()
-            .take(10)
+            .filter(|p| p.memory > 0)
             .map(|proc| ProcessMemoryInfo {
                 pid: proc.pid,
                 name: proc.name,
@@ -327,9 +342,11 @@ impl RamMonitor {
             })
             .collect();
 
+        // Committed memory: use values from /proc/meminfo
         let commit_limit = if mem_info.commit_limit > 0 {
             mem_info.commit_limit
         } else {
+            // CommitLimit = total RAM + total swap
             mem_info.total + mem_info.swap_total
         };
         let committed = if mem_info.committed_as > 0 {
@@ -343,36 +360,85 @@ impl RamMonitor {
             0.0
         };
 
-        let pagefiles = vec![PagefileInfo {
-            name: "swap".to_string(),
-            total_size: mem_info.swap_total,
-            current_usage: mem_info.swap_used,
-            peak_usage: mem_info.swap_used,
-            usage_percent: if mem_info.swap_total > 0 {
-                (mem_info.swap_used as f64 / mem_info.swap_total as f64) * 100.0
-            } else {
-                0.0
-            },
-        }];
+        // Memory breakdown for Linux:
+        // in_use = total - available (actual memory actively in use by apps)
+        // cached = Cached + SReclaimable (file cache, reclaimable)
+        // standby = Buffers (analogous to standby, can be reclaimed)
+        // modified = Dirty pages (waiting to be written to disk)
+        let total_cached = mem_info.cached + mem_info.sreclaimable;
+        let in_use = mem_info.total.saturating_sub(mem_info.available);
+
+        // Swap/pagefile info
+        let mut pagefiles = Vec::new();
+        if mem_info.swap_total > 0 {
+            pagefiles.push(PagefileInfo {
+                name: "swap".to_string(),
+                total_size: mem_info.swap_total,
+                current_usage: mem_info.swap_used,
+                peak_usage: mem_info.swap_used,
+                usage_percent: if mem_info.swap_total > 0 {
+                    (mem_info.swap_used as f64 / mem_info.swap_total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            });
+        }
+
+        // Detect zram devices
+        let zram_infos = self.linux_sys.get_zram_info();
+        let zram_devices: Vec<ZramDeviceInfo> = zram_infos
+            .iter()
+            .map(|z| ZramDeviceInfo {
+                name: z.name.clone(),
+                disksize: z.disksize,
+                orig_data_size: z.orig_data_size,
+                compr_data_size: z.compr_data_size,
+                mem_used_total: z.mem_used_total,
+                compression_ratio: z.compression_ratio,
+                algorithm: z.algorithm.clone(),
+            })
+            .collect();
+
+        // Add zram as additional "swap" entries in pagefiles
+        for z in &zram_infos {
+            pagefiles.push(PagefileInfo {
+                name: format!("zram:{}", z.name),
+                total_size: z.disksize,
+                current_usage: z.orig_data_size,
+                peak_usage: z.orig_data_size,
+                usage_percent: if z.disksize > 0 {
+                    (z.orig_data_size as f64 / z.disksize as f64) * 100.0
+                } else {
+                    0.0
+                },
+            });
+        }
+
+        let total_pagefile_size: u64 = pagefiles.iter().map(|p| p.total_size).sum();
+        let total_pagefile_used: u64 = pagefiles.iter().map(|p| p.current_usage).sum();
+
+        // Get memory hardware info (type, speed)
+        let hw_info = self.linux_sys.get_memory_hardware_info();
 
         Ok(RamData {
             total: mem_info.total,
             used: mem_info.used,
             available: mem_info.available,
-            cached: mem_info.cached + mem_info.sreclaimable,
+            cached: total_cached,
             free: mem_info.free,
-            speed: String::from("Unknown"),
-            type_name: String::from("Linux"),
-            in_use: mem_info.active,
-            standby: mem_info.inactive,
+            speed: hw_info.speed,
+            type_name: hw_info.memory_type,
+            in_use,
+            standby: mem_info.buffers,
             modified: mem_info.dirty,
             committed,
             commit_limit,
             commit_percent,
             top_processes,
             pagefiles,
-            total_pagefile_size: mem_info.swap_total,
-            total_pagefile_used: mem_info.swap_used,
+            total_pagefile_size,
+            total_pagefile_used,
+            zram_devices,
         })
     }
 
@@ -426,6 +492,7 @@ impl RamMonitor {
             pagefiles,
             total_pagefile_size,
             total_pagefile_used,
+            zram_devices: Vec::new(),
         })
     }
 

@@ -148,12 +148,12 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let help_text = if app.state.command_menu_active {
-        "History: [Up/Down] Select │ [Enter] Use │ [Esc] Close"
-    } else if app.state.command_input.is_empty() {
-        "[Type] Command │ [Up/Down] History │ [F2] Compact │ [Tab] Next │ [Ctrl+F] History │ [Ctrl+C] Exit"
-    } else {
-        &format!("Command: {}_ [Enter] Execute [Esc] Cancel", app.state.command_input)
+    let help_text = match app.state.tab_manager.current() {
+        TabType::Cpu => "[↑↓] Navigate │ [p/n/c/t/m] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Gpu => "[↑↓] Navigate │ [p/n/g/m/t] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Ram => "[←→] Focus │ [↑↓] Navigate │ [p/n/w/b] Sort │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Disk => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
+        _ => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
     };
 
     let block = Block::default().borders(Borders::ALL);

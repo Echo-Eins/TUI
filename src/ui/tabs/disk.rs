@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Sparkline, Table},
+    widgets::{Block, Borders, Paragraph, Row, Sparkline, Table},
     Frame,
 };
 
@@ -65,33 +65,159 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, them
         return;
     }
 
-    // Calculate constraints for each disk (each disk gets equal space)
-    let disk_count = data.physical_disks.len();
-    let height_per_disk = 12; // Height for each disk panel
-    let mut constraints = Vec::new();
-
-    for _ in 0..disk_count {
-        constraints.push(Constraint::Length(height_per_disk));
-    }
-
-    if constraints.is_empty() {
-        constraints.push(Constraint::Min(0));
-    } else {
-        // Add remaining space
-        constraints.push(Constraint::Min(0));
-    }
-
+    // Unified layout: disk summary table + I/O section + process table
+    let disk_summary_height = (data.physical_disks.len() as u16 * 3) + 2; // 3 lines per disk + border
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(disk_summary_height.min(14)), // Disk summary with usage bars
+            Constraint::Length(8),   // I/O statistics and graphs
+            Constraint::Min(8),      // Details & Processes
+        ])
         .split(area);
 
-    // Render each physical disk
-    for (i, disk) in data.physical_disks.iter().enumerate() {
-        if i < chunks.len() {
-            render_physical_disk(f, chunks[i], disk, data, theme);
+    // Disk summary table with usage gauges
+    render_disk_summary(f, chunks[0], data, theme);
+
+    // I/O section: show first disk's I/O stats and combined graph
+    if let Some(first_disk) = data.physical_disks.first() {
+        render_io_stats(f, chunks[1], first_disk, data, theme);
+    }
+
+    // Bottom: Details & Processes side by side
+    render_combined_details(f, chunks[2], data, theme);
+}
+
+fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, theme: &Theme) {
+    let mut lines = Vec::new();
+
+    for disk in &data.physical_disks {
+        let health_indicator = get_health_indicator(&disk.health_status);
+        let free_space = get_disk_free_space(disk, data);
+        let used_space = disk.size.saturating_sub(free_space);
+        let usage_pct = if disk.size > 0 {
+            (used_space as f64 / disk.size as f64 * 100.0) as f32
+        } else {
+            0.0
+        };
+
+        let temp_str = if let Some(temp) = disk.temperature {
+            format!(" {:.0}°C", temp)
+        } else {
+            String::new()
+        };
+
+        let smart_str = if let Some(hours) = disk.power_on_hours {
+            format!(" {}h", hours)
+        } else {
+            String::new()
+        };
+
+        // Header line: model, type, size, health
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", health_indicator),
+                Style::default().fg(get_health_color(&disk.health_status)),
+            ),
+            Span::styled(
+                format!("{} ", disk.model),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} {} ", disk.media_type, disk.bus_type),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{}", format_bytes(disk.size)),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("{}{}", temp_str, smart_str),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+
+        // Usage bar line
+        let bar = create_progress_bar(usage_pct, 30);
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                bar,
+                Style::default().fg(get_usage_color(usage_pct)),
+            ),
+            Span::raw(format!(" {:.0}%  {} / {}", usage_pct, format_bytes(used_space), format_bytes(disk.size))),
+        ]));
+
+        // Partitions on one line
+        let parts: Vec<String> = disk.partitions.iter().take(4).cloned().collect();
+        if !parts.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("   Partitions: "),
+                Span::styled(
+                    parts.join("  "),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]));
         }
     }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("Disks ({})", data.physical_disks.len()))
+        .border_style(Style::default().fg(theme.disk_color));
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(para, area);
+}
+
+fn render_combined_details(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, theme: &Theme) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .split(area);
+
+    // Left: logical drives table
+    let mut drive_lines = Vec::new();
+    for drive in &data.logical_drives {
+        let usage_pct = if drive.total > 0 {
+            (drive.used as f64 / drive.total as f64 * 100.0) as f32
+        } else {
+            0.0
+        };
+        let bar = create_progress_bar(usage_pct, 12);
+        drive_lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:12} ", drive.letter),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("{:6} ", drive.file_system),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(bar),
+            Span::raw(format!(" {:.0}%  {} / {}", usage_pct, format_bytes(drive.used), format_bytes(drive.total))),
+        ]));
+    }
+
+    let drives_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Logical Drives")
+        .border_style(Style::default().fg(theme.disk_color));
+
+    let drives_para = Paragraph::new(drive_lines)
+        .block(drives_block)
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(drives_para, chunks[0]);
+
+    // Right: Process table
+    render_process_table(f, chunks[1], data, theme);
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, theme: &Theme) {
@@ -131,104 +257,6 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, t
     f.render_widget(para, area);
 }
 
-fn render_physical_disk(
-    f: &mut Frame,
-    area: Rect,
-    disk: &crate::monitors::PhysicalDiskInfo,
-    all_data: &crate::monitors::DiskData,
-    theme: &Theme,
-) {
-    let system_drive = system_drive_letter();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header with model and health
-            Constraint::Length(3), // Overall usage
-            Constraint::Length(8), // I/O graphs
-            Constraint::Min(8),    // Details, partitions, and process table
-        ])
-        .split(area);
-
-    // Header
-    let health_indicator = get_health_indicator(&disk.health_status);
-    let temp_str = if let Some(temp) = disk.temperature {
-        format!("  {}°C", temp)
-    } else {
-        String::new()
-    };
-
-    let disk_label = if let Some(system) = system_drive.as_ref() {
-        if disk
-            .partitions
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(system))
-        {
-            format!("Disk {} (System)", disk.disk_number)
-        } else {
-            format!("Disk {}", disk.disk_number)
-        }
-    } else {
-        format!("Disk {}", disk.disk_number)
-    };
-    let header = format!(
-        "{} {}: {} {} | {} | {}{}",
-        health_indicator,
-        disk_label,
-        disk.model,
-        disk.media_type,
-        disk.bus_type,
-        format_bytes(disk.size),
-        temp_str
-    );
-
-    let header_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
-        .border_style(Style::default().fg(get_health_color(&disk.health_status)));
-
-    let header_text = Paragraph::new(header).block(header_block).style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    f.render_widget(header_text, chunks[0]);
-
-    // Overall usage gauge
-    let free_space = get_disk_free_space(disk, all_data);
-    let used_space = disk.size.saturating_sub(free_space);
-    let usage_percent = if disk.size > 0 {
-        ((used_space as f64 / disk.size as f64) * 100.0) as u16
-    } else {
-        0
-    };
-
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .title("Total Usage"),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(get_usage_color(usage_percent as f32))
-                .add_modifier(Modifier::BOLD),
-        )
-        .percent(usage_percent)
-        .label(format!(
-            "{}% - {} / {}",
-            usage_percent,
-            format_bytes(used_space),
-            format_bytes(disk.size)
-        ));
-
-    f.render_widget(gauge, chunks[1]);
-
-    // I/O Statistics and Graphs
-    render_io_stats(f, chunks[2], disk, all_data, theme);
-
-    // Details, partitions, and process table
-    render_disk_details(f, chunks[3], disk, all_data, theme);
-}
 
 fn render_io_stats(
     f: &mut Frame,
@@ -412,119 +440,6 @@ fn render_io_graphs(
     }
 }
 
-fn render_disk_details(
-    f: &mut Frame,
-    area: Rect,
-    disk: &crate::monitors::PhysicalDiskInfo,
-    all_data: &crate::monitors::DiskData,
-    theme: &Theme,
-) {
-    let system_drive = system_drive_letter();
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50), // Details and partitions
-            Constraint::Percentage(50), // Process table
-        ])
-        .split(area);
-
-    // Left side: Details and partitions
-    let mut detail_lines = vec![];
-
-    // Health and operational status
-    detail_lines.push(Line::from(vec![
-        Span::raw("  Health: "),
-        Span::styled(
-            &disk.health_status,
-            Style::default()
-                .fg(get_health_color(&disk.health_status))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  |  Status: "),
-        Span::styled(&disk.operational_status, Style::default().fg(Color::Cyan)),
-    ]));
-
-    // SMART data if available
-    if let Some(hours) = disk.power_on_hours {
-        detail_lines.push(Line::from(vec![
-            Span::raw("  Power-On Hours: "),
-            Span::styled(format!("{} hrs", hours), Style::default().fg(Color::Yellow)),
-        ]));
-    }
-
-    if let Some(tbw) = disk.tbw {
-        detail_lines.push(Line::from(vec![
-            Span::raw("  Total Bytes Written: "),
-            Span::styled(format_bytes(tbw), Style::default().fg(Color::Magenta)),
-        ]));
-    }
-
-    if let Some(wear) = disk.wear_level {
-        detail_lines.push(Line::from(vec![
-            Span::raw("  Wear Level: "),
-            Span::styled(format!("{:.1}%", wear), Style::default().fg(Color::Green)),
-        ]));
-    }
-
-    // Partitions
-    if !disk.partitions.is_empty() {
-        detail_lines.push(Line::from(""));
-        detail_lines.push(Line::from(vec![Span::styled(
-            "  Partitions:",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]));
-
-        for partition_letter in &disk.partitions {
-            if let Some(drive) = all_data
-                .logical_drives
-                .iter()
-                .find(|d| &d.letter == partition_letter)
-            {
-                let is_system = system_drive
-                    .as_ref()
-                    .map(|letter| drive.letter.eq_ignore_ascii_case(letter))
-                    .unwrap_or(false);
-                let label = if is_system {
-                    format!("{} (System)", drive.letter)
-                } else {
-                    drive.letter.clone()
-                };
-                let usage_pct = if drive.total > 0 {
-                    (drive.used as f64 / drive.total as f64 * 100.0) as f32
-                } else {
-                    0.0
-                };
-
-                detail_lines.push(Line::from(vec![
-                    Span::raw(format!("    {:12} ", label)),
-                    Span::styled(
-                        format!("{:15}", drive.name),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::raw("  "),
-                    Span::raw(create_progress_bar(usage_pct, 15)),
-                    Span::raw(format!("  {:.0}%", usage_pct)),
-                ]));
-            }
-        }
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Details & Partitions")
-        .border_style(Style::default().fg(theme.disk_color));
-
-    let para = Paragraph::new(detail_lines)
-        .block(block)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(para, chunks[0]);
-
-    // Right side: Process table
-    render_process_table(f, chunks[1], all_data, theme);
-}
 
 fn render_process_table(
     f: &mut Frame,
@@ -601,17 +516,6 @@ fn render_process_table(
         .column_spacing(1);
 
     f.render_widget(table, area);
-}
-
-fn system_drive_letter() -> Option<String> {
-    let drive = std::env::var("SystemDrive").ok()?;
-    let trimmed = drive.trim().trim_end_matches('\\');
-    let normalized = if trimmed.ends_with(':') {
-        trimmed.to_string()
-    } else {
-        format!("{}:", trimmed)
-    };
-    Some(normalized.to_uppercase())
 }
 
 fn get_health_indicator(health_status: &str) -> &'static str {

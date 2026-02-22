@@ -1,58 +1,23 @@
-# Cardputer Remote Desktop Server Configuration
-# Version: 1.0.0
-
 [server]
-# TCP port for connections
 port = 19847
-
-# Session timeout in seconds (0 = never timeout)
 session_timeout_secs = 0
-
-# Maximum FPS for screen updates
 max_fps = 10
-
-# JPEG quality (1-100)
 jpeg_quality = 70
 
 [security]
-# 16-byte discovery cookie (hex encoded, 32 characters)
-# Generate new one: openssl rand -hex 16
-discovery_cookie = "a1b2c3d4e5f6789012345678deadbeef"
-
-# Private key for ECDH (secp256r1, hex encoded)
-# Generate new one: openssl ecparam -name prime256v1 -genkey -noout | openssl ec -text -noout
-# Then extract the private key bytes (32 bytes = 64 hex chars)
-private_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-# Expected Cardputer public key (compressed, 33 bytes = 66 hex chars)
-# This is used for mutual authentication
-cardputer_public_key = "02deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef01"
+discovery_cookie = "00000000000000000000000000000000"
+private_key = "0000000000000000000000000000000000000000000000000000000000000000"
+cardputer_public_key = "020000000000000000000000000000000000000000000000000000000000000000"
 
 [network]
-# mDNS service name (will be advertised as _cardputer-remote._tcp.local)
-mdns_service_name = "cardputer-remote"
-
-# Device name shown to Cardputer during discovery
-device_name = "MyPC"
-
-# Bind address (0.0.0.0 for all interfaces)
+mdns_service_name = "CardputerRemote"
+device_name = "PC"
 bind_address = "0.0.0.0"
 
 [display]
-# Target resolution for Cardputer (240x135)
 target_width = 240
 target_height = 135
 
-# Screen capture region (null = full screen)
-# Format: [x, y, width, height]
-# capture_region = [0, 0, 1920, 1080]
-
 [logging]
-# Log level: trace, debug, info, warn, error
 level = "info"
-
-# Log file path (null = stdout only)
-log_file = "cardputer-remote.log"
-
-# Enable JSON format for structured logging
 json_format = false

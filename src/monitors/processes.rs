@@ -60,22 +60,63 @@ impl ProcessMonitor {
     async fn collect_data_linux(&self) -> Result<ProcessData> {
         let linux_processes = self.linux_sys.get_processes()?;
 
-        let processes: Vec<ProcessEntry> = linux_processes
-            .into_iter()
-            .map(|p| ProcessEntry {
-                pid: p.pid,
-                name: p.name,
-                cpu_usage: 0.0,  // Will calculate later
-                memory: p.memory,
-                threads: p.threads,
-                user: String::from("user"),
-                command_line: p.cmdline,
-                start_time: None,
-                handle_count: 0,
-                io_read_bytes: 0,
-                io_write_bytes: 0,
+        let now = Instant::now();
+        let clock_ticks_per_sec = 100u64;
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+
+        let mut prev_times = self.last_cpu_times.lock();
+        let mut prev_ts = self.last_timestamp.lock();
+        let elapsed_secs = prev_ts
+            .map(|t| now.saturating_duration_since(t).as_secs_f64())
+            .unwrap_or(0.0);
+
+        let mut processes: Vec<ProcessEntry> = linux_processes
+            .iter()
+            .map(|p| {
+                let cpu_usage = if elapsed_secs > 0.0 {
+                    let cpu_time_secs = p.cpu_ticks as f64 / clock_ticks_per_sec as f64;
+                    if let Some(&prev) = prev_times.get(&p.pid) {
+                        let delta = (cpu_time_secs - prev).max(0.0);
+                        let usage = (delta / elapsed_secs / num_cpus) * 100.0;
+                        usage.clamp(0.0, 100.0) as f32
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                ProcessEntry {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    cpu_usage,
+                    memory: p.memory,
+                    threads: p.threads,
+                    user: p.user.clone(),
+                    command_line: p.cmdline.clone(),
+                    start_time: None,
+                    handle_count: 0,
+                    io_read_bytes: 0,
+                    io_write_bytes: 0,
+                }
             })
             .collect();
+
+        // Update previous CPU times
+        prev_times.clear();
+        for p in &linux_processes {
+            let cpu_time_secs = p.cpu_ticks as f64 / clock_ticks_per_sec as f64;
+            prev_times.insert(p.pid, cpu_time_secs);
+        }
+        *prev_ts = Some(now);
+
+        processes.sort_by(|a, b| {
+            b.cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(ProcessData { processes })
     }
