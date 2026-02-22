@@ -26,18 +26,36 @@ impl LinuxDiskMonitor {
 
 impl DiskMonitorTrait for LinuxDiskMonitor {
     async fn collect_data(&self) -> Result<DiskData> {
-        let logical_drives = self.get_logical_drives()?;
+        let mut logical_drives = self.get_logical_drives()?;
         let mut physical_disks = self.get_physical_disks()?;
 
-        let mounts = self.linux_sys.get_mounts()?;
-        for mount in &mounts {
-            if mount.device.starts_with("/dev/") {
-                let dev_name = mount.device.trim_start_matches("/dev/");
-                let disk_name = dev_name.trim_end_matches(|c: char| c.is_ascii_digit());
-                if let Some(disk) = physical_disks.iter_mut().find(|d| d.friendly_name == disk_name) {
-                    if !disk.partitions.contains(&mount.mount_point) {
-                        disk.partitions.push(mount.mount_point.clone());
-                    }
+        // Link logical drives to physical disks using device names from DiskInfo
+        let disk_info = self.linux_sys.get_disk_info()?;
+        for d in &disk_info {
+            // d.name is e.g. "/dev/sda1", "/dev/nvme0n1p2"
+            let dev_name = d.name.trim_start_matches("/dev/");
+            // Strip trailing partition number: sda1 -> sda, nvme0n1p2 -> nvme0n1
+            let disk_name = if dev_name.contains("nvme") || dev_name.contains("mmc") {
+                // NVMe: nvme0n1p2 -> nvme0n1
+                dev_name.rsplit_once('p')
+                    .filter(|(base, _)| base.ends_with(|c: char| c.is_ascii_digit()))
+                    .map(|(base, _)| base)
+                    .unwrap_or(dev_name)
+            } else {
+                // SATA/SCSI: sda1 -> sda
+                dev_name.trim_end_matches(|c: char| c.is_ascii_digit())
+            };
+
+            if let Some(phys) = physical_disks.iter().find(|p| p.friendly_name == disk_name) {
+                if let Some(drive) = logical_drives.iter_mut().find(|l| l.letter == d.mount_point) {
+                    drive.disk_number = Some(phys.disk_number);
+                }
+            }
+
+            // Also update partitions on physical disks
+            if let Some(phys) = physical_disks.iter_mut().find(|p| p.friendly_name == disk_name) {
+                if !phys.partitions.contains(&d.mount_point) {
+                    phys.partitions.push(d.mount_point.clone());
                 }
             }
         }
@@ -81,28 +99,29 @@ impl DiskMonitorTrait for LinuxDiskMonitor {
 
 impl LinuxDiskMonitor {
     fn get_logical_drives(&self) -> Result<Vec<DriveInfo>> {
-        let mounts = self.linux_sys.get_mounts()?;
+        let disk_info = self.linux_sys.get_disk_info()?;
         let mut drives = Vec::new();
 
-        for mount in mounts {
-            if let Ok(space) = self.linux_sys.get_disk_space(&mount.mount_point) {
-                let name = if mount.mount_point == "/" {
-                    "Root".to_string()
-                } else {
-                    mount.mount_point.split('/').last().unwrap_or(&mount.mount_point).to_string()
-                };
-
-                drives.push(DriveInfo {
-                    letter: mount.mount_point.clone(),
-                    name,
-                    drive_type: mount.fs_type.clone(),
-                    file_system: mount.fs_type,
-                    total: space.total_bytes,
-                    used: space.used_bytes,
-                    free: space.free_bytes,
-                    disk_number: None,
-                });
+        for d in disk_info {
+            if !d.is_primary_mount {
+                continue; // Skip duplicate btrfs subvolumes
             }
+            let name = if d.mount_point == "/" {
+                "Root".to_string()
+            } else {
+                d.mount_point.split('/').last().unwrap_or(&d.mount_point).to_string()
+            };
+
+            drives.push(DriveInfo {
+                letter: d.mount_point,
+                name,
+                drive_type: d.fs_type.clone(),
+                file_system: d.fs_type,
+                total: d.total,
+                used: d.used,
+                free: d.available,
+                disk_number: None,
+            });
         }
 
         Ok(drives)
@@ -112,25 +131,50 @@ impl LinuxDiskMonitor {
         let block_devices = self.linux_sys.get_block_devices()?;
         let mut disks = Vec::new();
 
-        for (i, dev) in block_devices.into_iter().enumerate() {
-            let smart = self.linux_sys.get_smart_data(&dev.name).ok().flatten();
-            let temps = self.linux_sys.get_disk_temperatures();
-            let temperature = temps.get(&dev.name).copied().or_else(|| smart.as_ref().and_then(|s| s.temperature));
+        // Only pick actual disks (not partitions)
+        let disk_devices: Vec<_> = block_devices.iter()
+            .filter(|d| d.dev_type == "disk")
+            .collect();
+
+        for (i, dev) in disk_devices.iter().enumerate() {
+            let smart = self.linux_sys.get_smart_data(&dev.name);
+            let temperature = smart.as_ref().and_then(|s| s.temperature);
+
+            let media_type = if dev.rotational {
+                "HDD".to_string()
+            } else if dev.transport == "nvme" || dev.name.starts_with("nvme") {
+                "NVMe SSD".to_string()
+            } else {
+                "SSD".to_string()
+            };
+
+            let bus_type = if dev.transport.is_empty() {
+                if dev.name.starts_with("nvme") { "NVMe".to_string() }
+                else if dev.name.starts_with("sd") { "SATA/SAS".to_string() }
+                else { "Unknown".to_string() }
+            } else {
+                dev.transport.to_uppercase()
+            };
+
+            let model_str = if dev.model.trim().is_empty() {
+                dev.name.clone()
+            } else {
+                dev.model.trim().to_string()
+            };
 
             disks.push(PhysicalDiskInfo {
                 disk_number: i as u32,
-                friendly_name: dev.name,
-                model: dev.model.unwrap_or_else(|| "Unknown".to_string()),
-                media_type: dev.rota.map(|r| if r { "HDD".to_string() } else { "SSD".to_string() }).unwrap_or_else(|| "Unspecified".to_string()),
-                bus_type: "Unknown".to_string(),
+                friendly_name: dev.name.clone(),
+                model: model_str,
+                media_type,
+                bus_type,
                 size: dev.size,
-                health_status: smart.as_ref().map(|s| {
-                    if s.passed { "Healthy".to_string() } else { "Warning".to_string() }
-                }).unwrap_or_else(|| "Unknown".to_string()),
+                health_status: smart.as_ref().map(|s| s.health_status.clone())
+                    .unwrap_or_else(|| "Unknown".to_string()),
                 operational_status: "OK".to_string(),
-                temperature: temperature.map(|t| t as f32),
+                temperature,
                 write_cache_enabled: false,
-                power_on_hours: smart.as_ref().map(|s| s.power_on_hours),
+                power_on_hours: smart.as_ref().and_then(|s| s.power_on_hours),
                 tbw: None,
                 wear_level: None,
                 partitions: Vec::new(),
@@ -142,7 +186,13 @@ impl LinuxDiskMonitor {
 
     fn get_io_stats(&self, disks: &[PhysicalDiskInfo]) -> Result<Vec<DiskIOStats>> {
         let now = Instant::now();
-        let raw_stats = self.linux_sys.get_raw_disk_stats()?;
+        let raw_stats_vec = self.linux_sys.get_disk_stats()?;
+
+        // Convert Vec to HashMap for lookup
+        let raw_stats: HashMap<String, crate::integrations::RawDiskStats> = raw_stats_vec
+            .into_iter()
+            .map(|s| (s.name.clone(), s))
+            .collect();
 
         let mut last_guard = self.last_io_stats.lock();
         let mut result = Vec::new();
@@ -156,7 +206,7 @@ impl LinuxDiskMonitor {
                         let write_sectors = curr.sectors_written.saturating_sub(prev.sectors_written);
                         let reads = curr.reads_completed.saturating_sub(prev.reads_completed);
                         let writes = curr.writes_completed.saturating_sub(prev.writes_completed);
-                        let time_io = curr.time_doing_io.saturating_sub(prev.time_doing_io);
+                        let time_io = curr.ms_doing_io.saturating_sub(prev.ms_doing_io);
 
                         let read_bytes = read_sectors * 512;
                         let write_bytes = write_sectors * 512;
@@ -185,7 +235,13 @@ impl LinuxDiskMonitor {
 
     fn get_process_activity(&self) -> Result<Vec<DiskProcessActivity>> {
         let now = Instant::now();
-        let curr_io = self.linux_sys.get_process_io()?;
+        let samples = self.linux_sys.get_process_io_samples()?;
+
+        // Convert Vec to HashMap
+        let curr_io: HashMap<u32, crate::integrations::ProcessIoSample> = samples
+            .into_iter()
+            .map(|s| (s.pid, s))
+            .collect();
 
         let mut last_guard = self.last_process_io.lock();
         let mut result = Vec::new();
