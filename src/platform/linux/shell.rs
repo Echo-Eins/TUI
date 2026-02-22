@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::Read;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
 
