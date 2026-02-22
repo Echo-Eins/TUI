@@ -145,6 +145,31 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
         drop(peak_dl);
         drop(peak_ul);
 
+        // Sort interfaces: active ones with gateway/IP first, down ones last
+        interfaces.sort_by(|a, b| {
+            let score = |iface: &NetworkInterface| -> u32 {
+                let mut s = 0u32;
+                // Has default gateway → very likely the primary interface
+                if !iface.gateway.is_empty() { s += 100; }
+                // Has an IPv4 address
+                if !iface.ipv4_address.is_empty() { s += 50; }
+                // Is up
+                if iface.status == "Up" { s += 30; }
+                // Has actual traffic
+                if iface.bytes_received > 0 || iface.bytes_sent > 0 { s += 10; }
+                // Skip virtual/bridge/docker/veth interfaces for primary
+                let name = &iface.name;
+                if name.starts_with("docker") || name.starts_with("br-")
+                    || name.starts_with("veth") || name.starts_with("virbr")
+                    || name.starts_with("vnet")
+                {
+                    s = s.saturating_sub(40);
+                }
+                s
+            };
+            score(b).cmp(&score(a))
+        });
+
         // Get connections with PID resolution
         let connections = Self::get_connections();
 
@@ -199,13 +224,11 @@ impl LinuxNetworkMonitor {
                                 }
                             }
                         } else if *part == "inet6" {
-                            if ipv6.is_empty() {
-                                if let Some(addr) = parts.get(i + 1) {
-                                    let a = addr.split('/').next().unwrap_or("");
-                                    // Skip link-local if we can get a global address
-                                    if !a.starts_with("fe80") || ipv6.is_empty() {
-                                        ipv6 = a.to_string();
-                                    }
+                            if let Some(addr) = parts.get(i + 1) {
+                                let a = addr.split('/').next().unwrap_or("");
+                                // Prefer global address over link-local
+                                if ipv6.is_empty() || (ipv6.starts_with("fe80") && !a.starts_with("fe80")) {
+                                    ipv6 = a.to_string();
                                 }
                             }
                         }
