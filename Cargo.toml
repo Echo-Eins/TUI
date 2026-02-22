@@ -42,6 +42,10 @@ chrono = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 
+# PTY support for terminal execution
+portable-pty = "0.8.1"
+async-trait = "0.1.80"
+
 
 # TUI runtime
 crossterm = { version = "0.28", features = ["event-stream"] }
@@ -54,6 +58,7 @@ log = "0.4"
 
 # Hex encoding for keys
 hex = "0.4"
+encoding_rs = "0.8"
 
 # Generic array for crypto
 generic-array = "0.14"
@@ -63,6 +68,10 @@ windows = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+]}
+windows-sys = { version = "0.52", features = [
+    "Win32_Globalization",
+    "Win32_System_Console",
 ]}
 enigo = "0.2"
 scrap = "0.5"

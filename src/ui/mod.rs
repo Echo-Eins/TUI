@@ -1,4 +1,4 @@
-pub mod theme;
+﻿pub mod theme;
 pub mod widgets;
 pub mod tabs;
 
@@ -13,7 +13,7 @@ use ratatui::{
 use crate::app::{App, TabType};
 use theme::Theme;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     // Get the full size of the frame
     let size = f.size();
 
@@ -38,13 +38,9 @@ pub fn render(f: &mut Frame, app: &App) {
     render_content(f, chunks[2], app);
     render_footer(f, chunks[3], app);
 
-    // Render command history menu if active
-    if app.state.command_menu_active {
-        render_command_menu(f, size, app);
-    }
 }
 
-fn render_header(f: &mut Frame, area: Rect, app: &App) {
+fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
     let config = app.state.config.read();
     let theme = Theme::from_config(&config);
     let title = format!("{} System Monitor v1.0", config.general.app_name);
@@ -61,7 +57,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(text, area);
 }
 
-fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
+fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
     let config = app.state.config.read();
     let theme = Theme::from_config(&config);
     let highlight_config = &config.ui.section_highlight;
@@ -132,7 +128,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(tabs, area);
 }
 
-fn render_content(f: &mut Frame, area: Rect, app: &App) {
+fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
     match app.state.tab_manager.current() {
         TabType::Cpu => tabs::cpu::render(f, area, app),
         TabType::Gpu => tabs::gpu::render(f, area, app),
@@ -141,19 +137,21 @@ fn render_content(f: &mut Frame, area: Rect, app: &App) {
         TabType::Network => tabs::network::render(f, area, app),
         TabType::Ollama => tabs::ollama::render(f, area, app),
         TabType::Processes => tabs::processes::render(f, area, app),
+
         TabType::Services => tabs::services::render(f, area, app),
+        TabType::Console => tabs::console::render(f, &mut app.state, area),
         TabType::DiskAnalyzer => tabs::disk_analyzer::render(f, area, app),
         TabType::Settings => tabs::settings::render(f, area, app),
     }
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
     let help_text = match app.state.tab_manager.current() {
-        TabType::Cpu => "[↑↓] Navigate │ [p/n/c/t/m] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Gpu => "[↑↓] Navigate │ [p/n/g/m/t] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Ram => "[←→] Focus │ [↑↓] Navigate │ [p/n/w/b] Sort │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Disk => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
-        _ => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
+        TabType::Cpu => "[â†‘â†“] Navigate â”‚ [p/n/c/t/m] Sort â”‚ [PgUp/PgDn] Page â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
+        TabType::Gpu => "[â†‘â†“] Navigate â”‚ [p/n/g/m/t] Sort â”‚ [PgUp/PgDn] Page â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
+        TabType::Ram => "[â†â†’] Focus â”‚ [â†‘â†“] Navigate â”‚ [p/n/w/b] Sort â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
+        TabType::Disk => "[F2] Compact â”‚ [Tab] Next Tab â”‚ [1-0] Switch Tab â”‚ [Ctrl+C] Exit",
+        _ => "[F2] Compact â”‚ [Tab] Next Tab â”‚ [1-0] Switch Tab â”‚ [Ctrl+C] Exit",
     };
 
     let block = Block::default().borders(Borders::ALL);
@@ -163,52 +161,6 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().fg(Color::Gray));
 
     f.render_widget(paragraph, area);
-}
-
-fn render_command_menu(f: &mut Frame, _area: Rect, app: &App) {
-    let popup_area = centered_rect(60, 60, f.size());
-
-    // Clear the popup area first
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title("Command History (Ctrl+F)")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .style(Style::default().bg(Color::Black));
-
-    f.render_widget(block, popup_area);
-
-    let inner = Rect {
-        x: popup_area.x + 2,
-        y: popup_area.y + 2,
-        width: popup_area.width.saturating_sub(4),
-        height: popup_area.height.saturating_sub(4),
-    };
-
-    let commands: Vec<Line> = app.state.command_history
-        .get_all()
-        .iter()
-        .enumerate()
-        .map(|(i, cmd)| {
-            let is_selected = i == app.state.command_history.selected_index();
-            let style = if is_selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-
-            Line::from(vec![
-                Span::raw(if is_selected { "► " } else { "  " }),
-                Span::styled(cmd.clone(), style),
-            ])
-        })
-        .collect();
-
-    let paragraph = Paragraph::new(commands)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(paragraph, inner);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -230,3 +182,5 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
+
+

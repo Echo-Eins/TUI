@@ -1,0 +1,611 @@
+﻿cargo.exe :     Updating crates.io index
+At line:1 char:1
++ & "$env:USERPROFILE\.cargo\bin\cargo.exe" check 2> check_errors.txt
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Updating crates.io index:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Locking 1 package to latest compatible version
+      Adding encoding_rs v0.8.35
+ Downloading crates ...
+  Downloaded encoding_rs v0.8.35
+    Checking encoding_rs v0.8.35
+    Checking cardputer-remote v1.0.0 (C:\Coding\Rust\TUI)
+warning: unused import: `std::sync::Arc`
+ --> src\platform\linux\shell.rs:5:5
+  |
+5 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+     |
+    ::: src\platform\executor.rs:7:14
+     |
+   7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+     |              ------- the method is available for `PowerShellExecutor` here
+     |
+    ::: src\platform\windows\executor.rs:96:1
+     |
+  96 | pub struct PowerShellExecutor {
+     | ----------------------------- method `execute` not found for this struct
+    --> src\app\state.rs:2722:22
+     |
+2722 |             match ps.execute(&command).await {
+     |                      ^^^^^^^
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use crate::platform::executor::CommandExecutor;
+     |
+help: there is a method `execute_batch` with a similar name
+     |
+2722 |             match ps.execute_batch(&command).await {
+     |                             ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |       async fn execute(&self, cmd: &str) -> Result<String>;
+    |                ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 |   pub struct PowerShellExecutor {
+    |   ----------------------------- method `execute` not found for this struct
+   --> src\monitors\disk_analyzer.rs:102:18
+    |
+101 | /             self.ps
+102 | |                 .execute(LOGICAL_DRIVES_SCRIPT)
+    | |_________________-^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+102 |                 .execute_batch(LOGICAL_DRIVES_SCRIPT)
+    |                         ++++++
+
+error[E0282]: type annotations needed
+   --> src\monitors\disk_analyzer.rs:101:13
+    |
+101 | /             self.ps
+102 | |                 .execute(LOGICAL_DRIVES_SCRIPT)
+103 | |                 .await
+    | |______________________^ cannot infer type
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\gpu.rs:134:30
+    |
+134 |         let output = self.ps.execute(script).await?;
+    |                              ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+134 |         let output = self.ps.execute_batch(script).await?;
+    |                                     ++++++
+
+error[E0282]: type annotations needed
+   --> src\monitors\windows\gpu.rs:134:13
+    |
+134 |         let output = self.ps.execute(script).await?;
+    |             ^^^^^^
+135 |         let trimmed = output.trim_start_matches('\u{feff}').trim();
+    |                       ------ type must be known at this point
+    |
+help: consider giving `output` an explicit type
+    |
+134 |         let output: /* Type */ = self.ps.execute(script).await?;
+    |                   ++++++++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\gpu.rs:207:30
+    |
+207 |         let output = self.ps.execute(script).await?;
+    |                              ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+207 |         let output = self.ps.execute_batch(script).await?;
+    |                                     ++++++
+
+error[E0282]: type annotations needed
+   --> src\monitors\windows\gpu.rs:207:13
+    |
+207 |         let output = self.ps.execute(script).await?;
+    |             ^^^^^^
+208 |         let trimmed = output.trim_start_matches('\u{feff}').trim();
+    |                       ------ type must be known at this point
+    |
+help: consider giving `output` an explicit type
+    |
+207 |         let output: /* Type */ = self.ps.execute(script).await?;
+    |                   ++++++++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\gpu.rs:274:30
+    |
+274 |         let output = self.ps.execute(script).await?;
+    |                              ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+274 |         let output = self.ps.execute_batch(script).await?;
+    |                                     ++++++
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:274:13
+    |
+274 |         let output = self.ps.execute(script).await?;
+    |             ^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:274:22
+    |
+274 |         let output = self.ps.execute(script).await?;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:274:51
+    |
+274 |         let output = self.ps.execute(script).await?;
+    |                                                   ^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+   --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:274:22
+    |
+274 |         let output = self.ps.execute(script).await?;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+   --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\gpu.rs:373:30
+    |
+373 |         let output = self.ps.execute(script).await?;
+    |                              ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+373 |         let output = self.ps.execute_batch(script).await?;
+    |                                     ++++++
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:373:13
+    |
+373 |         let output = self.ps.execute(script).await?;
+    |             ^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:373:22
+    |
+373 |         let output = self.ps.execute(script).await?;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:373:51
+    |
+373 |         let output = self.ps.execute(script).await?;
+    |                                                   ^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+   --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> src\monitors\windows\gpu.rs:373:22
+    |
+373 |         let output = self.ps.execute(script).await?;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+   --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+warning: variable does not need to be mutable
+   --> src\monitors\windows\disk.rs:238:13
+    |
+238 |         let mut physical_disks: Vec<PhysicalDiskInfo> = info
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+   |
+  ::: src\platform\executor.rs:7:14
+   |
+ 7 |       async fn execute(&self, cmd: &str) -> Result<String>;
+   |                ------- the method is available for `PowerShellExecutor` here
+   |
+  ::: src\platform\windows\executor.rs:96:1
+   |
+96 |   pub struct PowerShellExecutor {
+   |   ----------------------------- method `execute` not found for this struct
+  --> src\monitors\windows\processes.rs:94:14
+   |
+92 |           let output = self
+   |  ______________________-
+93 | |             .ps
+94 | |             .execute(PROCESSES_SCRIPT)
+   | |_____________-^^^^^^^
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+   |
+ 1 + use crate::platform::executor::CommandExecutor;
+   |
+help: there is a method `execute_batch` with a similar name
+   |
+94 |             .execute_batch(PROCESSES_SCRIPT)
+   |                     ++++++
+
+error[E0282]: type annotations needed
+  --> src\monitors\windows\processes.rs:92:22
+   |
+92 |           let output = self
+   |  ______________________^
+93 | |             .ps
+94 | |             .execute(PROCESSES_SCRIPT)
+95 | |             .await
+   | |__________________^ cannot infer type
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+   |
+  ::: src\platform\executor.rs:7:14
+   |
+ 7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+   |              ------- the method is available for `PowerShellExecutor` here
+   |
+  ::: src\platform\windows\executor.rs:96:1
+   |
+96 | pub struct PowerShellExecutor {
+   | ----------------------------- method `execute` not found for this struct
+  --> src\monitors\windows\services.rs:92:30
+   |
+92 |         let output = self.ps.execute(SERVICES_SCRIPT).await?;
+   |                              ^^^^^^^
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+   |
+ 1 + use crate::platform::executor::CommandExecutor;
+   |
+help: there is a method `execute_batch` with a similar name
+   |
+92 |         let output = self.ps.execute_batch(SERVICES_SCRIPT).await?;
+   |                                     ++++++
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+  --> src\monitors\windows\services.rs:92:13
+   |
+92 |         let output = self.ps.execute(SERVICES_SCRIPT).await?;
+   |             ^^^^^^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `str`
+   = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+  --> src\monitors\windows\services.rs:92:22
+   |
+92 |         let output = self.ps.execute(SERVICES_SCRIPT).await?;
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `str`
+   = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+  --> src\monitors\windows\services.rs:92:60
+   |
+92 |         let output = self.ps.execute(SERVICES_SCRIPT).await?;
+   |                                                            ^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+  --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+  --> src\monitors\windows\services.rs:92:22
+   |
+92 |         let output = self.ps.execute(SERVICES_SCRIPT).await?;
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `str`
+note: required by an implicit `Sized` bound in `ControlFlow`
+  --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\library\core\src\ops\control_flow.rs:89:1
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+   |
+  ::: src\platform\executor.rs:7:14
+   |
+ 7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+   |              ------- the method is available for `PowerShellExecutor` here
+   |
+  ::: src\platform\windows\executor.rs:96:1
+   |
+96 | pub struct PowerShellExecutor {
+   | ----------------------------- method `execute` not found for this struct
+  --> src\monitors\windows\services.rs:99:17
+   |
+99 |         self.ps.execute(&script).await?;
+   |                 ^^^^^^^
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+   |
+ 1 + use crate::platform::executor::CommandExecutor;
+   |
+help: there is a method `execute_batch` with a similar name
+   |
+99 |         self.ps.execute_batch(&script).await?;
+   |                        ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\services.rs:108:17
+    |
+108 |         self.ps.execute(&script).await?;
+    |                 ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+108 |         self.ps.execute_batch(&script).await?;
+    |                        ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\services.rs:117:17
+    |
+117 |         self.ps.execute(&script).await?;
+    |                 ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+117 |         self.ps.execute_batch(&script).await?;
+    |                        ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\services.rs:138:17
+    |
+138 |         self.ps.execute(&script).await?;
+    |                 ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+138 |         self.ps.execute_batch(&script).await?;
+    |                        ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\services.rs:146:29
+    |
+146 |             let _ = self.ps.execute(&delay_script).await;
+    |                             ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+146 |             let _ = self.ps.execute_batch(&delay_script).await;
+    |                                    ++++++
+
+error[E0599]: no method named `execute` found for struct `PowerShellExecutor` in the current scope
+    |
+   ::: src\platform\executor.rs:7:14
+    |
+  7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+    |              ------- the method is available for `PowerShellExecutor` here
+    |
+   ::: src\platform\windows\executor.rs:96:1
+    |
+ 96 | pub struct PowerShellExecutor {
+    | ----------------------------- method `execute` not found for this struct
+   --> src\monitors\windows\services.rs:152:29
+    |
+152 |             let _ = self.ps.execute(&delay_script).await;
+    |                             ^^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `CommandExecutor` which provides `execute` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use crate::platform::executor::CommandExecutor;
+    |
+help: there is a method `execute_batch` with a similar name
+    |
+152 |             let _ = self.ps.execute_batch(&delay_script).await;
+    |                                    ++++++
+
+error[E0038]: the trait `CommandExecutor` is not dyn compatible
+  --> src\platform\mod.rs:9:30
+   |
+ 9 | pub fn get_executor() -> Arc<dyn CommandExecutor> {
+   |                              ^^^^^^^^^^^^^^^^^^^ `CommandExecutor` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> src\platform\executor.rs:7:14
+   |
+ 5 | pub trait CommandExecutor: Send + Sync {
+   |           --------------- this trait is not dyn compatible...
+ 6 |     /// Execute a command and return its entire stdout output.
+ 7 |     async fn execute(&self, cmd: &str) -> Result<String>;
+   |              ^^^^^^^ ...because method `execute` is `async`
+...
+10 |     async fn execute_stream(&self, cmd: &str) -> Result<Receiver<String>>;
+   |              ^^^^^^^^^^^^^^ ...because method `execute_stream` is `async`
+...
+13 |     async fn suggest(&self, input: &str) -> Result<Vec<String>>;
+   |              ^^^^^^^ ...because method `suggest` is `async`
+...
+16 |     async fn validate(&self, cmd: &str) -> Result<bool>;
+   |              ^^^^^^^^ ...because method `validate` is `async`
+   = help: consider moving `execute` to another trait
+   = help: consider moving `execute_stream` to another trait
+   = help: consider moving `suggest` to another trait
+   = help: consider moving `validate` to another trait
+   = help: the following types implement `CommandExecutor`:
+             platform::linux::shell::LinuxCommandExecutor
+             platform::windows::executor::PowerShellExecutor
+           consider defining an enum where each variant holds one of these types,
+           implementing `CommandExecutor` for this new enum and using it instead
+   = note: `CommandExecutor` may be implemented in other crates; if you want to support your users passing their own 
+types here, you can't refer to a specific type
+
+warning: use of deprecated method `ratatui::Frame::<'_>::size`: use .area() as it's the more correct name
+  --> src\ui\mod.rs:18:18
+   |
+18 |     let size = f.size();
+   |                  ^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `ratatui::Frame::<'_>::size`: use .area() as it's the more correct name
+   --> src\ui\mod.rs:169:46
+    |
+169 |     let popup_area = centered_rect(60, 60, f.size());
+    |                                              ^^^^
+
+Some errors have detailed explanations: E0038, E0277, E0282, E0599.
+For more information about an error, try `rustc --explain E0038`.
+warning: `cardputer-remote` (lib) generated 4 warnings
+error: could not compile `cardputer-remote` (lib) due to 31 previous errors; 4 warnings emitted

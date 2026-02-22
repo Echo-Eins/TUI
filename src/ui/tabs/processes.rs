@@ -8,7 +8,7 @@ use ratatui::{
 use std::cmp::Ordering;
 
 use crate::app::{state::ProcessSortColumn, App};
-use crate::monitors::processes::ProcessEntry;
+use crate::monitors::ProcessEntry;
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
 

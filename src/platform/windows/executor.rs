@@ -119,7 +119,99 @@ impl PowerShellExecutor {
         }
     }
 
-    pub async fn execute(&self, command: &str) -> Result<String> {
+    pub async fn execute_batch(&self, commands: &[&str]) -> Result<Vec<String>> {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_nanos();
+        let separator = format!("__CODEX_PS_BATCH_{}__", stamp);
+        let escaped_separator = separator.replace('\'', "''");
+
+        let mut script = String::new();
+        script.push_str(PS_ENCODING_PREFIX);
+        script.push_str("$ErrorActionPreference = 'Continue'\n");
+        script.push_str("$ProgressPreference = 'SilentlyContinue'\n");
+        script.push_str("$WarningPreference = 'SilentlyContinue'\n");
+        script.push_str(&format!("$__codex_sep = '{}'\n", escaped_separator));
+        for command in commands {
+            script.push_str("Write-Output $__codex_sep\n");
+            script.push_str(command);
+            script.push('\n');
+        }
+        script.push_str("Write-Output $__codex_sep\n");
+
+        let output = self.execute(&script).await?;
+        split_batch_output(&output, &separator, commands.len())
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_cache(&self) {
+        self.cache.write().clear();
+    }
+
+    pub fn check_environment(executable: &str) -> PowerShellEnvironmentStatus {
+        let version_check = StdCommand::new(executable)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        if version_check.is_err() || !version_check.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return PowerShellEnvironmentStatus {
+                available: false,
+                missing_modules: Vec::new(),
+            };
+        }
+
+        let required_modules = vec!["CimCmdlets", "Microsoft.PowerShell.Management"];
+        let module_script = format!(
+            "{}{}{}{}",
+            "$required = @('",
+            required_modules.join("','"),
+            "');",
+            "$missing = $required | Where-Object { -not (Get-Module -ListAvailable $_) };$missing"
+        );
+
+        let module_check = StdCommand::new(executable)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &module_script])
+            .output();
+
+        let missing_modules = match module_check {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            }
+            _ => required_modules.iter().map(|s| s.to_string()).collect(),
+        };
+
+        PowerShellEnvironmentStatus {
+            available: true,
+            missing_modules,
+        }
+    }
+}
+
+use crate::platform::executor::CommandExecutor;
+use tokio::sync::mpsc;
+use async_trait::async_trait;
+
+#[async_trait]
+impl CommandExecutor for PowerShellExecutor {
+    async fn execute(&self, command: &str) -> Result<String> {
         let cache_key = command.to_string();
         // Check cache
         if self.cache_enabled {
@@ -231,89 +323,74 @@ impl PowerShellExecutor {
         Ok(stdout)
     }
 
-    pub async fn execute_batch(&self, commands: &[&str]) -> Result<Vec<String>> {
-        if commands.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_nanos();
-        let separator = format!("__CODEX_PS_BATCH_{}__", stamp);
-        let escaped_separator = separator.replace('\'', "''");
-
-        let mut script = String::new();
-        script.push_str(PS_ENCODING_PREFIX);
-        script.push_str("$ErrorActionPreference = 'Continue'\n");
-        script.push_str("$ProgressPreference = 'SilentlyContinue'\n");
-        script.push_str("$WarningPreference = 'SilentlyContinue'\n");
-        script.push_str(&format!("$__codex_sep = '{}'\n", escaped_separator));
-        for command in commands {
-            script.push_str("Write-Output $__codex_sep\n");
-            script.push_str(command);
-            script.push('\n');
-        }
-        script.push_str("Write-Output $__codex_sep\n");
-
-        let output = self.execute(&script).await?;
-        split_batch_output(&output, &separator, commands.len())
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_cache(&self) {
-        self.cache.write().clear();
-    }
-
-    pub fn check_environment(executable: &str) -> PowerShellEnvironmentStatus {
-        let version_check = StdCommand::new(executable)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$PSVersionTable.PSVersion.ToString()",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        if version_check.is_err() || !version_check.as_ref().map(|s| s.success()).unwrap_or(false) {
-            return PowerShellEnvironmentStatus {
-                available: false,
-                missing_modules: Vec::new(),
+    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<String>> {
+        let (tx, rx) = mpsc::channel(100);
+        let cmd_owned = cmd.to_string();
+        let exec = self.executable.clone();
+        
+        tokio::spawn(async move {
+            let encoded_command = encode_powershell_command(&cmd_owned);
+            let mut child = match TokioCommand::new(&exec)
+                .args(&[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    &encoded_command,
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(format!("Failed to spawn process: {}", e)).await;
+                    return;
+                }
             };
-        }
 
-        let required_modules = vec!["CimCmdlets", "Microsoft.PowerShell.Management"];
-        let module_script = format!(
-            "{}{}{}{}",
-            "$required = @('",
-            required_modules.join("','"),
-            "');",
-            "$missing = $required | Where-Object { -not (Get-Module -ListAvailable $_) };$missing"
-        );
+            let mut stdout = match child.stdout.take() {
+                Some(s) => s,
+                None => return,
+            };
 
-        let module_check = StdCommand::new(executable)
-            .args(["-NoProfile", "-NonInteractive", "-Command", &module_script])
-            .output();
+            let mut buf = [0u8; 1024];
+            let mut line_buffer = String::new();
 
-        let missing_modules = match module_check {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                stdout
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(String::from)
-                    .collect::<Vec<_>>()
+            while let Ok(n) = stdout.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                for c in text.chars() {
+                    line_buffer.push(c);
+                    if c == '\n' {
+                        let _ = tx.send(line_buffer.clone()).await;
+                        line_buffer.clear();
+                    }
+                }
             }
-            _ => required_modules.iter().map(|s| s.to_string()).collect(),
-        };
 
-        PowerShellEnvironmentStatus {
-            available: true,
-            missing_modules,
-        }
+            if !line_buffer.is_empty() {
+                let _ = tx.send(line_buffer).await;
+            }
+
+            let _ = child.wait().await;
+        });
+
+        Ok(rx)
+    }
+
+    async fn suggest(&self, _input: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    async fn validate(&self, cmd: &str) -> Result<bool> {
+        // Very basic validation - compile script block without executing
+        let validation_cmd = format!("$ErrorActionPreference = 'Stop'; [scriptblock]::Create('{}'); exit $LASTEXITCODE", 
+            cmd.replace('\'', "''"));
+        let result = self.execute(&validation_cmd).await;
+        Ok(result.is_ok())
     }
 }
 

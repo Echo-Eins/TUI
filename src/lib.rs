@@ -20,6 +20,7 @@
 //! - Mutual authentication via ECDSA signatures
 //! - Constant-time comparison for cryptographic values
 
+pub mod platform;
 pub mod app;
 pub mod capture;
 pub mod config;

@@ -1,9 +1,11 @@
-pub mod config;
+﻿pub mod config;
+pub mod console_state;
 pub mod monitors_task;
 pub mod state;
 pub mod tabs;
 
 pub use config::{Config, ConfigManager};
+pub use console_state::ConsoleState;
 pub use state::AppState;
 pub use tabs::{TabManager, TabType};
 
@@ -94,3 +96,4 @@ impl App {
         self.state.handle_event(event).await
     }
 }
+

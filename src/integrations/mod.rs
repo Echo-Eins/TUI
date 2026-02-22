@@ -1,7 +1,6 @@
-pub mod linux_sys;
 pub mod ollama;
-pub mod powershell;
 
-pub use linux_sys::{LinuxSysMonitor, ProcessIoSample, RawDiskStats, ZramInfo, BtrfsInfo, SmartData, MemoryHardwareInfo};
+// Re-export from the new platform module to keep existing imports in monitors working for now
+pub use crate::platform::linux::{LinuxSysMonitor, ProcessIoSample, RawDiskStats, ZramInfo, BtrfsInfo, SmartData, MemoryHardwareInfo};
+pub use crate::platform::windows::{PowerShellExecutor, PowerShellEnvironmentStatus};
 pub use ollama::{ChatLogMetadata, OllamaClient, OllamaData};
-pub use powershell::PowerShellExecutor;
