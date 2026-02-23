@@ -1,10 +1,10 @@
+use crate::integrations::LinuxSysMonitor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Instant;
-use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct LinuxProcessMonitor {
     linux_sys: LinuxSysMonitor,
@@ -68,7 +68,7 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
                     io_read_bytes: p.io_read_bytes,
                     io_write_bytes: p.io_write_bytes,
                 };
-                
+
                 (p.pid, p.cpu_ticks, entry)
             })
             .collect::<Vec<_>>()
@@ -90,7 +90,11 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
         }
         *prev_ts = Some(now);
 
-        result.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         result.truncate(100);
 
         Ok(ProcessData { processes: result })

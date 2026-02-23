@@ -51,7 +51,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme: &Theme, app: &App) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::CpuData,
+    theme: &Theme,
+    app: &App,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -133,7 +139,10 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         .collect();
 
     let core_title = if is_hyperthreaded {
-        format!("Thread Usage ({} cores / {} threads)", data.core_count, data.thread_count)
+        format!(
+            "Thread Usage ({} cores / {} threads)",
+            data.core_count, data.thread_count
+        )
     } else {
         format!("Core Usage ({} cores)", data.core_count)
     };
@@ -217,11 +226,18 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         let ord = match sort_col {
             CpuProcessSortColumn::Pid => a.pid.cmp(&b.pid),
             CpuProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            CpuProcessSortColumn::Cpu => a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(std::cmp::Ordering::Equal),
+            CpuProcessSortColumn::Cpu => a
+                .cpu_usage
+                .partial_cmp(&b.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal),
             CpuProcessSortColumn::Memory => a.memory.cmp(&b.memory),
             CpuProcessSortColumn::Threads => a.threads.cmp(&b.threads),
         };
-        if sort_asc { ord } else { ord.reverse() }
+        if sort_asc {
+            ord
+        } else {
+            ord.reverse()
+        }
     });
 
     // Calculate visible area (subtract 3 for block border + header row)
@@ -257,7 +273,11 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
     // Build header with sort indicators
     let sort_indicator = |col: CpuProcessSortColumn| -> &str {
         if sort_col == col {
-            if sort_asc { " \u{25b2}" } else { " \u{25bc}" }
+            if sort_asc {
+                " \u{25b2}"
+            } else {
+                " \u{25bc}"
+            }
         } else {
             ""
         }
@@ -267,9 +287,13 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme
         format!("PID(p){}", sort_indicator(CpuProcessSortColumn::Pid)),
         format!("Name(n){}", sort_indicator(CpuProcessSortColumn::Name)),
         format!("CPU%(c){}", sort_indicator(CpuProcessSortColumn::Cpu)),
-        format!("Threads(t){}", sort_indicator(CpuProcessSortColumn::Threads)),
+        format!(
+            "Threads(t){}",
+            sort_indicator(CpuProcessSortColumn::Threads)
+        ),
         format!("Memory(m){}", sort_indicator(CpuProcessSortColumn::Memory)),
-    ]).style(
+    ])
+    .style(
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),

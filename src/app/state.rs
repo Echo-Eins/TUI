@@ -1,4 +1,4 @@
-﻿use crate::platform::executor::CommandExecutor;
+use crate::platform::executor::CommandExecutor;
 use anyhow::Result;
 use chrono::Local;
 use crossterm::event::{
@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use super::{monitors_task, Config, ConfigManager, TabManager, TabType};
-use crate::integrations::{ChatLogMetadata, OllamaClient, OllamaData, PowerShellExecutor};
 use crate::integrations::ollama::{OllamaModel, RunningModel};
+use crate::integrations::{ChatLogMetadata, OllamaClient, OllamaData, PowerShellExecutor};
 use crate::monitors::{
     CpuData, DiskAnalyzerData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData,
 };
@@ -66,6 +66,7 @@ pub struct AppState {
     pub console_state: crate::app::console_state::ConsoleState,
     pub history: crate::app::history::CommandHistory,
     pub suggestion_engine: crate::app::suggestions::SuggestionEngine,
+    console_executor: Arc<dyn CommandExecutor>,
     #[allow(dead_code)]
     pub selected_section: Option<String>,
     pub last_nav_input: Option<Instant>,
@@ -338,47 +339,68 @@ impl AppState {
         self.last_config_version = version;
         let config_snapshot = self.config.read().clone();
         let current_tab = self.tab_manager.current();
-        let mut new_tabs =
-            TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
+        let mut new_tabs = TabManager::new(
+            config_snapshot.tabs.enabled.clone(),
+            &config_snapshot.tabs.default,
+        );
         new_tabs.select(current_tab);
         self.tab_manager = new_tabs;
         self.compact_mode = config_snapshot.general.compact_mode;
-        
+
         // Console config hot-reload
         self.console_state.max_blocks = config_snapshot.console.history_limit;
+        self.console_state.status_threshold_ms = config_snapshot.console.status_threshold_ms;
+        self.console_state.status_persist_ms = config_snapshot.console.status_persist_ms;
+        self.console_state.enable_ai_explain = config_snapshot.console.enable_ai_explain;
     }
 
     fn apply_async_updates(&mut self) {
         // Read config once per tick for inner loops
         let max_lines = self.config.read().console.max_output_lines;
-        
+
         while let Ok(update) = self.async_rx.try_recv() {
             match update {
                 AsyncUpdate::ConsoleStdout { block_id, line } => {
                     if let Some(block) = self.console_state.get_block_mut(block_id) {
-                        block.push_line(crate::app::console_state::OutputLine::stdout(line), max_lines);
+                        block.push_line(
+                            crate::app::console_state::OutputLine::stdout(line),
+                            max_lines,
+                        );
                     }
                 }
                 AsyncUpdate::ConsoleStderr { block_id, line } => {
                     if let Some(block) = self.console_state.get_block_mut(block_id) {
-                        block.push_line(crate::app::console_state::OutputLine::stderr(line), max_lines);
+                        block.push_line(
+                            crate::app::console_state::OutputLine::stderr(line),
+                            max_lines,
+                        );
                     }
                 }
-                AsyncUpdate::ConsoleCompleted { block_id, exit_code } => {
+                AsyncUpdate::ConsoleCompleted {
+                    block_id,
+                    exit_code,
+                } => {
                     // Record to history before completing
                     if let Some(block) = self.console_state.get_block(block_id) {
                         let cmd = block.input.clone();
                         let cwd = block.cwd.clone();
                         let elapsed = block.elapsed_ms() as i64;
                         let hostname = self.console_state.hostname.clone();
-                        let _ = self.history.record(&cmd, &cwd, Some(exit_code), Some(elapsed), &hostname);
+                        let _ = self.history.record(
+                            &cmd,
+                            &cwd,
+                            Some(exit_code),
+                            Some(elapsed),
+                            &hostname,
+                        );
                     }
                     self.console_state.complete_active(exit_code);
 
                     // Detect permission failure and set sudo hint
                     if exit_code != 0 {
                         if let Some(block) = self.console_state.get_block(block_id) {
-                            let stderr = crate::app::sudo::collect_stderr_tail(&block.output_lines, 10);
+                            let stderr =
+                                crate::app::sudo::collect_stderr_tail(&block.output_lines, 10);
                             let cmd = block.input.clone();
                             if crate::app::sudo::detect_permission_failure(exit_code, &stderr)
                                 && !crate::app::sudo::is_blacklisted(&cmd)
@@ -404,15 +426,18 @@ impl AppState {
                         let cwd = block.cwd.clone();
                         let elapsed = block.elapsed_ms() as i64;
                         let hostname = self.console_state.hostname.clone();
-                        let _ = self.history.record(&cmd, &cwd, None, Some(elapsed), &hostname);
+                        let _ = self
+                            .history
+                            .record(&cmd, &cwd, None, Some(elapsed), &hostname);
                     }
-                    self.console_state.fail_active(error);
-                    
-                    // Mark as explainable since we have a direct execution failure error string
-                    if let Some(block_id) = self.console_state.active_block_id {
-                        if let Some(block) = self.console_state.get_block_mut(block_id) {
-                            block.explain_hint = true;
-                        }
+
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.fail(error);
+                        // Direct execution failures are explainable by AI as well.
+                        block.explain_hint = true;
+                    }
+                    if self.console_state.active_block_id == Some(block_id) {
+                        self.console_state.active_block_id = None;
                     }
                 }
                 AsyncUpdate::OllamaCommandCompleted { title, lines } => {
@@ -471,10 +496,7 @@ impl AppState {
     }
 
     fn allow_view_toggle(&mut self) -> bool {
-        Self::allow_with_throttle(
-            &mut self.last_view_toggle_input,
-            Duration::from_millis(200),
-        )
+        Self::allow_with_throttle(&mut self.last_view_toggle_input, Duration::from_millis(200))
     }
 
     fn reset_activity_expand_state(&mut self) {
@@ -587,15 +609,18 @@ impl AppState {
     }
 
     fn build_running_placeholder(model_name: &str, processor: &str) -> RunningModel {
-        let (params_value, params_unit, params_display) =
-            Self::parse_params_from_name(model_name);
+        let (params_value, params_unit, params_display) = Self::parse_params_from_name(model_name);
         let is_cloud = model_name.to_ascii_lowercase().contains("cloud");
         RunningModel {
             name: model_name.to_string(),
             size_bytes: 0,
             size_display: "-".to_string(),
             gpu_memory_mb: None,
-            gpu_memory_display: if is_cloud { "cloud".to_string() } else { "-".to_string() },
+            gpu_memory_display: if is_cloud {
+                "cloud".to_string()
+            } else {
+                "-".to_string()
+            },
             params_value,
             params_unit,
             params_display,
@@ -705,15 +730,17 @@ impl AppState {
         let min_main = 10;
         let available = rows.saturating_sub(fixed);
         let half = available / 2;
-        let max_prompt = rows
-            .saturating_sub(fixed.saturating_add(min_main))
-            .max(3);
+        let max_prompt = rows.saturating_sub(fixed.saturating_add(min_main)).max(3);
         half.max(3).min(max_prompt)
     }
 
     fn max_chat_prompt_height(&self) -> u16 {
         let (_, rows) = self.terminal_size;
-        let reserved = if self.compact_mode { 3 + 6 } else { 3 + 8 + 5 + 10 };
+        let reserved = if self.compact_mode {
+            3 + 6
+        } else {
+            3 + 8 + 5 + 10
+        };
         let max_height = rows.saturating_sub(reserved as u16);
         max_height.max(3)
     }
@@ -750,10 +777,7 @@ impl AppState {
         count
     }
 
-    fn allow_with_throttle(
-        last_input: &mut Option<Instant>,
-        min_delay: Duration,
-    ) -> bool {
+    fn allow_with_throttle(last_input: &mut Option<Instant>, min_delay: Duration) -> bool {
         let now = Instant::now();
         if let Some(last) = last_input {
             if now.duration_since(*last) < min_delay {
@@ -971,7 +995,9 @@ impl AppState {
         let mut prompt = String::new();
         for message in &self.ollama_state.chat_messages {
             match message.role {
-                ChatRole::User => Self::append_chat_lines(&mut prompt, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text),
+                ChatRole::User => {
+                    Self::append_chat_lines(&mut prompt, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text)
+                }
                 ChatRole::Assistant => {
                     Self::append_chat_lines(&mut prompt, "ÐžÑ‚Ð²ÐµÑ‚: ", &message.text)
                 }
@@ -986,8 +1012,12 @@ impl AppState {
         let mut log = String::new();
         for message in &self.ollama_state.chat_messages {
             match message.role {
-                ChatRole::User => Self::append_chat_lines(&mut log, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text),
-                ChatRole::Assistant => Self::append_chat_lines(&mut log, "ÐžÑ‚Ð²ÐµÑ‚: ", &message.text),
+                ChatRole::User => {
+                    Self::append_chat_lines(&mut log, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text)
+                }
+                ChatRole::Assistant => {
+                    Self::append_chat_lines(&mut log, "ÐžÑ‚Ð²ÐµÑ‚: ", &message.text)
+                }
             }
         }
         log
@@ -1043,7 +1073,8 @@ impl AppState {
             Ok(content) => content,
             Err(_) => return Vec::new(),
         };
-        const USER_PREFIXES: [&str; 3] = ["Ð—Ð°Ð¿Ñ€Ð¾Ñ:", "Ð â€”Ð Â°Ð Ñ—Ð¡Ð‚Ð Ñ•Ð¡Ðƒ:", "Request:"];
+        const USER_PREFIXES: [&str; 3] =
+            ["Ð—Ð°Ð¿Ñ€Ð¾Ñ:", "Ð â€”Ð Â°Ð Ñ—Ð¡Ð‚Ð Ñ•Ð¡Ðƒ:", "Request:"];
         const ASSIST_PREFIXES: [&str; 3] = ["ÐžÑ‚Ð²ÐµÑ‚:", "Ð Ñ›Ð¡â€šÐ Ð†Ð ÂµÐ¡â€š:", "Response:"];
 
         let mut messages = Vec::new();
@@ -1213,7 +1244,7 @@ impl AppState {
 
         let tx = self.async_tx.clone();
         let active_model = self.ollama_state.active_chat_model.clone();
-        
+
         tokio::spawn(async move {
             match OllamaClient::new(None) {
                 Ok(client) => {
@@ -1228,14 +1259,15 @@ impl AppState {
                                 } else {
                                     let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
                                         block_id,
-                                        error: "No Ollama models found. Please pull a model first.".to_string()
+                                        error: "No Ollama models found. Please pull a model first."
+                                            .to_string(),
                                     });
                                     return;
                                 }
                             } else {
                                 let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
                                     block_id,
-                                    error: "Failed to list Ollama models.".to_string()
+                                    error: "Failed to list Ollama models.".to_string(),
                                 });
                                 return;
                             }
@@ -1300,8 +1332,7 @@ impl AppState {
 
         let block_id = self.console_state.start_command(command.clone());
 
-        // Use the global executor getter from the platform module
-        let executor = crate::platform::get_executor();
+        let executor = self.console_executor.clone();
 
         // Setup channels for streaming output
         let tx = self.async_tx.clone();
@@ -1318,7 +1349,10 @@ impl AppState {
                                 let _ = tx.send(AsyncUpdate::ConsoleStderr { block_id, line });
                             }
                             StreamMessage::Exit(code) => {
-                                let _ = tx.send(AsyncUpdate::ConsoleCompleted { block_id, exit_code: code });
+                                let _ = tx.send(AsyncUpdate::ConsoleCompleted {
+                                    block_id,
+                                    exit_code: code,
+                                });
                             }
                         }
                     }
@@ -1350,7 +1384,8 @@ impl AppState {
         let suggestions = self.suggestion_engine.suggest(input, &cwd);
         if let Some(best) = suggestions.first() {
             if best.text.len() > input.len() && best.text.starts_with(input) {
-                self.console_state.update_ghost_text(Some(best.text.clone()));
+                self.console_state
+                    .update_ghost_text(Some(best.text.clone()));
                 return;
             }
         }
@@ -1360,7 +1395,8 @@ impl AppState {
             Ok(results) => {
                 if let Some(entry) = results.first() {
                     if entry.command.len() > input.len() && entry.command.starts_with(input) {
-                        self.console_state.update_ghost_text(Some(entry.command.clone()));
+                        self.console_state
+                            .update_ghost_text(Some(entry.command.clone()));
                     } else {
                         self.console_state.clear_ghost_text();
                     }
@@ -1385,10 +1421,8 @@ impl AppState {
         }
 
         let engine = &self.suggestion_engine;
-        self.console_state.highlighted_input = crate::app::syntax::highlight(
-            &input,
-            |cmd| engine.is_known_command(cmd),
-        );
+        self.console_state.highlighted_input =
+            crate::app::syntax::highlight(&input, |cmd| engine.is_known_command(cmd));
     }
 
     /// Expand command macros (!! / !$ / sudo !!) and return the expanded command.
@@ -1429,7 +1463,9 @@ impl AppState {
                 self.console_state.history_search_results =
                     results.into_iter().map(|e| e.command).collect();
                 // Reset index if out of bounds
-                if self.console_state.history_search_index >= self.console_state.history_search_results.len() {
+                if self.console_state.history_search_index
+                    >= self.console_state.history_search_results.len()
+                {
                     self.console_state.history_search_index = 0;
                 }
             }
@@ -1442,13 +1478,15 @@ impl AppState {
 
     pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
         let config_snapshot = config.read().clone();
-        let tab_manager =
-            TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
-
+        let tab_manager = TabManager::new(
+            config_snapshot.tabs.enabled.clone(),
+            &config_snapshot.tabs.default,
+        );
 
         let compact_mode = config_snapshot.general.compact_mode;
 
         let (async_tx, async_rx) = unbounded_channel();
+        let console_executor = crate::platform::get_executor();
 
         let cpu_data = Arc::new(RwLock::new(None));
         let cpu_error = Arc::new(RwLock::new(None));
@@ -1469,6 +1507,12 @@ impl AppState {
 
         let ollama_data = Arc::new(RwLock::new(None));
         let ollama_error = Arc::new(RwLock::new(None));
+        let mut console_state =
+            crate::app::console_state::ConsoleState::new(config_snapshot.console.history_limit);
+        console_state.shell_name = console_executor.name().to_string();
+        console_state.status_threshold_ms = config_snapshot.console.status_threshold_ms;
+        console_state.status_persist_ms = config_snapshot.console.status_persist_ms;
+        console_state.enable_ai_explain = config_snapshot.console.enable_ai_explain;
 
         // Start monitor tasks
         monitors_task::spawn_monitor_tasks(
@@ -1518,15 +1562,19 @@ impl AppState {
             ollama_data,
             ollama_error,
 
-            console_state: crate::app::console_state::ConsoleState::new(1000),
+            console_state,
             suggestion_engine: crate::app::suggestions::SuggestionEngine::new(),
+            console_executor,
             history: {
                 let history_dir = dirs::data_local_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join("tui-console");
                 let _ = std::fs::create_dir_all(&history_dir);
                 crate::app::history::CommandHistory::open(history_dir.join("history.db"))
-                    .unwrap_or_else(|_| crate::app::history::CommandHistory::open_in_memory().expect("in-memory history"))
+                    .unwrap_or_else(|_| {
+                        crate::app::history::CommandHistory::open_in_memory()
+                            .expect("in-memory history")
+                    })
             },
             selected_section: None,
             last_nav_input: None,
@@ -1632,9 +1680,27 @@ impl AppState {
         let is_initial_press = matches!(key.kind, KeyEventKind::Press);
         // Handle Ctrl+C to quit
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if is_initial_press
+                && self.tab_manager.current() == TabType::Console
+                && self.console_state.is_running()
+            {
+                if let Some(block_id) = self.console_state.active_block_id {
+                    let msg = match self.console_executor.interrupt().await {
+                        Ok(()) => "Interrupt signal sent to active command.".to_string(),
+                        Err(e) => format!("Failed to interrupt active command: {}", e),
+                    };
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        let max_lines = self.config.read().console.max_output_lines;
+                        block.push_line(
+                            crate::app::console_state::OutputLine::system(msg),
+                            max_lines,
+                        );
+                    }
+                }
+                return Ok(true);
+            }
             return Ok(false);
         }
-
 
         if self.tab_manager.current() == TabType::Console {
             use crate::app::console_state::ConsoleMode;
@@ -1642,30 +1708,39 @@ impl AppState {
             match self.console_state.mode {
                 ConsoleMode::Normal => {
                     // Ctrl+S: sudo retry
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('s')
+                    {
                         if is_initial_press {
                             // Find the latest block with sudo_hint
-                            if let Some(block) = self.console_state.blocks.iter().rev()
-                                .find(|b| b.sudo_hint)
+                            if let Some(block) =
+                                self.console_state.blocks.iter().rev().find(|b| b.sudo_hint)
                             {
                                 let cmd = crate::app::sudo::sudo_command(&block.input);
                                 self.console_state.mode = ConsoleMode::Confirm;
                                 self.console_state.confirm_command = Some(cmd);
-                                self.console_state.confirm_action = Some("Re-run with sudo".to_string());
+                                self.console_state.confirm_action =
+                                    Some("Re-run with sudo".to_string());
                             }
                         }
                         return Ok(true);
                     }
 
                     // Ctrl+E: Explain error with AI
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('e')
+                    {
                         if is_initial_press {
-                            if let Some(block_id) = self.console_state.blocks.iter()
+                            if let Some(block_id) = self
+                                .console_state
+                                .blocks
+                                .iter()
                                 .rev()
                                 .find(|b| b.explain_hint)
                                 .map(|b| b.id)
                             {
-                                if let Some(mut_block) = self.console_state.get_block_mut(block_id) {
+                                if let Some(mut_block) = self.console_state.get_block_mut(block_id)
+                                {
                                     mut_block.is_explaining = true;
                                 }
                                 self.spawn_ollama_explanation(block_id);
@@ -1699,7 +1774,9 @@ impl AppState {
                 }
                 ConsoleMode::Insert => {
                     // Ctrl+R: enter history search
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('r')
+                    {
                         if is_initial_press {
                             self.console_state.enter_history_search();
                             // Populate with recent history
@@ -1730,7 +1807,10 @@ impl AppState {
                             return Ok(true);
                         }
                         KeyCode::Backspace => {
-                            if is_initial_press && self.allow_text_input() && self.console_state.cursor_position > 0 {
+                            if is_initial_press
+                                && self.allow_text_input()
+                                && self.console_state.cursor_position > 0
+                            {
                                 self.console_state.reset_history_nav();
                                 self.console_state.backspace();
                                 self.refresh_ghost_text();
@@ -1738,7 +1818,11 @@ impl AppState {
                             return Ok(true);
                         }
                         KeyCode::Delete => {
-                            if is_initial_press && self.allow_text_input() && self.console_state.cursor_position < self.console_state.input_buffer.len() {
+                            if is_initial_press
+                                && self.allow_text_input()
+                                && self.console_state.cursor_position
+                                    < self.console_state.input_buffer.len()
+                            {
                                 self.console_state.delete_char();
                                 self.refresh_ghost_text();
                             }
@@ -1756,8 +1840,9 @@ impl AppState {
                                     // Alt+Right: accept one word from ghost text
                                     self.console_state.accept_ghost_word();
                                     self.refresh_ghost_text();
-                                } else if self.console_state.cursor_position >= self.console_state.input_buffer.len() 
-                                    && self.console_state.ghost_text.is_some() 
+                                } else if self.console_state.cursor_position
+                                    >= self.console_state.input_buffer.len()
+                                    && self.console_state.ghost_text.is_some()
                                 {
                                     // Right at end of buffer: accept full ghost text
                                     self.console_state.accept_ghost_text();
@@ -1773,7 +1858,8 @@ impl AppState {
                                 // History navigation: Up cycles backward through history
                                 if self.console_state.history_nav_cache.is_empty() {
                                     if let Ok(recent) = self.history.get_recent(200) {
-                                        let cmds: Vec<String> = recent.into_iter().map(|e| e.command).collect();
+                                        let cmds: Vec<String> =
+                                            recent.into_iter().map(|e| e.command).collect();
                                         self.console_state.start_history_nav(cmds);
                                     }
                                 }
@@ -1805,19 +1891,29 @@ impl AppState {
 
                                     // Intercept 'explain' meta-command
                                     if cmd.trim() == "explain" {
-                                        if let Some(block_id) = self.console_state.blocks.iter()
+                                        if let Some(block_id) = self
+                                            .console_state
+                                            .blocks
+                                            .iter()
                                             .rev()
                                             .find(|b| b.explain_hint)
                                             .map(|b| b.id)
                                         {
-                                            if let Some(mut_block) = self.console_state.get_block_mut(block_id) {
+                                            if let Some(mut_block) =
+                                                self.console_state.get_block_mut(block_id)
+                                            {
                                                 mut_block.is_explaining = true;
                                             }
                                             self.spawn_ollama_explanation(block_id);
                                         } else {
-                                            let block_id = self.console_state.start_command("explain".to_string());
-                                            if let Some(block) = self.console_state.get_block_mut(block_id) {
-                                                let max_lines = self.config.read().console.max_output_lines;
+                                            let block_id = self
+                                                .console_state
+                                                .start_command("explain".to_string());
+                                            if let Some(block) =
+                                                self.console_state.get_block_mut(block_id)
+                                            {
+                                                let max_lines =
+                                                    self.config.read().console.max_output_lines;
                                                 block.push_line(crate::app::console_state::OutputLine::stderr("No failed command with stderr output found to explain."), max_lines);
                                                 block.complete(1);
                                             }
@@ -1829,7 +1925,8 @@ impl AppState {
                                     // Handle pkg meta-commands
                                     let mut final_cmd = cmd.clone();
                                     if final_cmd.trim().starts_with("pkg ") {
-                                        let parts: Vec<&str> = final_cmd.trim().split_whitespace().collect();
+                                        let parts: Vec<&str> =
+                                            final_cmd.trim().split_whitespace().collect();
                                         if parts.len() >= 3 {
                                             let subcmd = parts[1];
                                             let pkg = parts[2..].join(" ");
@@ -1838,7 +1935,7 @@ impl AppState {
                                                 "find" => format!("emerge -s {}", pkg),
                                                 "uses" => format!("equery uses {}", pkg),
                                                 "deps" => format!("equery d {}", pkg),
-                                                "web"  => format!("equery meta -w {}", pkg),
+                                                "web" => format!("equery meta -w {}", pkg),
                                                 _ => final_cmd,
                                             };
                                         }
@@ -1848,35 +1945,50 @@ impl AppState {
                                     let has_cmd = |name: &str| -> bool {
                                         std::env::var_os("PATH").map_or(false, |paths| {
                                             std::env::split_paths(&paths).any(|dir| {
-                                                dir.join(name).is_file() || dir.join(format!("{}.exe", name)).is_file()
+                                                dir.join(name).is_file()
+                                                    || dir.join(format!("{}.exe", name)).is_file()
                                             })
                                         })
                                     };
 
                                     let trimmed_cmd = final_cmd.trim();
                                     if trimmed_cmd == "tree" || trimmed_cmd.starts_with("tree ") {
-                                        let args = trimmed_cmd.strip_prefix("tree").unwrap_or("").trim();
+                                        let args =
+                                            trimmed_cmd.strip_prefix("tree").unwrap_or("").trim();
                                         if has_cmd("eza") {
-                                            final_cmd = format!("eza --tree --color=always {}", args).trim().to_string();
+                                            final_cmd =
+                                                format!("eza --tree --color=always {}", args)
+                                                    .trim()
+                                                    .to_string();
                                         } else if has_cmd("tree") {
-                                            final_cmd = format!("tree -C {}", args).trim().to_string();
+                                            final_cmd =
+                                                format!("tree -C {}", args).trim().to_string();
                                         }
                                     } else if trimmed_cmd.starts_with("search ") {
-                                        let args = trimmed_cmd.strip_prefix("search ").unwrap_or("").trim();
+                                        let args = trimmed_cmd
+                                            .strip_prefix("search ")
+                                            .unwrap_or("")
+                                            .trim();
                                         if has_cmd("rg") {
                                             // ripgrep
-                                            final_cmd = format!("rg -p {}", args).trim().to_string();
+                                            final_cmd =
+                                                format!("rg -p {}", args).trim().to_string();
                                         } else {
                                             // fallback grep
-                                            final_cmd = format!("grep --color=always -rn {}", args).trim().to_string();
+                                            final_cmd = format!("grep --color=always -rn {}", args)
+                                                .trim()
+                                                .to_string();
                                         }
                                     } else if trimmed_cmd.starts_with("find ") {
-                                        let args = trimmed_cmd.strip_prefix("find ").unwrap_or("").trim();
+                                        let args =
+                                            trimmed_cmd.strip_prefix("find ").unwrap_or("").trim();
                                         if has_cmd("fd") {
                                             // fd-find
-                                            final_cmd = format!("fd -c always {}", args).trim().to_string();
+                                            final_cmd =
+                                                format!("fd -c always {}", args).trim().to_string();
                                         } else {
-                                            final_cmd = format!("find . -name {}", args).trim().to_string();
+                                            final_cmd =
+                                                format!("find . -name {}", args).trim().to_string();
                                         }
                                     }
 
@@ -1884,7 +1996,8 @@ impl AppState {
                                     let parts: Vec<&str> = final_cmd.split_whitespace().collect();
                                     self.console_state.last_command = Some(final_cmd.clone());
                                     if parts.len() > 1 {
-                                        self.console_state.last_args = Some(parts.last().unwrap().to_string());
+                                        self.console_state.last_args =
+                                            Some(parts.last().unwrap().to_string());
                                     }
 
                                     self.spawn_console_command(final_cmd);
@@ -1903,50 +2016,48 @@ impl AppState {
                         _ => {}
                     }
                 }
-                ConsoleMode::HistorySearch => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            if is_initial_press {
-                                self.console_state.exit_history_search(false);
-                            }
-                            return Ok(true);
+                ConsoleMode::HistorySearch => match key.code {
+                    KeyCode::Esc => {
+                        if is_initial_press {
+                            self.console_state.exit_history_search(false);
                         }
-                        KeyCode::Enter => {
-                            if is_initial_press {
-                                self.console_state.exit_history_search(true);
-                                self.refresh_ghost_text();
-                            }
-                            return Ok(true);
-                        }
-                        KeyCode::Up => {
-                            if is_initial_press {
-                                self.console_state.history_search_up();
-                            }
-                            return Ok(true);
-                        }
-                        KeyCode::Down => {
-                            if is_initial_press {
-                                self.console_state.history_search_down();
-                            }
-                            return Ok(true);
-                        }
-                        KeyCode::Char(c) => {
-                            if is_initial_press {
-                                self.console_state.history_search_query.push(c);
-                                self.update_history_search_results();
-                            }
-                            return Ok(true);
-                        }
-                        KeyCode::Backspace => {
-                            if is_initial_press {
-                                self.console_state.history_search_query.pop();
-                                self.update_history_search_results();
-                            }
-                            return Ok(true);
-                        }
-                        _ => {}
+                        return Ok(true);
                     }
-                }
+                    KeyCode::Enter => {
+                        if is_initial_press {
+                            self.console_state.exit_history_search(true);
+                            self.refresh_ghost_text();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Up => {
+                        if is_initial_press {
+                            self.console_state.history_search_up();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Down => {
+                        if is_initial_press {
+                            self.console_state.history_search_down();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Char(c) => {
+                        if is_initial_press {
+                            self.console_state.history_search_query.push(c);
+                            self.update_history_search_results();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Backspace => {
+                        if is_initial_press {
+                            self.console_state.history_search_query.pop();
+                            self.update_history_search_results();
+                        }
+                        return Ok(true);
+                    }
+                    _ => {}
+                },
                 ConsoleMode::Confirm => {
                     match key.code {
                         KeyCode::Enter => {
@@ -1969,13 +2080,13 @@ impl AppState {
                             }
                             return Ok(true);
                         }
-                        _ => { return Ok(true); }
+                        _ => {
+                            return Ok(true);
+                        }
                     }
                 }
             }
         }
-
-
 
         // Handle tab-specific hotkeys first
         if self.tab_manager.current() == TabType::Cpu {
@@ -2011,7 +2122,8 @@ impl AppState {
                     if !self.allow_nav() {
                         return Ok(true);
                     }
-                    self.cpu_state.selected_index = self.cpu_state.selected_index.saturating_sub(10);
+                    self.cpu_state.selected_index =
+                        self.cpu_state.selected_index.saturating_sub(10);
                     self.cpu_state.scroll_offset = self.cpu_state.selected_index;
                     return Ok(true);
                 }
@@ -2234,8 +2346,7 @@ impl AppState {
                     let step = 10usize;
                     if process_count > 0 {
                         let next = self.gpu_state.selected_index + step;
-                        self.gpu_state.selected_index =
-                            next.min(process_count.saturating_sub(1));
+                        self.gpu_state.selected_index = next.min(process_count.saturating_sub(1));
                     }
                     return Ok(true);
                 }
@@ -2338,8 +2449,7 @@ impl AppState {
                         && process_count > 0
                     {
                         let next = self.ram_state.selected_index + step;
-                        self.ram_state.selected_index =
-                            next.min(process_count.saturating_sub(1));
+                        self.ram_state.selected_index = next.min(process_count.saturating_sub(1));
                     }
                     return Ok(true);
                 }
@@ -2379,7 +2489,7 @@ impl AppState {
             }
         }
 
-                // Services tab hotkeys
+        // Services tab hotkeys
         if self.tab_manager.current() == TabType::Services {
             match key.code {
                 KeyCode::Left | KeyCode::Right => {
@@ -2389,7 +2499,8 @@ impl AppState {
                     if self.compact_mode {
                         self.services_state.focused_panel = ServicesPanelFocus::Table;
                     } else {
-                        self.services_state.focused_panel = match self.services_state.focused_panel {
+                        self.services_state.focused_panel = match self.services_state.focused_panel
+                        {
                             ServicesPanelFocus::Table => ServicesPanelFocus::Details,
                             ServicesPanelFocus::Details => ServicesPanelFocus::Table,
                         };
@@ -2542,7 +2653,6 @@ impl AppState {
             }
         }
 
-
         // Ollama tab hotkeys
         if self.tab_manager.current() == TabType::Ollama {
             if self.ollama_state.show_delete_confirm {
@@ -2565,8 +2675,7 @@ impl AppState {
                                     let _ = fs::remove_file(&log_path);
                                     let _ = fs::remove_file(&meta_path);
                                     if let Some(data) = self.ollama_data.write().as_mut() {
-                                        data.chat_logs
-                                            .retain(|item| item.path != entry.path);
+                                        data.chat_logs.retain(|item| item.path != entry.path);
                                     }
                                 }
                             }
@@ -2661,7 +2770,9 @@ impl AppState {
                     KeyCode::Backspace => {
                         self.ollama_state.input_buffer.pop();
                     }
-                    KeyCode::Up | KeyCode::Down if self.ollama_state.input_mode == OllamaInputMode::Chat => {
+                    KeyCode::Up | KeyCode::Down
+                        if self.ollama_state.input_mode == OllamaInputMode::Chat =>
+                    {
                         if !self.allow_widget_scroll() {
                             return Ok(true);
                         }
@@ -2685,8 +2796,7 @@ impl AppState {
                         if self.ollama_state.input_mode == OllamaInputMode::None {
                             return Ok(true);
                         }
-                        let allow_input = if self.ollama_state.input_mode == OllamaInputMode::Chat
-                        {
+                        let allow_input = if self.ollama_state.input_mode == OllamaInputMode::Chat {
                             matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                                 && self.allow_text_input()
                         } else {
@@ -3036,10 +3146,8 @@ impl AppState {
                         OllamaPanelFocus::Activity => match self.ollama_state.activity_view {
                             OllamaActivityView::List => {
                                 let prev = self.ollama_state.activity_selected;
-                                self.ollama_state.activity_selected = self
-                                    .ollama_state
-                                    .activity_selected
-                                    .saturating_sub(step);
+                                self.ollama_state.activity_selected =
+                                    self.ollama_state.activity_selected.saturating_sub(step);
                                 if self.ollama_state.activity_selected != prev {
                                     self.reset_activity_expand_state();
                                 }
@@ -3048,10 +3156,8 @@ impl AppState {
                                 if !self.allow_widget_scroll() {
                                     return Ok(true);
                                 }
-                                self.ollama_state.activity_log_scroll = self
-                                    .ollama_state
-                                    .activity_log_scroll
-                                    .saturating_sub(step);
+                                self.ollama_state.activity_log_scroll =
+                                    self.ollama_state.activity_log_scroll.saturating_sub(step);
                             }
                         },
                         OllamaPanelFocus::Vram => {
@@ -3241,8 +3347,7 @@ impl AppState {
                             .map(|model| model.name.clone()),
                     };
                     if let Some(name) = target_name {
-                        self.ollama_state.pending_delete =
-                            Some(OllamaDeleteTarget::Model(name));
+                        self.ollama_state.pending_delete = Some(OllamaDeleteTarget::Model(name));
                         self.ollama_state.show_delete_confirm = true;
                     }
                     return Ok(true);
@@ -3271,7 +3376,6 @@ impl AppState {
                 _ => {}
             }
         }
-
 
         // Handle global hotkeys
         match key.code {
@@ -3308,7 +3412,6 @@ impl AppState {
         match mouse.kind {
             MouseEventKind::Down(_) => {
                 // Handle mouse clicks for radial menu
-        
             }
             _ => {}
         }
@@ -3361,16 +3464,13 @@ pub(crate) fn sort_ollama_models(
                 let (a_rank, a_val) = params_sort_key(a.params_unit, a.params_value);
                 let (b_rank, b_val) = params_sort_key(b.params_unit, b.params_value);
                 match a_rank.cmp(&b_rank) {
-                    Ordering::Equal => a_val
-                        .partial_cmp(&b_val)
-                        .unwrap_or(Ordering::Equal),
+                    Ordering::Equal => a_val.partial_cmp(&b_val).unwrap_or(Ordering::Equal),
                     other => other,
                 }
             }
-            OllamaModelSortColumn::Modified => a
-                .modified
-                .to_lowercase()
-                .cmp(&b.modified.to_lowercase()),
+            OllamaModelSortColumn::Modified => {
+                a.modified.to_lowercase().cmp(&b.modified.to_lowercase())
+            }
         };
         if ascending {
             ordering
@@ -3417,21 +3517,13 @@ pub(crate) fn sort_ollama_running(
                 let (a_rank, a_val) = params_sort_key(a.params_unit, a.params_value);
                 let (b_rank, b_val) = params_sort_key(b.params_unit, b.params_value);
                 match a_rank.cmp(&b_rank) {
-                    Ordering::Equal => a_val
-                        .partial_cmp(&b_val)
-                        .unwrap_or(Ordering::Equal),
+                    Ordering::Equal => a_val.partial_cmp(&b_val).unwrap_or(Ordering::Equal),
                     other => other,
                 }
             }
             OllamaRunningSortColumn::PausedAt => {
-                let a_paused = paused_map
-                    .get(&a.name)
-                    .copied()
-                    .unwrap_or(u64::MAX);
-                let b_paused = paused_map
-                    .get(&b.name)
-                    .copied()
-                    .unwrap_or(u64::MAX);
+                let a_paused = paused_map.get(&a.name).copied().unwrap_or(u64::MAX);
+                let b_paused = paused_map.get(&b.name).copied().unwrap_or(u64::MAX);
                 a_paused.cmp(&b_paused)
             }
             OllamaRunningSortColumn::MessageCount => {
@@ -3458,16 +3550,3 @@ fn params_sort_key(unit: Option<char>, value: Option<f64>) -> (u8, f64) {
     let val = value.unwrap_or(f64::MAX);
     (rank, val)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

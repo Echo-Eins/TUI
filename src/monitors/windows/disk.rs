@@ -1,11 +1,11 @@
-﻿use anyhow::{Context, Result};
-use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
 use crate::integrations::PowerShellExecutor;
-use crate::utils::parse_json_array;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use crate::utils::parse_json_array;
+use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use serde::Deserialize;
+use std::collections::{HashMap, VecDeque};
 
 pub struct WindowsDiskMonitor {
     ps: PowerShellExecutor,
@@ -280,12 +280,14 @@ impl DiskMonitorTrait for WindowsDiskMonitor {
         let mut io_history = Vec::new();
 
         for stat in &io_stats {
-            let hist = history.entry(stat.disk_number).or_insert_with(|| DiskIOHistory {
-                disk_number: stat.disk_number,
-                read_history: VecDeque::with_capacity(60),
-                write_history: VecDeque::with_capacity(60),
-                iops_history: VecDeque::with_capacity(60),
-            });
+            let hist = history
+                .entry(stat.disk_number)
+                .or_insert_with(|| DiskIOHistory {
+                    disk_number: stat.disk_number,
+                    read_history: VecDeque::with_capacity(60),
+                    write_history: VecDeque::with_capacity(60),
+                    iops_history: VecDeque::with_capacity(60),
+                });
 
             if hist.read_history.len() >= 60 {
                 hist.read_history.pop_front();
@@ -295,7 +297,8 @@ impl DiskMonitorTrait for WindowsDiskMonitor {
 
             hist.read_history.push_back(stat.read_speed);
             hist.write_history.push_back(stat.write_speed);
-            hist.iops_history.push_back(stat.read_iops + stat.write_iops);
+            hist.iops_history
+                .push_back(stat.read_iops + stat.write_iops);
 
             io_history.push(hist.clone());
         }

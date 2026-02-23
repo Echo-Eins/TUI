@@ -171,19 +171,31 @@ fn main() {
 
             if let Some(ref priv_key) = cardputer_private {
                 println!("# client.key");
-                println!("echo '{}' | xxd -r -p > rd_keys/client.key", hex::encode(priv_key));
+                println!(
+                    "echo '{}' | xxd -r -p > rd_keys/client.key",
+                    hex::encode(priv_key)
+                );
             }
             if let Some(ref pub_key) = cardputer_public {
                 println!("# client.pub");
-                println!("echo '{}' | xxd -r -p > rd_keys/client.pub", hex::encode(pub_key));
+                println!(
+                    "echo '{}' | xxd -r -p > rd_keys/client.pub",
+                    hex::encode(pub_key)
+                );
             }
             if let Some(ref pub_key) = pc_public {
                 println!("# server.pub");
-                println!("echo '{}' | xxd -r -p > rd_keys/server.pub", hex::encode(pub_key));
+                println!(
+                    "echo '{}' | xxd -r -p > rd_keys/server.pub",
+                    hex::encode(pub_key)
+                );
             }
             if let Some(ref cookie) = cookie_bytes {
                 println!("# cookie");
-                println!("echo '{}' | xxd -r -p > rd_keys/cookie", hex::encode(cookie));
+                println!(
+                    "echo '{}' | xxd -r -p > rd_keys/cookie",
+                    hex::encode(cookie)
+                );
             }
             println!();
         }
@@ -233,10 +245,16 @@ fn generate_keypair(name: &str) -> (Vec<u8>, Vec<u8>) {
 
     println!("┌─ {} ─┐", name);
     println!("│");
-    println!("│ Private Key ({} bytes) - KEEP SECRET!", private_bytes.len());
+    println!(
+        "│ Private Key ({} bytes) - KEEP SECRET!",
+        private_bytes.len()
+    );
     println!("│   {}", private_hex);
     println!("│");
-    println!("│ Public Key ({} bytes) - share with peer", public_bytes.len());
+    println!(
+        "│ Public Key ({} bytes) - share with peer",
+        public_bytes.len()
+    );
     println!("│   {}", public_hex);
     println!("│");
 
@@ -278,7 +296,10 @@ fn print_powershell_command(filename: &str, data: &[u8]) {
         }
     }
     println!(")");
-    println!("[IO.File]::WriteAllBytes(\"rd_keys\\{}\", $bytes)", filename);
+    println!(
+        "[IO.File]::WriteAllBytes(\"rd_keys\\{}\", $bytes)",
+        filename
+    );
 }
 
 fn output_binary_files(

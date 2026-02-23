@@ -1,10 +1,10 @@
+use crate::integrations::LinuxSysMonitor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Instant;
-use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct LinuxCpuMonitor {
     linux_sys: LinuxSysMonitor,
@@ -71,7 +71,11 @@ impl LinuxCpuMonitor {
         *prev_ts = Some(now);
 
         // Sort by CPU usage descending
-        result.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(result)
     }
@@ -86,10 +90,7 @@ impl CpuMonitorTrait for LinuxCpuMonitor {
         let core_usage: Vec<CoreUsage> = core_usage_values
             .iter()
             .enumerate()
-            .map(|(i, &usage)| CoreUsage {
-                core_id: i,
-                usage,
-            })
+            .map(|(i, &usage)| CoreUsage { core_id: i, usage })
             .collect();
 
         // Get per-core frequencies for avg calculation

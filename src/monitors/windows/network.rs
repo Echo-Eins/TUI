@@ -1,12 +1,12 @@
+use crate::integrations::PowerShellExecutor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use crate::utils::parse_json_array;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use crate::integrations::PowerShellExecutor;
-use crate::utils::parse_json_array;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
-use serde::Deserialize;
 
 pub struct WindowsNetworkMonitor {
     ps: PowerShellExecutor,
@@ -146,8 +146,8 @@ impl WindowsNetworkMonitor {
         let adapters: Vec<NetworkAdapterSample> = if trimmed.starts_with('[') {
             parse_json_array(trimmed).context("Failed to parse network interfaces array")?
         } else {
-            let single: NetworkAdapterSample =
-                serde_json::from_str(trimmed).context("Failed to parse single network interface")?;
+            let single: NetworkAdapterSample = serde_json::from_str(trimmed)
+                .context("Failed to parse single network interface")?;
             vec![single]
         };
 
@@ -184,8 +184,8 @@ impl WindowsNetworkMonitor {
         let connections: Vec<NetworkConnectionSample> = if trimmed.starts_with('[') {
             parse_json_array(trimmed).context("Failed to parse network connections array")?
         } else {
-            let single: NetworkConnectionSample =
-                serde_json::from_str(trimmed).context("Failed to parse single network connection")?;
+            let single: NetworkConnectionSample = serde_json::from_str(trimmed)
+                .context("Failed to parse single network connection")?;
             vec![single]
         };
 

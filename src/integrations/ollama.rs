@@ -1,3 +1,4 @@
+use crate::utils::json::parse_json_array;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::utils::json::parse_json_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaData {
@@ -167,8 +167,7 @@ impl OllamaClient {
                 String::new()
             };
 
-            let (params_value, params_unit, params_display) =
-                parse_model_params_from_name(&name);
+            let (params_value, params_unit, params_display) = parse_model_params_from_name(&name);
 
             models.push(OllamaModel {
                 name,
@@ -242,8 +241,7 @@ impl OllamaClient {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty() && value != "-");
 
-            let (params_value, params_unit, params_display) =
-                parse_model_params_from_name(&name);
+            let (params_value, params_unit, params_display) = parse_model_params_from_name(&name);
 
             running.push(RunningModel {
                 name,
@@ -384,11 +382,7 @@ impl OllamaClient {
         let entries: Vec<ProcessCommandLine> = parse_json_array(&stdout).unwrap_or_default();
         entries
             .into_iter()
-            .filter_map(|entry| {
-                entry
-                    .command_line
-                    .map(|line| (entry.process_id, line))
-            })
+            .filter_map(|entry| entry.command_line.map(|line| (entry.process_id, line)))
             .collect()
     }
     #[allow(dead_code)]
@@ -554,11 +548,7 @@ impl OllamaClient {
         })
     }
 
-    pub fn write_chat_metadata(
-        &self,
-        log_path: &str,
-        metadata: &ChatLogMetadata,
-    ) -> Result<()> {
+    pub fn write_chat_metadata(&self, log_path: &str, metadata: &ChatLogMetadata) -> Result<()> {
         let path = PathBuf::from(log_path);
         let meta_path = chat_log_meta_path(&path);
         let content =
@@ -615,7 +605,12 @@ impl OllamaClient {
         (trimmed.to_string(), size_bytes)
     }
     #[allow(dead_code)]
-    pub fn add_log_entry(&mut self, action: String, details: String, success: bool) -> ActivityLogEntry {
+    pub fn add_log_entry(
+        &mut self,
+        action: String,
+        details: String,
+        success: bool,
+    ) -> ActivityLogEntry {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -962,7 +957,3 @@ qwen:latest      123456789abc    1.2 GB   CPU/GPU      2048       -\n";
         assert_eq!(prompt, "Multiline\nprompt line two");
     }
 }
-
-
-
-

@@ -1,5 +1,5 @@
-use ratatui::style::Color;
 use crate::app::Config;
+use ratatui::style::Color;
 
 pub fn parse_color(hex: &str) -> Color {
     if hex.starts_with('#') && hex.len() == 7 {

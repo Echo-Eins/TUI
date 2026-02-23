@@ -218,10 +218,29 @@ pub struct ConsoleConfig {
     pub history_limit: usize,
     #[serde(default = "default_max_output_lines")]
     pub max_output_lines: usize,
+    #[serde(default = "default_status_threshold_ms")]
+    pub status_threshold_ms: u64,
+    #[serde(default = "default_status_persist_ms")]
+    pub status_persist_ms: u64,
+    #[serde(default = "default_enable_ai_explain")]
+    pub enable_ai_explain: bool,
 }
 
-fn default_history_limit() -> usize { 1000 }
-fn default_max_output_lines() -> usize { 500 }
+fn default_history_limit() -> usize {
+    1000
+}
+fn default_max_output_lines() -> usize {
+    500
+}
+fn default_status_threshold_ms() -> u64 {
+    400
+}
+fn default_status_persist_ms() -> u64 {
+    1800
+}
+fn default_enable_ai_explain() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThemeConfig {

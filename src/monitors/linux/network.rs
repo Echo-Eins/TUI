@@ -1,10 +1,10 @@
+use crate::integrations::LinuxSysMonitor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct LinuxNetworkMonitor {
     linux_sys: LinuxSysMonitor,
@@ -46,7 +46,8 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
             let elapsed = now.saturating_duration_since(*last_time).as_secs_f64();
             if elapsed > 0.0 {
                 for iface in &mut ifaces {
-                    current_stats.insert(iface.name.clone(), (iface.bytes_received, iface.bytes_sent));
+                    current_stats
+                        .insert(iface.name.clone(), (iface.bytes_received, iface.bytes_sent));
 
                     if let Some((prev_rx, prev_tx)) = prev_stats.get(&iface.name) {
                         let rx = iface.bytes_received.saturating_sub(*prev_rx);
@@ -92,16 +93,18 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
             }
 
             // Set link speed from sysfs if available, else derive
-            let sysfs_speed = std::fs::read_to_string(format!("/sys/class/net/{}/speed", iface.name))
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok());
+            let sysfs_speed =
+                std::fs::read_to_string(format!("/sys/class/net/{}/speed", iface.name))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
 
             if let Some(s) = sysfs_speed {
                 if s < 1000000 {
                     iface.link_speed = format!("{} Mbps", s);
                 }
             } else if iface.download_speed > 0.0 || iface.upload_speed > 0.0 {
-                iface.link_speed = format!("{:.1} Mbps", iface.download_speed.max(iface.upload_speed));
+                iface.link_speed =
+                    format!("{:.1} Mbps", iface.download_speed.max(iface.upload_speed));
             } else {
                 iface.link_speed = "Unknown".to_string();
             }
@@ -129,16 +132,19 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
 
         // Get connections
         let conns = self.linux_sys.get_network_connections()?;
-        let connections = conns.into_iter().map(|c| NetworkConnection {
-            process_name: c.process_name,
-            pid: c.pid,
-            protocol: c.protocol,
-            local_address: c.local_address,
-            local_port: c.local_port,
-            remote_address: c.remote_address,
-            remote_port: c.remote_port,
-            state: c.state,
-        }).collect();
+        let connections = conns
+            .into_iter()
+            .map(|c| NetworkConnection {
+                process_name: c.process_name,
+                pid: c.pid,
+                protocol: c.protocol,
+                local_address: c.local_address,
+                local_port: c.local_port,
+                remote_address: c.remote_address,
+                remote_port: c.remote_port,
+                state: c.state,
+            })
+            .collect();
 
         // Get bandwidth consumers (per-process network)
         let proc_bw = self.linux_sys.get_process_bandwidth()?;
@@ -182,7 +188,9 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
         consumers.sort_by(|a, b| {
             let a_total = a.download_speed + a.upload_speed;
             let b_total = b.download_speed + b.upload_speed;
-            b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
+            b_total
+                .partial_cmp(&a_total)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         consumers.truncate(15);
 

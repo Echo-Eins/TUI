@@ -1,5 +1,5 @@
-use anyhow::Result;
 use super::types::*;
+use anyhow::Result;
 
 pub trait CpuMonitorTrait: Send + Sync {
     async fn collect_data(&self) -> Result<CpuData>;
@@ -30,5 +30,9 @@ pub trait ServiceMonitorTrait: Send + Sync {
     async fn start_service(&self, service_name: &str) -> Result<()>;
     async fn stop_service(&self, service_name: &str) -> Result<()>;
     async fn restart_service(&self, service_name: &str) -> Result<()>;
-    async fn set_startup_type(&self, service_name: &str, startup_type: ServiceStartType) -> Result<()>;
+    async fn set_startup_type(
+        &self,
+        service_name: &str,
+        startup_type: ServiceStartType,
+    ) -> Result<()>;
 }

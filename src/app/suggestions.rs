@@ -6,9 +6,9 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SuggestionKind {
     Builtin,
-    Command,  // PATH binary
+    Command, // PATH binary
     Alias,
-    Portage,  // Gentoo package
+    Portage, // Gentoo package
 }
 
 #[derive(Debug, Clone)]
@@ -30,15 +30,72 @@ pub trait SuggestionProvider {
 
 /// Common shell builtins available on Linux (bash/zsh).
 const BASH_BUILTINS: &[&str] = &[
-    "alias", "bg", "bind", "break", "builtin", "caller", "case", "cd",
-    "command", "compgen", "complete", "continue", "declare", "dirs",
-    "disown", "echo", "enable", "eval", "exec", "exit", "export",
-    "false", "fc", "fg", "for", "function", "getopts", "hash", "help",
-    "history", "if", "jobs", "kill", "let", "local", "logout", "mapfile",
-    "popd", "printf", "pushd", "pwd", "read", "readarray", "readonly",
-    "return", "select", "set", "shift", "shopt", "source", "suspend",
-    "test", "then", "time", "times", "trap", "true", "type", "typeset",
-    "ulimit", "umask", "unalias", "unset", "until", "wait", "while",
+    "alias",
+    "bg",
+    "bind",
+    "break",
+    "builtin",
+    "caller",
+    "case",
+    "cd",
+    "command",
+    "compgen",
+    "complete",
+    "continue",
+    "declare",
+    "dirs",
+    "disown",
+    "echo",
+    "enable",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "false",
+    "fc",
+    "fg",
+    "for",
+    "function",
+    "getopts",
+    "hash",
+    "help",
+    "history",
+    "if",
+    "jobs",
+    "kill",
+    "let",
+    "local",
+    "logout",
+    "mapfile",
+    "popd",
+    "printf",
+    "pushd",
+    "pwd",
+    "read",
+    "readarray",
+    "readonly",
+    "return",
+    "select",
+    "set",
+    "shift",
+    "shopt",
+    "source",
+    "suspend",
+    "test",
+    "then",
+    "time",
+    "times",
+    "trap",
+    "true",
+    "type",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+    "until",
+    "wait",
+    "while",
 ];
 
 pub struct BuiltinProvider {
@@ -54,13 +111,16 @@ impl BuiltinProvider {
 }
 
 impl SuggestionProvider for BuiltinProvider {
-    fn name(&self) -> &str { "builtins" }
+    fn name(&self) -> &str {
+        "builtins"
+    }
 
     fn suggest(&self, prefix: &str, _cwd: &str) -> Vec<Suggestion> {
         if prefix.is_empty() {
             return Vec::new();
         }
-        self.builtins.iter()
+        self.builtins
+            .iter()
             .filter(|b| b.starts_with(prefix))
             .map(|b| Suggestion {
                 text: b.clone(),
@@ -78,7 +138,8 @@ impl SuggestionProvider for BuiltinProvider {
 #[cfg(unix)]
 fn is_executable(entry: &std::fs::DirEntry, _path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    entry.metadata()
+    entry
+        .metadata()
         .map(|m| m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
@@ -143,7 +204,10 @@ impl PathProvider {
         }
 
         commands.sort();
-        Self { commands, command_set }
+        Self {
+            commands,
+            command_set,
+        }
     }
 
     /// Check if a command name exists in PATH.
@@ -153,13 +217,16 @@ impl PathProvider {
 }
 
 impl SuggestionProvider for PathProvider {
-    fn name(&self) -> &str { "path" }
+    fn name(&self) -> &str {
+        "path"
+    }
 
     fn suggest(&self, prefix: &str, _cwd: &str) -> Vec<Suggestion> {
         if prefix.is_empty() {
             return Vec::new();
         }
-        self.commands.iter()
+        self.commands
+            .iter()
             .filter(|c| c.starts_with(prefix))
             .take(20) // limit PATH results
             .map(|c| Suggestion {
@@ -197,7 +264,8 @@ impl AliasProvider {
             if let Some(rest) = line.strip_prefix("alias ") {
                 if let Some(eq_pos) = rest.find('=') {
                     let name = rest[..eq_pos].trim().to_string();
-                    let value = rest[eq_pos + 1..].trim()
+                    let value = rest[eq_pos + 1..]
+                        .trim()
                         .trim_matches('\'')
                         .trim_matches('"')
                         .to_string();
@@ -215,13 +283,16 @@ impl AliasProvider {
 }
 
 impl SuggestionProvider for AliasProvider {
-    fn name(&self) -> &str { "aliases" }
+    fn name(&self) -> &str {
+        "aliases"
+    }
 
     fn suggest(&self, prefix: &str, _cwd: &str) -> Vec<Suggestion> {
         if prefix.is_empty() {
             return Vec::new();
         }
-        self.aliases.iter()
+        self.aliases
+            .iter()
             .filter(|(name, _)| name.starts_with(prefix))
             .map(|(name, expansion)| Suggestion {
                 text: name.clone(),
@@ -244,7 +315,7 @@ impl PortageProvider {
     pub fn new() -> Self {
         let provider = Self {
             packages: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
-            last_update: std::sync::Arc::new(std::sync::RwLock::new(std::time::Instant::now() - std::time::Duration::from_secs(86400))),
+            last_update: std::sync::Arc::new(std::sync::RwLock::new(std::time::Instant::now())),
         };
         provider.spawn_background_update();
         provider
@@ -253,12 +324,12 @@ impl PortageProvider {
     fn spawn_background_update(&self) {
         let packages_lock = self.packages.clone();
         let time_lock = self.last_update.clone();
-        
+
         std::thread::spawn(move || {
             // Check /var/db/pkg for installed packages (Gentoo standard)
             // On non-Gentoo or Windows, this will quickly fail and leave the list empty or mock it.
             let mut found = Vec::new();
-            
+
             #[cfg(unix)]
             {
                 if let Ok(categories) = std::fs::read_dir("/var/db/pkg") {
@@ -267,15 +338,17 @@ impl PortageProvider {
                             continue;
                         }
                         let cat_name = cat_entry.file_name().to_string_lossy().to_string();
-                        if cat_name.starts_with('-') || cat_name.contains('.') { continue; }
-                        
+                        if cat_name.starts_with('-') || cat_name.contains('.') {
+                            continue;
+                        }
+
                         if let Ok(pkgs) = std::fs::read_dir(cat_entry.path()) {
                             for pkg_entry in pkgs.flatten() {
                                 if !pkg_entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
                                     continue;
                                 }
                                 let pkg_name = pkg_entry.file_name().to_string_lossy().to_string();
-                                // strip version suffix if desired, or keep exact ebuild name. 
+                                // strip version suffix if desired, or keep exact ebuild name.
                                 // For suggestions, category/package-name is ideal. We'll add the full path.
                                 found.push(format!("{}/{}", cat_name, pkg_name));
                             }
@@ -284,7 +357,8 @@ impl PortageProvider {
                 }
             }
 
-            // Fallback for testing on Windows/Non-Gentoo
+            // Fallback sample data for non-Unix targets where Portage paths don't exist.
+            #[cfg(not(unix))]
             if found.is_empty() {
                 // Mock data just for demonstration of the feature
                 found = vec![
@@ -297,7 +371,7 @@ impl PortageProvider {
             }
 
             found.sort();
-            
+
             if let Ok(mut pkgs) = packages_lock.write() {
                 *pkgs = found;
             }
@@ -309,7 +383,9 @@ impl PortageProvider {
 }
 
 impl SuggestionProvider for PortageProvider {
-    fn name(&self) -> &str { "portage" }
+    fn name(&self) -> &str {
+        "portage"
+    }
 
     fn suggest(&self, prefix: &str, _cwd: &str) -> Vec<Suggestion> {
         let pkgs = match self.packages.read() {
@@ -377,7 +453,7 @@ impl SuggestionEngine {
             let mut parts = full_input.splitn(2, ' ');
             let cmd = parts.next().unwrap_or("");
             let rest = parts.next().unwrap_or("").trim_start();
-            
+
             // Allow trailing spaces to trigger showing all packages
             let prefix_to_match = rest;
 
@@ -391,7 +467,11 @@ impl SuggestionEngine {
                 }
             }
             // For other multi-word commands, we don't have providers yet (e.g. file paths)
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             return results;
         }
 
@@ -419,7 +499,11 @@ impl SuggestionEngine {
         }
 
         // Sort by score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(20);
         results
     }
@@ -429,5 +513,16 @@ impl SuggestionEngine {
         self.builtin_set.contains(cmd)
             || self.path_provider.is_known_command(cmd)
             || self.alias_provider.is_alias(cmd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portage_provider_new_does_not_panic() {
+        let result = std::panic::catch_unwind(PortageProvider::new);
+        assert!(result.is_ok());
     }
 }

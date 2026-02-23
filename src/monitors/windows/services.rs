@@ -1,9 +1,9 @@
-﻿use crate::platform::executor::CommandExecutor;
-use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
-use crate::utils::parse_json_array;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use crate::platform::executor::CommandExecutor;
+use crate::utils::parse_json_array;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 pub struct WindowsServiceMonitor {
@@ -171,4 +171,3 @@ struct ServiceSampleWindows {
     DependentServices: Vec<String>,
     ServiceType: Option<String>,
 }
-

@@ -2,9 +2,9 @@
 //!
 //! Maps Cardputer input commands to host input events.
 
-use crate::protocol::{InputMode, KeyEvent, MouseClick, MouseMove};
 #[cfg(windows)]
 use crate::protocol::{ClickAction, MouseButton};
+use crate::protocol::{InputMode, KeyEvent, MouseClick, MouseMove};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

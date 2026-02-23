@@ -207,13 +207,13 @@ mod imp {
         }
 
         pub fn capture_frame(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
-            let image = RgbImage::from_pixel(
+            let image =
+                RgbImage::from_pixel(self.target_width, self.target_height, image::Rgb([0, 0, 0]));
+            let dynamic = DynamicImage::ImageRgb8(image).resize_exact(
                 self.target_width,
                 self.target_height,
-                image::Rgb([0, 0, 0]),
+                FilterType::Triangle,
             );
-            let dynamic = DynamicImage::ImageRgb8(image)
-                .resize_exact(self.target_width, self.target_height, FilterType::Triangle);
             let jpeg_data = compress_jpeg(&dynamic, self.jpeg_quality)?;
 
             Ok(Some(CapturedFrame {

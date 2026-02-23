@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tokio::sync::mpsc::Receiver;
 use async_trait::async_trait;
+use tokio::sync::mpsc::Receiver;
 
 /// Message sent through the streaming channel from command execution.
 #[derive(Debug, Clone)]
@@ -27,4 +27,7 @@ pub trait CommandExecutor: Send + Sync {
 
     /// Validate the syntax of a command.
     async fn validate(&self, cmd: &str) -> Result<bool>;
+
+    /// Interrupt the currently running command, if any.
+    async fn interrupt(&self) -> Result<()>;
 }

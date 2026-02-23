@@ -1,3 +1,3 @@
 pub mod executor;
 
-pub use executor::{PowerShellExecutor, PowerShellEnvironmentStatus};
+pub use executor::{PowerShellEnvironmentStatus, PowerShellExecutor};

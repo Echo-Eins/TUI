@@ -1,13 +1,13 @@
 pub mod cpu;
-pub mod gpu;
-pub mod ram;
 pub mod disk;
 pub mod disk_analyzer;
+pub mod gpu;
 pub mod network;
 pub mod processes;
+pub mod ram;
 pub mod services;
-pub mod types;
 pub mod traits;
+pub mod types;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -16,13 +16,13 @@ pub mod windows;
 pub mod linux;
 
 pub use cpu::CpuMonitor;
-pub use gpu::GpuMonitor;
-pub use ram::RamMonitor;
 pub use disk::DiskMonitor;
-pub use disk_analyzer::{DiskAnalyzerMonitor, DiskAnalyzerData, AnalyzedDrive};
+pub use disk_analyzer::{AnalyzedDrive, DiskAnalyzerData, DiskAnalyzerMonitor};
+pub use gpu::GpuMonitor;
 pub use network::NetworkMonitor;
 pub use processes::ProcessMonitor;
+pub use ram::RamMonitor;
 pub use services::ServiceMonitor;
 
-pub use types::*;
 pub use traits::*;
+pub use types::*;

@@ -1,10 +1,10 @@
+use crate::integrations::LinuxSysMonitor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct LinuxDiskMonitor {
     linux_sys: LinuxSysMonitor,
@@ -34,7 +34,10 @@ impl DiskMonitorTrait for LinuxDiskMonitor {
             if mount.device.starts_with("/dev/") {
                 let dev_name = mount.device.trim_start_matches("/dev/");
                 let disk_name = dev_name.trim_end_matches(|c: char| c.is_ascii_digit());
-                if let Some(disk) = physical_disks.iter_mut().find(|d| d.friendly_name == disk_name) {
+                if let Some(disk) = physical_disks
+                    .iter_mut()
+                    .find(|d| d.friendly_name == disk_name)
+                {
                     if !disk.partitions.contains(&mount.mount_point) {
                         disk.partitions.push(mount.mount_point.clone());
                     }
@@ -49,12 +52,14 @@ impl DiskMonitorTrait for LinuxDiskMonitor {
         let mut io_history = Vec::new();
 
         for stat in &io_stats {
-            let hist = history.entry(stat.disk_number).or_insert_with(|| DiskIOHistory {
-                disk_number: stat.disk_number,
-                read_history: VecDeque::with_capacity(60),
-                write_history: VecDeque::with_capacity(60),
-                iops_history: VecDeque::with_capacity(60),
-            });
+            let hist = history
+                .entry(stat.disk_number)
+                .or_insert_with(|| DiskIOHistory {
+                    disk_number: stat.disk_number,
+                    read_history: VecDeque::with_capacity(60),
+                    write_history: VecDeque::with_capacity(60),
+                    iops_history: VecDeque::with_capacity(60),
+                });
 
             if hist.read_history.len() >= 60 {
                 hist.read_history.pop_front();
@@ -64,7 +69,8 @@ impl DiskMonitorTrait for LinuxDiskMonitor {
 
             hist.read_history.push_back(stat.read_speed);
             hist.write_history.push_back(stat.write_speed);
-            hist.iops_history.push_back(stat.read_iops + stat.write_iops);
+            hist.iops_history
+                .push_back(stat.read_iops + stat.write_iops);
 
             io_history.push(hist.clone());
         }
@@ -89,7 +95,12 @@ impl LinuxDiskMonitor {
                 let name = if mount.mount_point == "/" {
                     "Root".to_string()
                 } else {
-                    mount.mount_point.split('/').last().unwrap_or(&mount.mount_point).to_string()
+                    mount
+                        .mount_point
+                        .split('/')
+                        .last()
+                        .unwrap_or(&mount.mount_point)
+                        .to_string()
                 };
 
                 drives.push(DriveInfo {
@@ -115,18 +126,37 @@ impl LinuxDiskMonitor {
         for (i, dev) in block_devices.into_iter().enumerate() {
             let smart = self.linux_sys.get_smart_data(&dev.name).ok().flatten();
             let temps = self.linux_sys.get_disk_temperatures();
-            let temperature = temps.get(&dev.name).copied().or_else(|| smart.as_ref().and_then(|s| s.temperature));
+            let temperature = temps
+                .get(&dev.name)
+                .copied()
+                .or_else(|| smart.as_ref().and_then(|s| s.temperature));
 
             disks.push(PhysicalDiskInfo {
                 disk_number: i as u32,
                 friendly_name: dev.name,
                 model: dev.model.unwrap_or_else(|| "Unknown".to_string()),
-                media_type: dev.rota.map(|r| if r { "HDD".to_string() } else { "SSD".to_string() }).unwrap_or_else(|| "Unspecified".to_string()),
+                media_type: dev
+                    .rota
+                    .map(|r| {
+                        if r {
+                            "HDD".to_string()
+                        } else {
+                            "SSD".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "Unspecified".to_string()),
                 bus_type: "Unknown".to_string(),
                 size: dev.size,
-                health_status: smart.as_ref().map(|s| {
-                    if s.passed { "Healthy".to_string() } else { "Warning".to_string() }
-                }).unwrap_or_else(|| "Unknown".to_string()),
+                health_status: smart
+                    .as_ref()
+                    .map(|s| {
+                        if s.passed {
+                            "Healthy".to_string()
+                        } else {
+                            "Warning".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "Unknown".to_string()),
                 operational_status: "OK".to_string(),
                 temperature: temperature.map(|t| t as f32),
                 write_cache_enabled: false,
@@ -151,9 +181,13 @@ impl LinuxDiskMonitor {
             let elapsed = now.saturating_duration_since(*last_time).as_secs_f64();
             if elapsed > 0.0 {
                 for disk in disks {
-                    if let (Some(curr), Some(prev)) = (raw_stats.get(&disk.friendly_name), last_stats.get(&disk.friendly_name)) {
+                    if let (Some(curr), Some(prev)) = (
+                        raw_stats.get(&disk.friendly_name),
+                        last_stats.get(&disk.friendly_name),
+                    ) {
                         let read_sectors = curr.sectors_read.saturating_sub(prev.sectors_read);
-                        let write_sectors = curr.sectors_written.saturating_sub(prev.sectors_written);
+                        let write_sectors =
+                            curr.sectors_written.saturating_sub(prev.sectors_written);
                         let reads = curr.reads_completed.saturating_sub(prev.reads_completed);
                         let writes = curr.writes_completed.saturating_sub(prev.writes_completed);
                         let time_io = curr.time_doing_io.saturating_sub(prev.time_doing_io);
@@ -212,7 +246,11 @@ impl LinuxDiskMonitor {
             }
         }
 
-        result.sort_by(|a, b| b.io_bytes_per_sec.partial_cmp(&a.io_bytes_per_sec).unwrap_or(std::cmp::Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.io_bytes_per_sec
+                .partial_cmp(&a.io_bytes_per_sec)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         result.truncate(10);
 
         *last_guard = Some((now, curr_io));

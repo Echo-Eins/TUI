@@ -1,6 +1,6 @@
-use anyhow::Result;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use anyhow::Result;
 
 pub struct LinuxGpuMonitor {}
 
@@ -19,7 +19,10 @@ impl LinuxGpuMonitor {
         let parts: Vec<&str> = stdout.trim().split(',').map(|s| s.trim()).collect();
 
         if parts.len() < 14 {
-            anyhow::bail!("Invalid nvidia-smi output: expected 14 fields, got {}", parts.len());
+            anyhow::bail!(
+                "Invalid nvidia-smi output: expected 14 fields, got {}",
+                parts.len()
+            );
         }
 
         let name = parts[0].to_string();
@@ -41,7 +44,8 @@ impl LinuxGpuMonitor {
         } else if power_default_limit > 0.0 {
             power_default_limit
         } else {
-            self.get_nvidia_power_limit_from_standard_output().unwrap_or(0.0)
+            self.get_nvidia_power_limit_from_standard_output()
+                .unwrap_or(0.0)
         };
 
         let fan_speed = Self::parse_nvidia_float_or(parts[10], -1.0);
@@ -50,7 +54,9 @@ impl LinuxGpuMonitor {
         let driver_version = parts[13].to_string();
 
         // Parse CUDA version from standard nvidia-smi output
-        let cuda_version = self.get_nvidia_cuda_version().unwrap_or_else(|| "N/A".to_string());
+        let cuda_version = self
+            .get_nvidia_cuda_version()
+            .unwrap_or_else(|| "N/A".to_string());
 
         // Extract GPU index from bus_id
         let gpu_index = bus_id
@@ -129,7 +135,12 @@ impl LinuxGpuMonitor {
                 let parts: Vec<&str> = line.split('/').collect();
                 if parts.len() >= 2 {
                     let right = parts.last()?;
-                    let watts_str = right.trim().trim_end_matches('W').trim().trim_end_matches('|').trim();
+                    let watts_str = right
+                        .trim()
+                        .trim_end_matches('W')
+                        .trim()
+                        .trim_end_matches('|')
+                        .trim();
                     if let Ok(watts) = watts_str.parse::<f32>() {
                         if watts > 0.0 && watts < 10000.0 {
                             return Some(watts);
@@ -158,7 +169,9 @@ impl LinuxGpuMonitor {
                 // At minimum we need: gpu(0) pid(1) type(2) sm(3) mem(4) ... fb(7) command(8)
                 if parts.len() >= 9 {
                     let pid = parts[1].parse::<u32>().unwrap_or(0);
-                    if pid == 0 { continue; }
+                    if pid == 0 {
+                        continue;
+                    }
 
                     let proc_type = parts[2]; // C, G, or C+G
                     let sm_usage = parts[3].parse::<f32>().unwrap_or(-1.0);
@@ -166,11 +179,7 @@ impl LinuxGpuMonitor {
                     let command = parts[8..].join(" ");
 
                     // Get short process name from command path
-                    let name = command
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&command)
-                        .to_string();
+                    let name = command.rsplit('/').next().unwrap_or(&command).to_string();
 
                     let process_type = match proc_type {
                         "C" => "Compute".to_string(),
@@ -180,7 +189,10 @@ impl LinuxGpuMonitor {
                     };
 
                     // Merge duplicate PIDs (pmon may show multiple lines per GPU)
-                    if let Some(existing) = processes.iter_mut().find(|p: &&mut GpuProcessInfo| p.pid == pid) {
+                    if let Some(existing) = processes
+                        .iter_mut()
+                        .find(|p: &&mut GpuProcessInfo| p.pid == pid)
+                    {
                         if fb_mem_mb * 1024 * 1024 > existing.vram {
                             existing.vram = fb_mem_mb * 1024 * 1024;
                         }
@@ -213,7 +225,9 @@ impl LinuxGpuMonitor {
                     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
                     if parts.len() >= 3 {
                         let pid = parts[0].parse::<u32>().unwrap_or(0);
-                        if pid == 0 { continue; }
+                        if pid == 0 {
+                            continue;
+                        }
                         let name = parts[1].rsplit('/').next().unwrap_or(parts[1]).to_string();
                         let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
 
@@ -238,7 +252,9 @@ impl LinuxGpuMonitor {
                     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
                     if parts.len() >= 3 {
                         let pid = parts[0].parse::<u32>().unwrap_or(0);
-                        if pid == 0 { continue; }
+                        if pid == 0 {
+                            continue;
+                        }
 
                         if let Some(existing) = processes.iter_mut().find(|p| p.pid == pid) {
                             existing.process_type = "Compute+Graphics".to_string();

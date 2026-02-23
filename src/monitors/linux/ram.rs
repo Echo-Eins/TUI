@@ -1,7 +1,7 @@
-use anyhow::Result;
 use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use anyhow::Result;
 
 pub struct LinuxRamMonitor {
     linux_sys: LinuxSysMonitor,

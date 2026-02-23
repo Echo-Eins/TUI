@@ -22,9 +22,5 @@ pub fn create_progress_bar(percentage: f32, width: usize) -> String {
     let filled = ((percentage / 100.0) * width as f32) as usize;
     let empty = width.saturating_sub(filled);
 
-    format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(empty)
-    )
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
 }

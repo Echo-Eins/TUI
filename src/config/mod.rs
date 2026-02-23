@@ -184,9 +184,7 @@ impl Config {
 
         // Validate max FPS
         if self.server.max_fps == 0 || self.server.max_fps > 60 {
-            return Err(ConfigError::ValidationError(
-                "max_fps must be 1-60".into(),
-            ));
+            return Err(ConfigError::ValidationError("max_fps must be 1-60".into()));
         }
 
         // Validate display dimensions
@@ -267,7 +265,7 @@ jpeg_quality = 70
 [security]
 discovery_cookie = "a1b2c3d4e5f6789012345678deadbeef"
 private_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-cardputer_public_key = "02deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef01"
+cardputer_public_key = "020000000000000000000000000000000000000000000000000000000000000000"
 
 [network]
 mdns_service_name = "CardputerRemote"

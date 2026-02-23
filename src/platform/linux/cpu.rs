@@ -80,7 +80,11 @@ impl LinuxSysMonitor {
         } else {
             // Fallback: count unique core_ids across all physical packages
             let total: usize = core_ids_per_physical.values().map(|s| s.len()).sum();
-            if total > 0 { total } else { logical_count }
+            if total > 0 {
+                total
+            } else {
+                logical_count
+            }
         };
 
         let thread_count = if logical_count > 0 {
@@ -114,13 +118,17 @@ impl LinuxSysMonitor {
 
     fn get_max_frequency_mhz(&self) -> Option<f32> {
         // Try cpuinfo_max_freq first (in kHz)
-        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") {
+        if let Ok(content) =
+            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+        {
             if let Ok(khz) = content.trim().parse::<f32>() {
                 return Some(khz / 1000.0);
             }
         }
         // Try scaling_max_freq
-        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq") {
+        if let Ok(content) =
+            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
+        {
             if let Ok(khz) = content.trim().parse::<f32>() {
                 return Some(khz / 1000.0);
             }
@@ -130,13 +138,17 @@ impl LinuxSysMonitor {
 
     fn get_base_frequency_mhz(&self) -> Option<f32> {
         // Try base_frequency (in kHz)
-        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency") {
+        if let Ok(content) =
+            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency")
+        {
             if let Ok(khz) = content.trim().parse::<f32>() {
                 return Some(khz / 1000.0);
             }
         }
         // Try cpuinfo_min_freq as a rough base
-        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq") {
+        if let Ok(content) =
+            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")
+        {
             if let Ok(khz) = content.trim().parse::<f32>() {
                 return Some(khz / 1000.0);
             }
@@ -251,7 +263,11 @@ impl LinuxSysMonitor {
             // Check if this is a CPU temperature sensor
             let name = fs::read_to_string(path.join("name")).unwrap_or_default();
             let name = name.trim();
-            if name == "coretemp" || name == "k10temp" || name == "zenpower" || name == "cpu_thermal" {
+            if name == "coretemp"
+                || name == "k10temp"
+                || name == "zenpower"
+                || name == "cpu_thermal"
+            {
                 // Read temp1_input (in millidegrees)
                 for i in 1..=16 {
                     let temp_path = path.join(format!("temp{}_input", i));
@@ -326,8 +342,8 @@ impl LinuxSysMonitor {
                     .unwrap_or(0.0);
 
                 let tdp = max_power_uw / 1_000_000.0; // Convert uW to W
-                // Energy is in microjoules; we'd need two samples to compute power
-                // For now, return 0 for current (will be computed by the monitor)
+                                                      // Energy is in microjoules; we'd need two samples to compute power
+                                                      // For now, return 0 for current (will be computed by the monitor)
                 let _ = energy_uj;
                 return Some((0.0, if tdp > 0.0 { tdp } else { 65.0 }));
             }

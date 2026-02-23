@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 
 pub mod cpu;
-pub mod memory;
 pub mod disk;
+pub mod memory;
 pub mod network;
 pub mod process;
 pub mod shell;
 
 pub use cpu::CpuInfo;
-pub use memory::{MemoryInfo, ZramInfo, MemoryHardwareInfo};
-pub use disk::{DiskInfo, BlockDeviceInfo, BtrfsInfo, SmartData, RawDiskStats, ProcessIoSample};
+pub use disk::{BlockDeviceInfo, BtrfsInfo, DiskInfo, ProcessIoSample, RawDiskStats, SmartData};
+pub use memory::{MemoryHardwareInfo, MemoryInfo, ZramInfo};
 pub use network::NetworkInterface;
 pub use process::ProcessInfo;
 

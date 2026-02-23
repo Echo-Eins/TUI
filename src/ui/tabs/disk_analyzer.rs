@@ -1,3 +1,6 @@
+use crate::app::App;
+use crate::ui::theme::Theme;
+use crate::utils::format::{create_progress_bar, format_bytes};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -5,9 +8,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use crate::app::App;
-use crate::ui::theme::Theme;
-use crate::utils::format::{create_progress_bar, format_bytes};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let analyzer_data = app.state.disk_analyzer_data.read();
@@ -186,7 +186,11 @@ fn render_drive_panel(
     let available = inner_width.saturating_sub(size_width + percent_width + 6);
     let (name_width, bar_width) = compute_column_widths(available);
 
-    let denom = if drive.used > 0 { drive.used } else { drive.total };
+    let denom = if drive.used > 0 {
+        drive.used
+    } else {
+        drive.total
+    };
 
     for (entry, size_str) in drive
         .root_folders

@@ -1,9 +1,9 @@
+use crate::integrations::PowerShellExecutor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use crate::utils::parse_json_array;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use crate::integrations::PowerShellExecutor;
-use crate::utils::parse_json_array;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct WindowsCpuMonitor {
     ps: PowerShellExecutor,
@@ -140,8 +140,8 @@ impl WindowsCpuMonitor {
     }
 
     fn parse_cpu_info(output: &str) -> Result<CpuInfoParsed> {
-        let info: Win32Processor = serde_json::from_str(output)
-            .context("Failed to parse CPU info")?;
+        let info: Win32Processor =
+            serde_json::from_str(output).context("Failed to parse CPU info")?;
 
         Ok(CpuInfoParsed {
             name: info.Name,
@@ -154,8 +154,7 @@ impl WindowsCpuMonitor {
     }
 
     fn parse_overall_usage(output: &str) -> Result<f32> {
-        let usage: f32 = output.trim().parse()
-            .context("Failed to parse CPU usage")?;
+        let usage: f32 = output.trim().parse().context("Failed to parse CPU usage")?;
 
         Ok(usage.min(100.0))
     }
@@ -166,8 +165,8 @@ impl WindowsCpuMonitor {
     }
 
     fn parse_core_usage(output: &str) -> Result<Vec<CoreUsage>> {
-        let cores: Vec<CoreSample> = parse_json_array(output)
-            .context("Failed to parse core usage")?;
+        let cores: Vec<CoreSample> =
+            parse_json_array(output).context("Failed to parse core usage")?;
         if cores.is_empty() {
             return Ok(Vec::new());
         }
@@ -182,7 +181,11 @@ impl WindowsCpuMonitor {
             .collect())
     }
 
-    fn get_frequency_info(&self, cpu_info: &CpuInfoParsed, perf: &PerfInfo) -> Result<FrequencyInfo> {
+    fn get_frequency_info(
+        &self,
+        cpu_info: &CpuInfoParsed,
+        perf: &PerfInfo,
+    ) -> Result<FrequencyInfo> {
         let base_mhz = cpu_info.max_clock_speed.max(1) as f32;
         let avg_mhz = perf
             .avg_frequency()
@@ -202,7 +205,12 @@ impl WindowsCpuMonitor {
         })
     }
 
-    fn get_power_info(&self, cpu_info: &CpuInfoParsed, overall_usage: f32, perf: &PerfInfo) -> PowerInfo {
+    fn get_power_info(
+        &self,
+        cpu_info: &CpuInfoParsed,
+        overall_usage: f32,
+        perf: &PerfInfo,
+    ) -> PowerInfo {
         let util = perf
             .avg_utility()
             .unwrap_or(overall_usage)
@@ -215,8 +223,8 @@ impl WindowsCpuMonitor {
     }
 
     fn parse_top_processes(output: &str) -> Result<Vec<ProcessInfo>> {
-        let processes: Vec<ProcessSample> = parse_json_array(output)
-            .context("Failed to parse top processes")?;
+        let processes: Vec<ProcessSample> =
+            parse_json_array(output).context("Failed to parse top processes")?;
         if processes.is_empty() {
             return Ok(Vec::new());
         }

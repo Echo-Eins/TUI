@@ -6,16 +6,16 @@ use ratatui::style::Color;
 pub enum TokenKind {
     Command,
     Argument,
-    Flag,        // starts with -
-    Path,        // contains /
+    Flag, // starts with -
+    Path, // contains /
     QuotedString,
-    Pipe,        // |
-    Redirect,    // > >> < << 2>
-    Semicolon,   // ;
-    And,         // &&
-    Or,          // ||
+    Pipe,      // |
+    Redirect,  // > >> < << 2>
+    Semicolon, // ;
+    And,       // &&
+    Or,        // ||
     Whitespace,
-    Variable,    // $VAR or ${VAR}
+    Variable, // $VAR or ${VAR}
 }
 
 #[derive(Debug, Clone)]
@@ -29,20 +29,16 @@ impl InputToken {
     /// Get the display color for this token.
     pub fn color(&self) -> Color {
         match self.kind {
-            TokenKind::Command => {
-                match self.valid {
-                    Some(true) => Color::Green,
-                    Some(false) => Color::Red,
-                    None => Color::White,
-                }
-            }
-            TokenKind::Path => {
-                match self.valid {
-                    Some(true) => Color::Green,
-                    Some(false) => Color::Red,
-                    None => Color::White,
-                }
-            }
+            TokenKind::Command => match self.valid {
+                Some(true) => Color::Green,
+                Some(false) => Color::Red,
+                None => Color::White,
+            },
+            TokenKind::Path => match self.valid {
+                Some(true) => Color::Green,
+                Some(false) => Color::Red,
+                None => Color::White,
+            },
             TokenKind::Flag => Color::Cyan,
             TokenKind::QuotedString => Color::Yellow,
             TokenKind::Variable => Color::Magenta,
@@ -104,9 +100,17 @@ where
             chars.next();
             if chars.peek() == Some(&'|') {
                 chars.next();
-                tokens.push(InputToken { text: "||".to_string(), kind: TokenKind::Or, valid: None });
+                tokens.push(InputToken {
+                    text: "||".to_string(),
+                    kind: TokenKind::Or,
+                    valid: None,
+                });
             } else {
-                tokens.push(InputToken { text: "|".to_string(), kind: TokenKind::Pipe, valid: None });
+                tokens.push(InputToken {
+                    text: "|".to_string(),
+                    kind: TokenKind::Pipe,
+                    valid: None,
+                });
             }
             is_first_token = false;
             after_pipe_or_semi = true;
@@ -117,10 +121,18 @@ where
             chars.next();
             if chars.peek() == Some(&'&') {
                 chars.next();
-                tokens.push(InputToken { text: "&&".to_string(), kind: TokenKind::And, valid: None });
+                tokens.push(InputToken {
+                    text: "&&".to_string(),
+                    kind: TokenKind::And,
+                    valid: None,
+                });
                 after_pipe_or_semi = true;
             } else {
-                tokens.push(InputToken { text: "&".to_string(), kind: TokenKind::Argument, valid: None });
+                tokens.push(InputToken {
+                    text: "&".to_string(),
+                    kind: TokenKind::Argument,
+                    valid: None,
+                });
             }
             is_first_token = false;
             continue;
@@ -128,7 +140,11 @@ where
 
         if c == ';' {
             chars.next();
-            tokens.push(InputToken { text: ";".to_string(), kind: TokenKind::Semicolon, valid: None });
+            tokens.push(InputToken {
+                text: ";".to_string(),
+                kind: TokenKind::Semicolon,
+                valid: None,
+            });
             is_first_token = false;
             after_pipe_or_semi = true;
             continue;
@@ -143,7 +159,11 @@ where
                 redir.push(c);
                 chars.next();
             }
-            tokens.push(InputToken { text: redir, kind: TokenKind::Redirect, valid: None });
+            tokens.push(InputToken {
+                text: redir,
+                kind: TokenKind::Redirect,
+                valid: None,
+            });
             is_first_token = false;
             continue;
         }
@@ -207,8 +227,15 @@ where
         // Regular word
         let mut word = String::new();
         while let Some(&ch) = chars.peek() {
-            if ch.is_whitespace() || ch == '|' || ch == '&' || ch == ';'
-                || ch == '>' || ch == '<' || ch == '\'' || ch == '"' || ch == '$'
+            if ch.is_whitespace()
+                || ch == '|'
+                || ch == '&'
+                || ch == ';'
+                || ch == '>'
+                || ch == '<'
+                || ch == '\''
+                || ch == '"'
+                || ch == '$'
             {
                 break;
             }
@@ -264,7 +291,8 @@ where
 /// Convert tokenized input to colored (text, color) pairs for rendering.
 pub fn highlight(input: &str, is_known_command: impl Fn(&str) -> bool) -> Vec<(String, Color)> {
     let tokens = tokenize(input, is_known_command);
-    tokens.into_iter()
+    tokens
+        .into_iter()
         .map(|t| {
             let color = t.color();
             (t.text, color)
@@ -300,7 +328,8 @@ mod tests {
     #[test]
     fn test_pipe() {
         let tokens = tokenize("cat file | grep foo", always_known);
-        let commands: Vec<&InputToken> = tokens.iter()
+        let commands: Vec<&InputToken> = tokens
+            .iter()
             .filter(|t| t.kind == TokenKind::Command)
             .collect();
         assert_eq!(commands.len(), 2);
@@ -311,7 +340,8 @@ mod tests {
     #[test]
     fn test_quoted_string() {
         let tokens = tokenize("echo \"hello world\"", always_known);
-        let quoted: Vec<&InputToken> = tokens.iter()
+        let quoted: Vec<&InputToken> = tokens
+            .iter()
             .filter(|t| t.kind == TokenKind::QuotedString)
             .collect();
         assert_eq!(quoted.len(), 1);
@@ -321,7 +351,8 @@ mod tests {
     #[test]
     fn test_variable() {
         let tokens = tokenize("echo $HOME", always_known);
-        let vars: Vec<&InputToken> = tokens.iter()
+        let vars: Vec<&InputToken> = tokens
+            .iter()
             .filter(|t| t.kind == TokenKind::Variable)
             .collect();
         assert_eq!(vars.len(), 1);
@@ -331,7 +362,8 @@ mod tests {
     #[test]
     fn test_redirect() {
         let tokens = tokenize("echo hello > file.txt", always_known);
-        let redirects: Vec<&InputToken> = tokens.iter()
+        let redirects: Vec<&InputToken> = tokens
+            .iter()
             .filter(|t| t.kind == TokenKind::Redirect)
             .collect();
         assert_eq!(redirects.len(), 1);

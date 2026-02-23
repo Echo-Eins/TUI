@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
 use crate::app::state::GpuProcessSortColumn;
+use crate::app::App;
 use crate::monitors::GpuProcessInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
@@ -75,9 +75,17 @@ fn render_full(
         "GPU {}: {}  Bus: {}  Driver: {}  CUDA: {}  Temp: {:.1}°C",
         data.gpu_index,
         data.name,
-        if data.bus_id.is_empty() { "N/A" } else { &data.bus_id },
+        if data.bus_id.is_empty() {
+            "N/A"
+        } else {
+            &data.bus_id
+        },
         data.driver_version,
-        if data.cuda_version.is_empty() { "N/A" } else { &data.cuda_version },
+        if data.cuda_version.is_empty() {
+            "N/A"
+        } else {
+            &data.cuda_version
+        },
         data.temperature
     );
 
@@ -174,8 +182,7 @@ fn render_full(
 
     // VRAM Usage
     let vram_used_pct = if data.memory_total > 0 {
-        ((data.memory_used as f64 / data.memory_total as f64) * 100.0)
-            .min(100.0) as u16
+        ((data.memory_used as f64 / data.memory_total as f64) * 100.0).min(100.0) as u16
     } else {
         0
     };
@@ -286,7 +293,11 @@ fn render_full(
                 "VRAM".to_string()
             },
         ])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
         let table = Table::new(
             rows,

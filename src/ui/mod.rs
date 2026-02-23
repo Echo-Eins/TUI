@@ -1,6 +1,6 @@
-﻿pub mod theme;
-pub mod widgets;
 pub mod tabs;
+pub mod theme;
+pub mod widgets;
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -19,17 +19,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Render a background block to ensure the frame is filled
     // This forces ratatui to update the entire screen
-    let background = Block::default()
-        .style(Style::default().bg(Color::Reset));
+    let background = Block::default().style(Style::default().bg(Color::Reset));
     f.render_widget(background, size);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(3),  // Tabs
-            Constraint::Min(0),     // Content
-            Constraint::Length(3),  // Footer/Command input
+            Constraint::Length(3), // Header
+            Constraint::Length(3), // Tabs
+            Constraint::Min(0),    // Content
+            Constraint::Length(3), // Footer/Command input
         ])
         .split(size);
 
@@ -37,7 +36,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_tabs(f, chunks[1], app);
     render_content(f, chunks[2], app);
     render_footer(f, chunks[3], app);
-
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
@@ -52,7 +50,11 @@ fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
     let text = Paragraph::new(title)
         .block(block)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD));
+        .style(
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        );
 
     f.render_widget(text, area);
 }
@@ -62,7 +64,10 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
     let theme = Theme::from_config(&config);
     let highlight_config = &config.ui.section_highlight;
 
-    let tab_titles: Vec<Line> = app.state.tab_manager.tabs
+    let tab_titles: Vec<Line> = app
+        .state
+        .tab_manager
+        .tabs
         .iter()
         .enumerate()
         .map(|(i, tab)| {
@@ -109,10 +114,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
 
                 Line::from(vec![
                     Span::raw(bracket_left),
-                    Span::styled(
-                        tab_name,
-                        Style::default().fg(Color::White),
-                    ),
+                    Span::styled(tab_name, Style::default().fg(Color::White)),
                     Span::raw(bracket_right),
                 ])
             }
@@ -123,7 +125,11 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
         .block(Block::default().borders(Borders::ALL))
         .select(app.state.tab_manager.current_index)
         .style(Style::default().fg(theme.foreground))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
     f.render_widget(tabs, area);
 }
@@ -182,5 +188,3 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
-
-

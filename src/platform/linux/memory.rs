@@ -114,8 +114,7 @@ impl LinuxSysMonitor {
             }
 
             // mm_stat has: orig_data_size compr_data_size mem_used_total mem_limit ...
-            let mm_stat = fs::read_to_string(path.join("mm_stat"))
-                .unwrap_or_default();
+            let mm_stat = fs::read_to_string(path.join("mm_stat")).unwrap_or_default();
             let mm_parts: Vec<u64> = mm_stat
                 .split_whitespace()
                 .filter_map(|s| s.parse().ok())
@@ -193,12 +192,17 @@ impl LinuxSysMonitor {
 
         for line in stdout.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("Type:") && !trimmed.contains("Detail") && !trimmed.contains("Error") {
+            if trimmed.starts_with("Type:")
+                && !trimmed.contains("Detail")
+                && !trimmed.contains("Error")
+            {
                 let val = trimmed.strip_prefix("Type:")?.trim().to_string();
                 if val != "Unknown" && !val.is_empty() {
                     mem_type = val;
                 }
-            } else if trimmed.starts_with("Configured Memory Speed:") || trimmed.starts_with("Speed:") {
+            } else if trimmed.starts_with("Configured Memory Speed:")
+                || trimmed.starts_with("Speed:")
+            {
                 let val = trimmed.split(':').nth(1)?.trim().to_string();
                 if val != "Unknown" && !val.is_empty() && speed.is_empty() {
                     speed = val;
@@ -216,9 +220,21 @@ impl LinuxSysMonitor {
         }
 
         Some(MemoryHardwareInfo {
-            memory_type: if mem_type.is_empty() { "Unknown".to_string() } else { mem_type },
-            speed: if speed.is_empty() { "Unknown".to_string() } else { speed },
-            form_factor: if form_factor.is_empty() { None } else { Some(form_factor) },
+            memory_type: if mem_type.is_empty() {
+                "Unknown".to_string()
+            } else {
+                mem_type
+            },
+            speed: if speed.is_empty() {
+                "Unknown".to_string()
+            } else {
+                speed
+            },
+            form_factor: if form_factor.is_empty() {
+                None
+            } else {
+                Some(form_factor)
+            },
         })
     }
 
@@ -257,10 +273,10 @@ pub struct MemoryInfo {
 #[derive(Debug, Clone)]
 pub struct ZramInfo {
     pub name: String,
-    pub disksize: u64,          // Uncompressed limit
-    pub orig_data_size: u64,    // Original data stored
-    pub compr_data_size: u64,   // Compressed data size
-    pub mem_used_total: u64,    // Total memory used by zram (includes overhead)
+    pub disksize: u64,        // Uncompressed limit
+    pub orig_data_size: u64,  // Original data stored
+    pub compr_data_size: u64, // Compressed data size
+    pub mem_used_total: u64,  // Total memory used by zram (includes overhead)
     pub compression_ratio: f64,
     pub algorithm: String,
 }

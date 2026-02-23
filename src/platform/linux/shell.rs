@@ -1,15 +1,21 @@
-﻿use crate::platform::executor::{CommandExecutor, StreamMessage};
+use crate::platform::executor::{CommandExecutor, StreamMessage};
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::io::Read;
+use parking_lot::RwLock;
+use std::process::Stdio;
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::task;
 
-pub struct LinuxCommandExecutor;
+pub struct LinuxCommandExecutor {
+    active_pid: Arc<RwLock<Option<u32>>>,
+}
 
 impl LinuxCommandExecutor {
     pub fn new() -> Self {
-        Self
+        Self {
+            active_pid: Arc::new(RwLock::new(None)),
+        }
     }
 }
 
@@ -20,131 +26,135 @@ impl CommandExecutor for LinuxCommandExecutor {
     }
 
     async fn execute(&self, cmd: &str) -> Result<String> {
-        let cmd_owned = cmd.to_string();
+        let output = Command::new("bash")
+            .args(["-lc", cmd])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to spawn bash command")?;
 
-        let output = task::spawn_blocking(move || {
-            let pty_system = NativePtySystem::default();
-            let pair = pty_system.openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            }).context("Failed to open PTY")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let code = output.status.code().unwrap_or(1);
+            anyhow::bail!("bash command failed (exit {}): {}", code, stderr);
+        }
 
-            let mut command = CommandBuilder::new("bash");
-            command.args(["-lc", &cmd_owned]);
-
-            let mut child = pair.slave.spawn_command(command).context("Failed to spawn command")?;
-            drop(pair.slave);
-
-            let mut reader = pair.master.try_clone_reader().context("Failed to clone reader")?;
-
-            let mut buf = [0u8; 4096];
-            let mut output = String::new();
-            while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 { break; }
-                output.push_str(&String::from_utf8_lossy(&buf[..n]));
-            }
-
-            let _ = child.wait();
-            Ok::<String, anyhow::Error>(output)
-        }).await.context("Task panicked")??;
-
-        Ok(output)
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<StreamMessage>> {
         let (tx, rx) = mpsc::channel(100);
         let cmd_owned = cmd.to_string();
+        let active_pid = Arc::clone(&self.active_pid);
 
-        task::spawn_blocking(move || {
-            let pty_system = NativePtySystem::default();
-            let pair = match pty_system.openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Error: {}", e)));
-                    let _ = tx.blocking_send(StreamMessage::Exit(1));
-                    return;
-                }
-            };
-
-            let mut command = CommandBuilder::new("bash");
-            command.args(["-lc", &cmd_owned]);
-
-            let mut child = match pair.slave.spawn_command(command) {
+        tokio::spawn(async move {
+            let mut child = match Command::new("bash")
+                .args(["-lc", &cmd_owned])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Failed to spawn: {}", e)));
-                    let _ = tx.blocking_send(StreamMessage::Exit(1));
-                    return;
-                }
-            };
-            drop(pair.slave);
-
-            let mut reader = match pair.master.try_clone_reader() {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.blocking_send(StreamMessage::Stderr(format!("Reader error: {}", e)));
-                    let _ = tx.blocking_send(StreamMessage::Exit(1));
+                    let _ = tx
+                        .send(StreamMessage::Stderr(format!("Failed to spawn: {}", e)))
+                        .await;
+                    let _ = tx.send(StreamMessage::Exit(1)).await;
                     return;
                 }
             };
 
-            let mut buf = [0u8; 1024];
-            let mut line_buffer = String::new();
+            *active_pid.write() = child.id();
 
-            while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 { break; }
-
-                let text = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                for c in text.chars() {
-                    line_buffer.push(c);
-                    if c == '\n' {
-                        // PTY merges stdout/stderr; treat as Stdout for now
-                        let _ = tx.blocking_send(StreamMessage::Stdout(line_buffer.clone()));
-                        line_buffer.clear();
+            if let Some(mut stdout) = child.stdout.take() {
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let mut line_buffer = String::new();
+                    while let Ok(n) = stdout.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        for c in text.chars() {
+                            line_buffer.push(c);
+                            if c == '\n' {
+                                let _ = tx_clone
+                                    .send(StreamMessage::Stdout(line_buffer.clone()))
+                                    .await;
+                                line_buffer.clear();
+                            }
+                        }
                     }
-                }
+                    if !line_buffer.is_empty() {
+                        let _ = tx_clone.send(StreamMessage::Stdout(line_buffer)).await;
+                    }
+                });
             }
 
-            if !line_buffer.is_empty() {
-                let _ = tx.blocking_send(StreamMessage::Stdout(line_buffer));
+            if let Some(mut stderr) = child.stderr.take() {
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let mut line_buffer = String::new();
+                    while let Ok(n) = stderr.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        for c in text.chars() {
+                            line_buffer.push(c);
+                            if c == '\n' {
+                                let _ = tx_clone
+                                    .send(StreamMessage::Stderr(line_buffer.clone()))
+                                    .await;
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+                    if !line_buffer.is_empty() {
+                        let _ = tx_clone.send(StreamMessage::Stderr(line_buffer)).await;
+                    }
+                });
             }
 
-            // Get exit code
-            let exit_code = match child.wait() {
-                Ok(status) => {
-                    if status.success() { 0 } else {
-                        // portable-pty ExitStatus doesn't always give code, default to 1
-                        1
-                    }
-                }
+            let exit_code = match child.wait().await {
+                Ok(status) => status.code().unwrap_or(1),
                 Err(_) => 1,
             };
-
-            let _ = tx.blocking_send(StreamMessage::Exit(exit_code));
+            *active_pid.write() = None;
+            let _ = tx.send(StreamMessage::Exit(exit_code)).await;
         });
 
         Ok(rx)
     }
 
     async fn suggest(&self, _input: &str) -> Result<Vec<String>> {
-        // Implement compgen or history searching later
         Ok(Vec::new())
     }
 
     async fn validate(&self, cmd: &str) -> Result<bool> {
-        let status = tokio::process::Command::new("bash")
+        let status = Command::new("bash")
             .args(["-n", "-c", cmd])
-            .output()
-            .await?
-            .status;
+            .status()
+            .await?;
         Ok(status.success())
+    }
+
+    async fn interrupt(&self) -> Result<()> {
+        let pid = *self.active_pid.read();
+        if let Some(pid) = pid {
+            let pid_str = pid.to_string();
+            let status = Command::new("kill")
+                .args(["-INT", &pid_str])
+                .status()
+                .await
+                .context("Failed to invoke kill -INT")?;
+            if !status.success() {
+                anyhow::bail!("Failed to send SIGINT to PID {}", pid);
+            }
+        }
+        Ok(())
     }
 }
