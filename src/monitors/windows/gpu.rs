@@ -1,3 +1,4 @@
+﻿use crate::platform::executor::CommandExecutor;
 use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
 use crate::utils::parse_json_array;
@@ -448,3 +449,4 @@ struct GpuInfo {
     MemoryUsed: Option<u64>,
     Utilization: Option<f32>,
 }
+

@@ -1,137 +1,73 @@
-# Cardputer Remote Desktop
+# 🖥️ Cardputer Remote & TUI Dashboard
 
-Secure remote desktop system for M5Stack Cardputer with full PKI mutual authentication.
+![Rust](https://img.shields.io/badge/Rust-1.75+-orange?style=flat-square&logo=rust)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-## Security Features
+A highly secure, cross-platform remote desktop and system monitoring solution, originally built for the M5Stack Cardputer, featuring a powerful terminal user interface (TUI).
 
-- **ECDSA Mutual Authentication** - Both client and server verify each other's identity
-- **ECDH Forward Secrecy** - Ephemeral keys ensure past sessions remain secure if keys leak
-- **AES-128-GCM Encryption** - Authenticated encryption for all session data
-- **Replay Protection** - Monotonic nonce counters prevent replay attacks
-- **HKDF Key Derivation** - RFC 5869 compliant key derivation
+## ✨ Features
 
-## Quick Start
+- **🔐 Enterprise-Grade Security** 
+  - ECDSA Mutual Authentication & ECDH Forward Secrecy.
+  - AES-128-GCM Authenticated Encryption with Monotonic Nonce Replay Protection.
+- **📊 Advanced TUI Dashboard** (Windows & Linux)
+  - Real-time system monitoring (CPU, RAM, Disk, Network, GPU, Processes, Services).
+  - Modular cross-platform architecture abstracting OS-level metrics.
+- **💻 Integrated Interactive Console**
+  - Fully asynchronous terminal emulator inside the TUI.
+  - Support for streaming execution and interactive mode logic.
+- **🤖 Ollama Integration** 
+  - Built-in chat, model management, and offline prompt engineering interface.
 
-### 1. Generate Keys
+## 🚀 Quick Start
 
+### 1. Generate Security Keys
+Generates the required PC/Cardputer ECDSA keypairs and a discovery cookie:
 ```bash
-cd cardputer-remote
 cargo run --bin keygen
 ```
 
-This generates:
-- PC private/public keypair
-- Cardputer private/public keypair
-- Discovery cookie
-
 ### 2. Configure PC Server
+Generate or modify your `config.toml` to secure the connection and configure system monitors.
 
-Create `config.toml`:
+### 3. Launch Applications
 
-```toml
-[server]
-port = 19847
-session_timeout_secs = 300
-max_fps = 10
-jpeg_quality = 70
-
-[security]
-discovery_cookie = "<generated cookie>"
-private_key = "<PC private key>"
-cardputer_public_key = "<Cardputer public key>"
-
-[network]
-mdns_service_name = "CardputerRemote"
-device_name = "MyPC"
-bind_address = "0.0.0.0"
-
-[display]
-target_width = 240
-target_height = 135
-
-[logging]
-level = "info"
-```
-
-### 3. Configure Cardputer (ESP32)
-
-Create key files on SD card:
-
+**To run the TUI Dashboard:**
 ```bash
-# Create directory
-mkdir /sd/rd_keys
-
-# Convert hex keys to binary and copy to SD card
-echo '<Cardputer private key hex>' | xxd -r -p > /sd/rd_keys/client.key
-echo '<Cardputer public key hex>' | xxd -r -p > /sd/rd_keys/client.pub
-echo '<PC public key hex>' | xxd -r -p > /sd/rd_keys/server.pub
+cargo run --release --bin TUI
 ```
+*(Note: Omit `--release` for debugging/development)*
 
-Or use the ESP32's key generation (via Serial):
-```
-[RD] Generated public key (add to server config): 02abc123...
-```
-
-### 4. Run
-
-**PC Server:**
+**To run the Remote Desktop Server:**
 ```bash
 cargo run --release --bin cardputer-remote
 ```
 
-**TUI console (separate app):**
-```bash
-cargo run --release --bin TUI
-```
+## 🛠️ Cardputer (ESP32) Configuration
 
-**Cardputer:**
-1. Flash firmware with Remote Desktop module
-2. Connect to WiFi
-3. Select "Remote Desktop" from menu
-4. Press ENTER to connect
+1. Create a `/sd/rd_keys/` folder on your MicroSD card.
+2. Place the generated binaries:
+   - `client.key` (ECDSA Private - 32 bytes)
+   - `client.pub` (ECDSA Public - 33 bytes)
+   - `server.pub` (PC's Public - 33 bytes)
+3. Flash the firmware, connect to WiFi, and select "Remote Desktop".
 
-## Controls
+### 🕹️ Cardputer Controls
 
-| Key | Action |
-|-----|--------|
-| FN + ; | Mouse up |
-| FN + . | Mouse down |
-| FN + , | Mouse left |
-| FN + / | Mouse right |
-| FN + ENTER | Left click |
-| FN + BACKSPACE | Disconnect |
-| A-Z, 0-9 | Type characters |
+| Key Bind | Action | | Key Bind | Action |
+|----------|--------|-|----------|--------|
+| `FN + ;` | Mouse Up | | `FN + ENTER` | Left Click |
+| `FN + .` | Mouse Down | | `FN + BACKSPACE` | Disconnect |
+| `FN + ,` | Mouse Left | | `A-Z, 0-9` | Type Data |
+| `FN + /` | Mouse Right | | | |
 
-## File Structure
+## 🏗️ Technical Implementation details
 
-```
-/sd/
-├── rd_keys/
-│   ├── client.key    # ECDSA private key (32 bytes)
-│   ├── client.pub    # ECDSA public key (33 bytes)
-│   └── server.pub    # Server's public key (33 bytes)
-└── remote_desktop.json  # Optional config
-```
+The TUI utilizes a highly asynchronous, cross-platform architecture built on Tokio:
+- **Windows Console:** Leverages native `tokio::process::Command` and fully asynchronous I/O streams for non-blocking execution of PowerShell.
+- **Linux Console:** Utilizes `portable-pty` bridged into Tokio via `task::spawn_blocking` and `mpsc` channels to ensure the main async event loop is never blocked by synchronous TTY interactions.
 
-## Troubleshooting
+---
 
-### "Failed to load keys"
-- Ensure all three key files exist in `/sd/rd_keys/`
-- Check file sizes: client.key=32, client.pub=33, server.pub=33
-
-### "Server signature verification failed"
-- Verify server.pub matches PC's public key
-- Regenerate keys if compromised
-
-### "Handshake timeout"
-- Check WiFi connectivity
-- Verify PC server is running
-- Check firewall allows port 19847
-
-## Security Considerations
-
-1. **Key Storage**: Private keys are stored unencrypted on SD card. Physical security of the Cardputer is essential.
-
-2. **Network**: Initial TCP connection is unencrypted. Use on trusted networks only.
-
-3. **Updates**: Keep both ESP32 and PC components updated together.
+**Security Notice:** Private keys are stored unencrypted on the SD card. Physical security of the Cardputer is essential. The initial TCP connection is unencrypted until the handshake completes; use on trusted networks.

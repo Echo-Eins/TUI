@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     let mut events = EventHandler::new(200);
 
     loop {
-        terminal.draw(|frame| ui::render(frame, &app))?;
+        terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if let AppEvent::Input(event) = events.next().await {
             if !app.handle_event(event).await? {

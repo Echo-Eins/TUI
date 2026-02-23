@@ -207,7 +207,9 @@ impl PowerShellExecutor {
 
 use crate::platform::executor::CommandExecutor;
 use tokio::sync::mpsc;
+use async_trait::async_trait;
 
+#[async_trait]
 impl CommandExecutor for PowerShellExecutor {
     async fn execute(&self, command: &str) -> Result<String> {
         let cache_key = command.to_string();

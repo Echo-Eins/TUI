@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use crate::integrations::PowerShellExecutor;
@@ -235,7 +235,7 @@ impl DiskMonitorTrait for WindowsDiskMonitor {
         let io_stats = Self::parse_disk_io_stats(&outputs[1])?;
         let process_activity = Self::parse_disk_process_activity(&outputs[2])?;
 
-        let mut physical_disks: Vec<PhysicalDiskInfo> = info
+        let physical_disks: Vec<PhysicalDiskInfo> = info
             .PhysicalDisks
             .into_iter()
             .map(|p| PhysicalDiskInfo {

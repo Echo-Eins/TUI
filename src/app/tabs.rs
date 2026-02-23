@@ -10,6 +10,7 @@ pub enum TabType {
     Ollama,
     Processes,
     Services,
+    Console,
     DiskAnalyzer,
     Settings,
 }
@@ -25,6 +26,7 @@ impl TabType {
             TabType::Ollama => "Ollama",
             TabType::Processes => "Processes",
             TabType::Services => "Services",
+            TabType::Console => "Console",
             TabType::DiskAnalyzer => "Disk Analyzer",
             TabType::Settings => "Settings",
         }
@@ -40,6 +42,7 @@ impl TabType {
             "ollama" => Some(TabType::Ollama),
             "processes" => Some(TabType::Processes),
             "services" => Some(TabType::Services),
+            "console" => Some(TabType::Console),
             "disk_analyzer" => Some(TabType::DiskAnalyzer),
             "settings" => Some(TabType::Settings),
             _ => None,
@@ -58,6 +61,7 @@ impl TabType {
             TabType::Ollama,
             TabType::Processes,
             TabType::Services,
+            TabType::Console,
             TabType::Settings,
         ]
     }

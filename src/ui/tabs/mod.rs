@@ -6,5 +6,6 @@ pub mod network;
 pub mod ollama;
 pub mod processes;
 pub mod services;
+pub mod console;
 pub mod disk_analyzer;
 pub mod settings;

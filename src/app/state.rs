@@ -1,3 +1,4 @@
+﻿use crate::platform::executor::CommandExecutor;
 use anyhow::Result;
 use chrono::Local;
 use crossterm::event::{
@@ -18,11 +19,12 @@ use crate::integrations::ollama::{OllamaModel, RunningModel};
 use crate::monitors::{
     CpuData, DiskAnalyzerData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData,
 };
-use crate::utils::command_history::CommandHistory;
 use std::fs;
 
 #[derive(Debug)]
 enum AsyncUpdate {
+    ConsoleOutput { line: String },
+    ConsoleCommandCompleted,
     OllamaCommandCompleted { title: String, lines: Vec<String> },
     OllamaChatCompleted { response: String },
     OllamaChatFailed { error: String },
@@ -56,9 +58,7 @@ pub struct AppState {
     pub ollama_error: Arc<RwLock<Option<String>>>,
 
     // UI state
-    pub command_menu_active: bool,
-    pub command_history: CommandHistory,
-    pub command_input: String,
+    pub console_state: crate::app::console_state::ConsoleState,
     #[allow(dead_code)]
     pub selected_section: Option<String>,
     pub last_nav_input: Option<Instant>,
@@ -336,13 +336,23 @@ impl AppState {
         new_tabs.select(current_tab);
         self.tab_manager = new_tabs;
         self.compact_mode = config_snapshot.general.compact_mode;
-        self.command_history
-            .set_max_size(config_snapshot.ui.command_history.max_entries);
     }
 
     fn apply_async_updates(&mut self) {
         while let Ok(update) = self.async_rx.try_recv() {
             match update {
+                AsyncUpdate::ConsoleOutput { line } => {
+                    self.console_state.output_history.push_back(crate::app::console_state::ConsoleMessage {
+                        text: line,
+                        color: ratatui::style::Color::White,
+                    });
+                    if self.console_state.output_history.len() > self.console_state.max_history {
+                        self.console_state.output_history.pop_front();
+                    }
+                }
+                AsyncUpdate::ConsoleCommandCompleted => {
+                    self.console_state.is_running = false;
+                }
                 AsyncUpdate::OllamaCommandCompleted { title, lines } => {
                     self.ollama_state.activity_view = OllamaActivityView::Log;
                     self.ollama_state.activity_log_lines = lines;
@@ -887,14 +897,14 @@ impl AppState {
         let mut prompt = String::new();
         for message in &self.ollama_state.chat_messages {
             match message.role {
-                ChatRole::User => Self::append_chat_lines(&mut prompt, "Запрос: ", &message.text),
+                ChatRole::User => Self::append_chat_lines(&mut prompt, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text),
                 ChatRole::Assistant => {
-                    Self::append_chat_lines(&mut prompt, "Ответ: ", &message.text)
+                    Self::append_chat_lines(&mut prompt, "ÐžÑ‚Ð²ÐµÑ‚: ", &message.text)
                 }
             }
         }
-        Self::append_chat_lines(&mut prompt, "Запрос: ", new_prompt);
-        prompt.push_str("Ответ: ");
+        Self::append_chat_lines(&mut prompt, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", new_prompt);
+        prompt.push_str("ÐžÑ‚Ð²ÐµÑ‚: ");
         prompt
     }
 
@@ -902,8 +912,8 @@ impl AppState {
         let mut log = String::new();
         for message in &self.ollama_state.chat_messages {
             match message.role {
-                ChatRole::User => Self::append_chat_lines(&mut log, "Запрос: ", &message.text),
-                ChatRole::Assistant => Self::append_chat_lines(&mut log, "Ответ: ", &message.text),
+                ChatRole::User => Self::append_chat_lines(&mut log, "Ð—Ð°Ð¿Ñ€Ð¾Ñ: ", &message.text),
+                ChatRole::Assistant => Self::append_chat_lines(&mut log, "ÐžÑ‚Ð²ÐµÑ‚: ", &message.text),
             }
         }
         log
@@ -959,8 +969,8 @@ impl AppState {
             Ok(content) => content,
             Err(_) => return Vec::new(),
         };
-        const USER_PREFIXES: [&str; 3] = ["Запрос:", "Р—Р°РїСЂРѕСЃ:", "Request:"];
-        const ASSIST_PREFIXES: [&str; 3] = ["Ответ:", "РћС‚РІРµС‚:", "Response:"];
+        const USER_PREFIXES: [&str; 3] = ["Ð—Ð°Ð¿Ñ€Ð¾Ñ:", "Ð â€”Ð Â°Ð Ñ—Ð¡Ð‚Ð Ñ•Ð¡Ðƒ:", "Request:"];
+        const ASSIST_PREFIXES: [&str; 3] = ["ÐžÑ‚Ð²ÐµÑ‚:", "Ð Ñ›Ð¡â€šÐ Ð†Ð ÂµÐ¡â€š:", "Response:"];
 
         let mut messages = Vec::new();
         let mut current_role: Option<ChatRole> = None;
@@ -1131,12 +1141,45 @@ impl AppState {
         });
     }
 
-    pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
+    fn spawn_console_command(&mut self, command: String) {
+        if self.console_state.is_running {
+            return;
+        }
+
+        self.console_state.is_running = true;
+        self.console_state.output_history.push_back(crate::app::console_state::ConsoleMessage {
+            text: format!("> {}", command),
+            color: ratatui::style::Color::DarkGray,
+        });
+
+        // Use the global executor getter from the platform module
+        let executor = crate::platform::get_executor();
+        
+        // Setup channels for streaming output
+        let tx = self.async_tx.clone();
+        
+        tokio::spawn(async move {
+            match executor.execute_stream(&command).await {
+                Ok(mut rx) => {
+                    while let Some(line) = rx.recv().await {
+                        let _ = tx.send(AsyncUpdate::ConsoleOutput { line });
+                    }
+                    let _ = tx.send(AsyncUpdate::ConsoleCommandCompleted);
+                }
+                Err(error) => {
+                    let _ = tx.send(AsyncUpdate::ConsoleOutput { 
+                        line: format!("Error spawning command: {}", error) 
+                    });
+                    let _ = tx.send(AsyncUpdate::ConsoleCommandCompleted);
+                }
+            }
+        });
+    }
+    pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
         let config_snapshot = config.read().clone();
         let tab_manager =
             TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
 
-        let command_history = CommandHistory::new(config_snapshot.ui.command_history.max_entries);
 
         let compact_mode = config_snapshot.general.compact_mode;
 
@@ -1210,9 +1253,7 @@ impl AppState {
             ollama_data,
             ollama_error,
 
-            command_menu_active: false,
-            command_history,
-            command_input: String::new(),
+            console_state: crate::app::console_state::ConsoleState::new(1000),
             selected_section: None,
             last_nav_input: None,
             last_horizontal_nav_input: None,
@@ -1320,44 +1361,91 @@ impl AppState {
             return Ok(false);
         }
 
-        // Handle Ctrl+F to open command history menu
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
-            if is_initial_press {
-                self.command_menu_active = !self.command_menu_active;
-            }
-            return Ok(true);
-        }
 
-        // If command menu is active, handle navigation
-        if self.command_menu_active {
-            match key.code {
-                KeyCode::Esc => {
-                    self.command_menu_active = false;
-                }
-                KeyCode::Enter if is_initial_press => {
-                    // First Enter: insert command into input
-                    if let Some(cmd) = self.command_history.get_selected() {
-                        self.command_input = cmd.clone();
-                        self.command_menu_active = false;
+        if self.tab_manager.current() == TabType::Console {
+            match self.console_state.mode {
+                crate::app::console_state::ConsoleMode::Normal => {
+                    match key.code {
+                        KeyCode::Char('i') => {
+                            if is_initial_press {
+                                self.console_state.mode = crate::app::console_state::ConsoleMode::Insert;
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Up => {
+                            if is_initial_press && self.allow_nav() {
+                                self.console_state.scroll_offset = self.console_state.scroll_offset.saturating_add(1);
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Down => {
+                            if is_initial_press && self.allow_nav() {
+                                self.console_state.scroll_offset = self.console_state.scroll_offset.saturating_sub(1);
+                            }
+                            return Ok(true);
+                        }
+                        _ => {}
                     }
                 }
-                KeyCode::Up if is_initial_press => {
-                    self.command_history.previous();
+                crate::app::console_state::ConsoleMode::Insert => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            if is_initial_press {
+                                self.console_state.mode = crate::app::console_state::ConsoleMode::Normal;
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Char(c) => {
+                            if is_initial_press && self.allow_text_input() {
+                                self.console_state.input_buffer.insert(self.console_state.cursor_position, c);
+                                self.console_state.cursor_position += 1;
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Backspace => {
+                            if is_initial_press && self.allow_text_input() && self.console_state.cursor_position > 0 {
+                                self.console_state.cursor_position -= 1;
+                                self.console_state.input_buffer.remove(self.console_state.cursor_position);
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Delete => {
+                            if is_initial_press && self.allow_text_input() && self.console_state.cursor_position < self.console_state.input_buffer.len() {
+                                self.console_state.input_buffer.remove(self.console_state.cursor_position);
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Left => {
+                            if is_initial_press && self.console_state.cursor_position > 0 {
+                                self.console_state.cursor_position -= 1;
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Right => {
+                            if is_initial_press && self.console_state.cursor_position < self.console_state.input_buffer.len() {
+                                self.console_state.cursor_position += 1;
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Enter => {
+                            if is_initial_press {
+                                let cmd = self.console_state.input_buffer.clone();
+                                self.console_state.input_buffer.clear();
+                                self.console_state.cursor_position = 0;
+                                self.console_state.scroll_offset = 0;
+                                
+                                if !cmd.trim().is_empty() {
+                                    self.spawn_console_command(cmd);
+                                }
+                            }
+                            return Ok(true);
+                        }
+                        _ => {}
+                    }
                 }
-                KeyCode::Down if is_initial_press => {
-                    self.command_history.next();
-                }
-                KeyCode::Tab if is_initial_press => {
-                    self.command_history.next();
-                }
-                KeyCode::BackTab if is_initial_press => {
-                    self.command_history.previous();
-                }
-                _ => {}
             }
-            return Ok(true);
-        }
-
+        }
+
         // Handle tab-specific hotkeys first
         if self.tab_manager.current() == TabType::Cpu {
             let process_count = self
@@ -2689,10 +2777,7 @@ impl AppState {
         match mouse.kind {
             MouseEventKind::Down(_) => {
                 // Handle mouse clicks for radial menu
-                if self.command_menu_active {
-                    self.command_history
-                        .handle_mouse_click(mouse.column, mouse.row);
-                }
+        
             }
             _ => {}
         }
@@ -2702,13 +2787,13 @@ impl AppState {
 
     #[allow(dead_code)]
     async fn execute_command(&mut self) -> Result<()> {
-        if self.command_input.is_empty() {
+        if true {
             return Ok(());
         }
 
         // Add to history
-        let command = self.command_input.clone();
-        self.command_history.add(command.clone());
+        let command = String::new();
+        // self.command_history.add(command.clone());
 
         // Execute PowerShell command
         let ps = PowerShellExecutor::new(
@@ -2842,3 +2927,16 @@ fn params_sort_key(unit: Option<char>, value: Option<f64>) -> (u8, f64) {
     let val = value.unwrap_or(f64::MAX);
     (rank, val)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

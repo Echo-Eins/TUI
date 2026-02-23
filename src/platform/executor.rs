@@ -1,7 +1,9 @@
 use anyhow::Result;
 use tokio::sync::mpsc::Receiver;
+use async_trait::async_trait;
 
 /// Generic interface for executing platform-specific commands.
+#[async_trait]
 pub trait CommandExecutor: Send + Sync {
     /// Execute a command and return its entire stdout output.
     async fn execute(&self, cmd: &str) -> Result<String>;

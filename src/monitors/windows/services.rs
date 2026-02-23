@@ -1,3 +1,4 @@
+﻿use crate::platform::executor::CommandExecutor;
 use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
 use crate::utils::parse_json_array;
@@ -170,3 +171,4 @@ struct ServiceSampleWindows {
     DependentServices: Vec<String>,
     ServiceType: Option<String>,
 }
+

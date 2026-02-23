@@ -1,4 +1,4 @@
-use crate::platform::executor::CommandExecutor;
+﻿use crate::platform::executor::CommandExecutor;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::Read;
@@ -14,6 +14,7 @@ impl LinuxCommandExecutor {
     }
 }
 
+#[async_trait::async_trait]
 impl CommandExecutor for LinuxCommandExecutor {
     async fn execute(&self, cmd: &str) -> Result<String> {
         let (tx, mut rx) = mpsc::channel(32);

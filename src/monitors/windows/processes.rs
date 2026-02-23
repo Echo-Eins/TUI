@@ -1,3 +1,4 @@
+﻿use crate::platform::executor::CommandExecutor;
 use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
 use crate::utils::parse_json_array;
@@ -146,3 +147,4 @@ struct ProcessSampleWindows {
     IoReadBytes: u64,
     IoWriteBytes: u64,
 }
+
