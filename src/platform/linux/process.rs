@@ -42,7 +42,7 @@ impl LinuxSysMonitor {
         };
 
         // Read cmdline
-        let cmdline = fs::read_to_string(&cmdline_path)
+        let command_line = fs::read_to_string(&cmdline_path)
             .ok()
             .map(|s| s.replace('\0', " ").trim().to_string())
             .filter(|s| !s.is_empty());
@@ -67,6 +67,28 @@ impl LinuxSysMonitor {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         let cpu_ticks = utime + stime;
+
+        // Get start time (field 19 from after name = starttime in clock ticks)
+        let start_time = stat_fields
+            .get(19)
+            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(|ticks| {
+                // Convert clock ticks since boot to approximate timestamp
+                let uptime = fs::read_to_string("/proc/uptime").ok()?;
+                let uptime_secs: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+                let clock_hz: f64 = 100.0; // typically CONFIG_HZ=100
+                let start_secs_since_boot = ticks as f64 / clock_hz;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs_f64();
+                let start_epoch = now - uptime_secs + start_secs_since_boot;
+                // Format as ISO-like timestamp
+                let secs = start_epoch as u64;
+                let hours = (secs / 3600) % 24;
+                let mins = (secs / 60) % 60;
+                Some(format!("{:02}:{:02}", hours, mins))
+            });
 
         // Read memory from statm
         let statm_path = format!("/proc/{}/statm", pid);
@@ -93,18 +115,49 @@ impl LinuxSysMonitor {
         };
 
         // Resolve UID to username
-        let user = self.uid_to_username(uid);
+        let user = Some(self.uid_to_username(uid));
+
+        // Read I/O stats from /proc/<pid>/io (may require privileges)
+        let (io_read_bytes, io_write_bytes) = self.get_process_io_bytes(pid);
+
+        // Handle count - Linux doesn't have a direct equivalent, use fd count
+        let handle_count = fs::read_dir(format!("/proc/{}/fd", pid))
+            .map(|entries| entries.count() as u32)
+            .unwrap_or(0);
 
         Ok(ProcessInfo {
             pid,
             name,
-            cmdline,
+            command_line,
             threads,
             memory,
             cpu_ticks,
             uid,
             user,
+            start_time,
+            handle_count,
+            io_read_bytes,
+            io_write_bytes,
         })
+    }
+
+    fn get_process_io_bytes(&self, pid: u32) -> (u64, u64) {
+        let io_path = format!("/proc/{}/io", pid);
+        let content = match fs::read_to_string(io_path) {
+            Ok(c) => c,
+            Err(_) => return (0, 0),
+        };
+
+        let mut read_bytes = 0u64;
+        let mut write_bytes = 0u64;
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("read_bytes:") {
+                read_bytes = val.trim().parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("write_bytes:") {
+                write_bytes = val.trim().parse().unwrap_or(0);
+            }
+        }
+        (read_bytes, write_bytes)
     }
 
     fn uid_to_username(&self, uid: u32) -> String {
@@ -134,10 +187,14 @@ impl LinuxSysMonitor {
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
-    pub cmdline: Option<String>,
+    pub command_line: Option<String>,
     pub threads: usize,
     pub memory: u64,
     pub cpu_ticks: u64,
     pub uid: u32,
-    pub user: String,
+    pub user: Option<String>,
+    pub start_time: Option<String>,
+    pub handle_count: u32,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
 }
