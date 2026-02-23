@@ -12,6 +12,12 @@ use crate::monitors::ProcessMemoryInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes};
 
+/// Platform-aware label for swap/pagefile section
+#[cfg(target_os = "linux")]
+const SWAP_LABEL: &str = "Swap";
+#[cfg(not(target_os = "linux"))]
+const SWAP_LABEL: &str = "Pagefile";
+
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let ram_data = app.state.ram_data.read();
     let ram_error = app.state.ram_error.read();
@@ -261,7 +267,7 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
         };
 
         info_text.push(Line::from(vec![
-            Span::raw("Pagefile:  "),
+            Span::raw(format!("{}:  ", SWAP_LABEL)),
             Span::styled(
                 format!(
                     "{}%  {}",
@@ -409,7 +415,7 @@ fn render_memory_breakdown(
             let pf_name = if data.pagefiles.len() > 1 {
                 format!("  PF{}:       ", i + 1)
             } else {
-                "  Pagefile:  ".to_string()
+                format!("  {}:  ", SWAP_LABEL)
             };
 
             breakdown_text.push(Line::from(vec![
@@ -453,10 +459,10 @@ fn render_pagefile_gauge(
         // No pagefile configured
         let block = Block::default()
             .borders(Borders::ALL)
-            .title("Pagefile")
+            .title(SWAP_LABEL)
             .border_style(Style::default().fg(Color::Gray));
 
-        let text = Paragraph::new("No pagefile configured")
+        let text = Paragraph::new(format!("No {} configured", SWAP_LABEL.to_lowercase()))
             .block(block)
             .style(Style::default().fg(Color::Gray));
 
@@ -470,7 +476,7 @@ fn render_pagefile_gauge(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Pagefile: {}", pf.name))
+                    .title(format!("{}: {}", SWAP_LABEL, pf.name))
                     .border_style(Style::default().fg(theme.disk_color)),
             )
             .gauge_style(
@@ -500,7 +506,7 @@ fn render_pagefile_gauge(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Pagefile (Total: {} files)", data.pagefiles.len()))
+                    .title(format!("{} (Total: {} entries)", SWAP_LABEL, data.pagefiles.len()))
                     .border_style(Style::default().fg(theme.disk_color)),
             )
             .gauge_style(
