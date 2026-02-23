@@ -144,11 +144,11 @@ impl WindowsNetworkMonitor {
         }
 
         let adapters: Vec<NetworkAdapterSample> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse network interfaces array")?
-        } else {
-            let single: NetworkAdapterSample = serde_json::from_str(trimmed)
-                .context("Failed to parse single network interface")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<NetworkAdapterSample>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(adapters
@@ -182,11 +182,11 @@ impl WindowsNetworkMonitor {
         }
 
         let connections: Vec<NetworkConnectionSample> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse network connections array")?
-        } else {
-            let single: NetworkConnectionSample = serde_json::from_str(trimmed)
-                .context("Failed to parse single network connection")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<NetworkConnectionSample>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(connections

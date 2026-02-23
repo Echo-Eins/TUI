@@ -5,7 +5,7 @@ compact_mode = false
 theme = "dark"
 
 [tabs]
-enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services", "disk_analyzer", "settings"]
+enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services", "console", "disk_analyzer", "settings"]
 default = "cpu"
 
 [monitors.cpu]

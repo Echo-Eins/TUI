@@ -174,11 +174,11 @@ impl WindowsDiskMonitor {
         }
 
         let stats: Vec<DiskIOSample> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse disk IO stats array")?
-        } else {
-            let single: DiskIOSample =
-                serde_json::from_str(trimmed).context("Failed to parse single disk IO stat")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<DiskIOSample>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(stats
@@ -203,11 +203,11 @@ impl WindowsDiskMonitor {
         }
 
         let activity: Vec<DiskProcessSample> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse disk process activity array")?
-        } else {
-            let single: DiskProcessSample = serde_json::from_str(trimmed)
-                .context("Failed to parse single disk process activity")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<DiskProcessSample>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(activity

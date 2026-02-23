@@ -64,11 +64,11 @@ impl WindowsServiceMonitor {
         }
 
         let samples: Vec<ServiceSampleWindows> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse services array")?
-        } else {
-            let single: ServiceSampleWindows =
-                serde_json::from_str(trimmed).context("Failed to parse single service")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<ServiceSampleWindows>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(samples

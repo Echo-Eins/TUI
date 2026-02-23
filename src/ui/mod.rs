@@ -153,11 +153,11 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
     let help_text = match app.state.tab_manager.current() {
-        TabType::Cpu => "[â†‘â†“] Navigate â”‚ [p/n/c/t/m] Sort â”‚ [PgUp/PgDn] Page â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
-        TabType::Gpu => "[â†‘â†“] Navigate â”‚ [p/n/g/m/t] Sort â”‚ [PgUp/PgDn] Page â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
-        TabType::Ram => "[â†â†’] Focus â”‚ [â†‘â†“] Navigate â”‚ [p/n/w/b] Sort â”‚ [F2] Compact â”‚ [Tab] Next Tab â”‚ [Ctrl+C] Exit",
-        TabType::Disk => "[F2] Compact â”‚ [Tab] Next Tab â”‚ [1-0] Switch Tab â”‚ [Ctrl+C] Exit",
-        _ => "[F2] Compact â”‚ [Tab] Next Tab â”‚ [1-0] Switch Tab â”‚ [Ctrl+C] Exit",
+        TabType::Cpu => "[↑↓] Navigate │ [p/n/c/t/m] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Gpu => "[↑↓] Navigate │ [p/n/g/m/t] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Ram => "[â†â†’] Focus │ [↑↓] Navigate │ [p/n/w/b] Sort │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
+        TabType::Disk => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
+        _ => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
     };
 
     let block = Block::default().borders(Borders::ALL);
