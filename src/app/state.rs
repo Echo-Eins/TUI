@@ -19,15 +19,20 @@ use crate::integrations::ollama::{OllamaModel, RunningModel};
 use crate::monitors::{
     CpuData, DiskAnalyzerData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData,
 };
+use crate::platform::executor::StreamMessage;
 use std::fs;
 
 #[derive(Debug)]
 enum AsyncUpdate {
-    ConsoleOutput { line: String },
-    ConsoleCommandCompleted,
+    ConsoleStdout { block_id: u64, line: String },
+    ConsoleStderr { block_id: u64, line: String },
+    ConsoleCompleted { block_id: u64, exit_code: i32 },
+    ConsoleFailed { block_id: u64, error: String },
     OllamaCommandCompleted { title: String, lines: Vec<String> },
     OllamaChatCompleted { response: String },
     OllamaChatFailed { error: String },
+    ErrorExplanation { block_id: u64, text: String },
+    ErrorExplanationFailed { block_id: u64, error: String },
 }
 
 pub struct AppState {
@@ -59,6 +64,8 @@ pub struct AppState {
 
     // UI state
     pub console_state: crate::app::console_state::ConsoleState,
+    pub history: crate::app::history::CommandHistory,
+    pub suggestion_engine: crate::app::suggestions::SuggestionEngine,
     #[allow(dead_code)]
     pub selected_section: Option<String>,
     pub last_nav_input: Option<Instant>,
@@ -336,22 +343,77 @@ impl AppState {
         new_tabs.select(current_tab);
         self.tab_manager = new_tabs;
         self.compact_mode = config_snapshot.general.compact_mode;
+        
+        // Console config hot-reload
+        self.console_state.max_blocks = config_snapshot.console.history_limit;
     }
 
     fn apply_async_updates(&mut self) {
+        // Read config once per tick for inner loops
+        let max_lines = self.config.read().console.max_output_lines;
+        
         while let Ok(update) = self.async_rx.try_recv() {
             match update {
-                AsyncUpdate::ConsoleOutput { line } => {
-                    self.console_state.output_history.push_back(crate::app::console_state::ConsoleMessage {
-                        text: line,
-                        color: ratatui::style::Color::White,
-                    });
-                    if self.console_state.output_history.len() > self.console_state.max_history {
-                        self.console_state.output_history.pop_front();
+                AsyncUpdate::ConsoleStdout { block_id, line } => {
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.push_line(crate::app::console_state::OutputLine::stdout(line), max_lines);
                     }
                 }
-                AsyncUpdate::ConsoleCommandCompleted => {
-                    self.console_state.is_running = false;
+                AsyncUpdate::ConsoleStderr { block_id, line } => {
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.push_line(crate::app::console_state::OutputLine::stderr(line), max_lines);
+                    }
+                }
+                AsyncUpdate::ConsoleCompleted { block_id, exit_code } => {
+                    // Record to history before completing
+                    if let Some(block) = self.console_state.get_block(block_id) {
+                        let cmd = block.input.clone();
+                        let cwd = block.cwd.clone();
+                        let elapsed = block.elapsed_ms() as i64;
+                        let hostname = self.console_state.hostname.clone();
+                        let _ = self.history.record(&cmd, &cwd, Some(exit_code), Some(elapsed), &hostname);
+                    }
+                    self.console_state.complete_active(exit_code);
+
+                    // Detect permission failure and set sudo hint
+                    if exit_code != 0 {
+                        if let Some(block) = self.console_state.get_block(block_id) {
+                            let stderr = crate::app::sudo::collect_stderr_tail(&block.output_lines, 10);
+                            let cmd = block.input.clone();
+                            if crate::app::sudo::detect_permission_failure(exit_code, &stderr)
+                                && !crate::app::sudo::is_blacklisted(&cmd)
+                                && !cmd.starts_with("sudo ")
+                            {
+                                if let Some(block) = self.console_state.get_block_mut(block_id) {
+                                    block.sudo_hint = true;
+                                }
+                            }
+
+                            if !stderr.trim().is_empty() {
+                                if let Some(block) = self.console_state.get_block_mut(block_id) {
+                                    block.explain_hint = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                AsyncUpdate::ConsoleFailed { block_id, error } => {
+                    // Record failed command to history
+                    if let Some(block) = self.console_state.get_block(block_id) {
+                        let cmd = block.input.clone();
+                        let cwd = block.cwd.clone();
+                        let elapsed = block.elapsed_ms() as i64;
+                        let hostname = self.console_state.hostname.clone();
+                        let _ = self.history.record(&cmd, &cwd, None, Some(elapsed), &hostname);
+                    }
+                    self.console_state.fail_active(error);
+                    
+                    // Mark as explainable since we have a direct execution failure error string
+                    if let Some(block_id) = self.console_state.active_block_id {
+                        if let Some(block) = self.console_state.get_block_mut(block_id) {
+                            block.explain_hint = true;
+                        }
+                    }
                 }
                 AsyncUpdate::OllamaCommandCompleted { title, lines } => {
                     self.ollama_state.activity_view = OllamaActivityView::Log;
@@ -380,6 +442,18 @@ impl AppState {
                             text: format!("Error: {error}"),
                         });
                         self.ollama_state.chat_scroll = usize::MAX;
+                    }
+                }
+                AsyncUpdate::ErrorExplanation { block_id, text } => {
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.explanation = Some(text);
+                        block.is_explaining = false;
+                    }
+                }
+                AsyncUpdate::ErrorExplanationFailed { block_id, error } => {
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.explanation = Some(format!("Error explaining: {}", error));
+                        block.is_explaining = false;
                     }
                 }
             }
@@ -1115,6 +1189,84 @@ impl AppState {
         self.close_activity_additions();
     }
 
+    fn spawn_ollama_explanation(&mut self, block_id: u64) {
+        let stderr = if let Some(block) = self.console_state.get_block(block_id) {
+            crate::app::sudo::collect_stderr_tail(&block.output_lines, 15)
+        } else {
+            return;
+        };
+
+        if stderr.is_empty() {
+            return;
+        }
+
+        let cmd = if let Some(block) = self.console_state.get_block(block_id) {
+            block.input.clone()
+        } else {
+            String::new()
+        };
+
+        let prompt = format!(
+            "Explain this error concisely. Suggest a fix.\n\nCommand: {}\n\nStderr:\n{}",
+            cmd, stderr
+        );
+
+        let tx = self.async_tx.clone();
+        let active_model = self.ollama_state.active_chat_model.clone();
+        
+        tokio::spawn(async move {
+            match OllamaClient::new(None) {
+                Ok(client) => {
+                    let model_name = match active_model {
+                        Some(name) => name,
+                        None => {
+                            // Fallback to first available model
+                            if let Ok(models) = client.list_models().await {
+                                let models: Vec<OllamaModel> = models;
+                                if let Some(first) = models.first() {
+                                    first.name.clone()
+                                } else {
+                                    let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
+                                        block_id,
+                                        error: "No Ollama models found. Please pull a model first.".to_string()
+                                    });
+                                    return;
+                                }
+                            } else {
+                                let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
+                                    block_id,
+                                    error: "Failed to list Ollama models.".to_string()
+                                });
+                                return;
+                            }
+                        }
+                    };
+
+                    match client.run_model(&model_name, &prompt).await {
+                        Ok(text) => {
+                            let _ = tx.send(AsyncUpdate::ErrorExplanation {
+                                block_id,
+                                text: AppState::normalize_model_response(text.trim()),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
+                                block_id,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AsyncUpdate::ErrorExplanationFailed {
+                        block_id,
+                        error: "Ollama is not running. Start with: ollama serve".to_string(),
+                    });
+                }
+            }
+        });
+    }
+
     fn spawn_ollama_command(&mut self, command: String) {
         if self.ollama_state.command_pending {
             return;
@@ -1142,40 +1294,153 @@ impl AppState {
     }
 
     fn spawn_console_command(&mut self, command: String) {
-        if self.console_state.is_running {
+        if self.console_state.is_running() {
             return;
         }
 
-        self.console_state.is_running = true;
-        self.console_state.output_history.push_back(crate::app::console_state::ConsoleMessage {
-            text: format!("> {}", command),
-            color: ratatui::style::Color::DarkGray,
-        });
+        let block_id = self.console_state.start_command(command.clone());
 
         // Use the global executor getter from the platform module
         let executor = crate::platform::get_executor();
-        
+
         // Setup channels for streaming output
         let tx = self.async_tx.clone();
-        
+
         tokio::spawn(async move {
             match executor.execute_stream(&command).await {
                 Ok(mut rx) => {
-                    while let Some(line) = rx.recv().await {
-                        let _ = tx.send(AsyncUpdate::ConsoleOutput { line });
+                    while let Some(msg) = rx.recv().await {
+                        match msg {
+                            StreamMessage::Stdout(line) => {
+                                let _ = tx.send(AsyncUpdate::ConsoleStdout { block_id, line });
+                            }
+                            StreamMessage::Stderr(line) => {
+                                let _ = tx.send(AsyncUpdate::ConsoleStderr { block_id, line });
+                            }
+                            StreamMessage::Exit(code) => {
+                                let _ = tx.send(AsyncUpdate::ConsoleCompleted { block_id, exit_code: code });
+                            }
+                        }
                     }
-                    let _ = tx.send(AsyncUpdate::ConsoleCommandCompleted);
                 }
                 Err(error) => {
-                    let _ = tx.send(AsyncUpdate::ConsoleOutput { 
-                        line: format!("Error spawning command: {}", error) 
+                    let _ = tx.send(AsyncUpdate::ConsoleFailed {
+                        block_id,
+                        error: format!("Error spawning command: {}", error),
                     });
-                    let _ = tx.send(AsyncUpdate::ConsoleCommandCompleted);
                 }
             }
         });
     }
-    pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
+
+    /// Refresh the ghost text based on current input buffer.
+    /// Checks suggestion engine first (for command-name completions),
+    /// then falls back to history prefix search.
+    fn refresh_ghost_text(&mut self) {
+        self.refresh_syntax_highlight();
+        let input = &self.console_state.input_buffer;
+        if input.is_empty() {
+            self.console_state.clear_ghost_text();
+            return;
+        }
+
+        let cwd = self.console_state.cwd.clone();
+
+        // 1. Try suggestion engine (builtins, PATH, aliases, Portage) for command/package completion
+        let suggestions = self.suggestion_engine.suggest(input, &cwd);
+        if let Some(best) = suggestions.first() {
+            if best.text.len() > input.len() && best.text.starts_with(input) {
+                self.console_state.update_ghost_text(Some(best.text.clone()));
+                return;
+            }
+        }
+
+        // 2. Fall back to history prefix search (for full command completions)
+        match self.history.search_prefix(input, Some(&cwd), 1) {
+            Ok(results) => {
+                if let Some(entry) = results.first() {
+                    if entry.command.len() > input.len() && entry.command.starts_with(input) {
+                        self.console_state.update_ghost_text(Some(entry.command.clone()));
+                    } else {
+                        self.console_state.clear_ghost_text();
+                    }
+                } else {
+                    self.console_state.clear_ghost_text();
+                }
+            }
+            Err(_) => {
+                self.console_state.clear_ghost_text();
+            }
+        }
+
+        self.refresh_syntax_highlight();
+    }
+
+    /// Refresh syntax highlighting for the current input buffer.
+    fn refresh_syntax_highlight(&mut self) {
+        let input = self.console_state.input_buffer.clone();
+        if input.is_empty() {
+            self.console_state.highlighted_input.clear();
+            return;
+        }
+
+        let engine = &self.suggestion_engine;
+        self.console_state.highlighted_input = crate::app::syntax::highlight(
+            &input,
+            |cmd| engine.is_known_command(cmd),
+        );
+    }
+
+    /// Expand command macros (!! / !$ / sudo !!) and return the expanded command.
+    fn expand_macros(&self, cmd: &str) -> String {
+        let mut expanded = cmd.to_string();
+
+        // sudo !! → sudo <last_command>
+        if expanded.trim() == "sudo !!" {
+            if let Some(last) = &self.console_state.last_command {
+                return format!("sudo {}", last);
+            }
+        }
+
+        // !! → <last_command>
+        if expanded.contains("!!") {
+            if let Some(last) = &self.console_state.last_command {
+                expanded = expanded.replace("!!", last);
+            }
+        }
+
+        // !$ → <last_args>
+        if expanded.contains("!$") {
+            if let Some(last_args) = &self.console_state.last_args {
+                expanded = expanded.replace("!$", last_args);
+            }
+        }
+
+        expanded
+    }
+
+    /// Update history search results based on the current query.
+    fn update_history_search_results(&mut self) {
+        let query = self.console_state.history_search_query.clone();
+        let cwd = self.console_state.cwd.clone();
+
+        match self.history.search_fuzzy(&query, Some(&cwd), 50) {
+            Ok(results) => {
+                self.console_state.history_search_results =
+                    results.into_iter().map(|e| e.command).collect();
+                // Reset index if out of bounds
+                if self.console_state.history_search_index >= self.console_state.history_search_results.len() {
+                    self.console_state.history_search_index = 0;
+                }
+            }
+            Err(_) => {
+                self.console_state.history_search_results.clear();
+                self.console_state.history_search_index = 0;
+            }
+        }
+    }
+
+    pub async fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
         let config_snapshot = config.read().clone();
         let tab_manager =
             TabManager::new(config_snapshot.tabs.enabled.clone(), &config_snapshot.tabs.default);
@@ -1254,6 +1519,15 @@ impl AppState {
             ollama_error,
 
             console_state: crate::app::console_state::ConsoleState::new(1000),
+            suggestion_engine: crate::app::suggestions::SuggestionEngine::new(),
+            history: {
+                let history_dir = dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("tui-console");
+                let _ = std::fs::create_dir_all(&history_dir);
+                crate::app::history::CommandHistory::open(history_dir.join("history.db"))
+                    .unwrap_or_else(|_| crate::app::history::CommandHistory::open_in_memory().expect("in-memory history"))
+            },
             selected_section: None,
             last_nav_input: None,
             last_horizontal_nav_input: None,
@@ -1363,89 +1637,346 @@ impl AppState {
 
 
         if self.tab_manager.current() == TabType::Console {
+            use crate::app::console_state::ConsoleMode;
+
             match self.console_state.mode {
-                crate::app::console_state::ConsoleMode::Normal => {
+                ConsoleMode::Normal => {
+                    // Ctrl+S: sudo retry
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                        if is_initial_press {
+                            // Find the latest block with sudo_hint
+                            if let Some(block) = self.console_state.blocks.iter().rev()
+                                .find(|b| b.sudo_hint)
+                            {
+                                let cmd = crate::app::sudo::sudo_command(&block.input);
+                                self.console_state.mode = ConsoleMode::Confirm;
+                                self.console_state.confirm_command = Some(cmd);
+                                self.console_state.confirm_action = Some("Re-run with sudo".to_string());
+                            }
+                        }
+                        return Ok(true);
+                    }
+
+                    // Ctrl+E: Explain error with AI
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+                        if is_initial_press {
+                            if let Some(block_id) = self.console_state.blocks.iter()
+                                .rev()
+                                .find(|b| b.explain_hint)
+                                .map(|b| b.id)
+                            {
+                                if let Some(mut_block) = self.console_state.get_block_mut(block_id) {
+                                    mut_block.is_explaining = true;
+                                }
+                                self.spawn_ollama_explanation(block_id);
+                            }
+                        }
+                        return Ok(true);
+                    }
+
                     match key.code {
                         KeyCode::Char('i') => {
                             if is_initial_press {
-                                self.console_state.mode = crate::app::console_state::ConsoleMode::Insert;
+                                self.console_state.enter_insert_mode();
+                                self.refresh_ghost_text();
                             }
                             return Ok(true);
                         }
                         KeyCode::Up => {
                             if is_initial_press && self.allow_nav() {
-                                self.console_state.scroll_offset = self.console_state.scroll_offset.saturating_add(1);
+                                self.console_state.scroll_up(1);
                             }
                             return Ok(true);
                         }
                         KeyCode::Down => {
                             if is_initial_press && self.allow_nav() {
-                                self.console_state.scroll_offset = self.console_state.scroll_offset.saturating_sub(1);
+                                self.console_state.scroll_down(1);
                             }
                             return Ok(true);
                         }
                         _ => {}
                     }
                 }
-                crate::app::console_state::ConsoleMode::Insert => {
+                ConsoleMode::Insert => {
+                    // Ctrl+R: enter history search
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+                        if is_initial_press {
+                            self.console_state.enter_history_search();
+                            // Populate with recent history
+                            if let Ok(recent) = self.history.get_recent(50) {
+                                self.console_state.history_search_results =
+                                    recent.into_iter().map(|e| e.command).collect();
+                            }
+                        }
+                        return Ok(true);
+                    }
+
                     match key.code {
                         KeyCode::Esc => {
                             if is_initial_press {
-                                self.console_state.mode = crate::app::console_state::ConsoleMode::Normal;
+                                self.console_state.enter_normal_mode();
+                                self.console_state.clear_ghost_text();
+                                self.console_state.reset_history_nav();
                             }
                             return Ok(true);
                         }
                         KeyCode::Char(c) => {
+                            // Alt+Right captured as Char (depends on terminal)
                             if is_initial_press && self.allow_text_input() {
-                                self.console_state.input_buffer.insert(self.console_state.cursor_position, c);
-                                self.console_state.cursor_position += 1;
+                                self.console_state.reset_history_nav();
+                                self.console_state.insert_char(c);
+                                self.refresh_ghost_text();
                             }
                             return Ok(true);
                         }
                         KeyCode::Backspace => {
                             if is_initial_press && self.allow_text_input() && self.console_state.cursor_position > 0 {
-                                self.console_state.cursor_position -= 1;
-                                self.console_state.input_buffer.remove(self.console_state.cursor_position);
+                                self.console_state.reset_history_nav();
+                                self.console_state.backspace();
+                                self.refresh_ghost_text();
                             }
                             return Ok(true);
                         }
                         KeyCode::Delete => {
                             if is_initial_press && self.allow_text_input() && self.console_state.cursor_position < self.console_state.input_buffer.len() {
-                                self.console_state.input_buffer.remove(self.console_state.cursor_position);
+                                self.console_state.delete_char();
+                                self.refresh_ghost_text();
                             }
                             return Ok(true);
                         }
                         KeyCode::Left => {
                             if is_initial_press && self.console_state.cursor_position > 0 {
-                                self.console_state.cursor_position -= 1;
+                                self.console_state.move_cursor_left();
                             }
                             return Ok(true);
                         }
                         KeyCode::Right => {
-                            if is_initial_press && self.console_state.cursor_position < self.console_state.input_buffer.len() {
-                                self.console_state.cursor_position += 1;
+                            if is_initial_press {
+                                if key.modifiers.contains(KeyModifiers::ALT) {
+                                    // Alt+Right: accept one word from ghost text
+                                    self.console_state.accept_ghost_word();
+                                    self.refresh_ghost_text();
+                                } else if self.console_state.cursor_position >= self.console_state.input_buffer.len() 
+                                    && self.console_state.ghost_text.is_some() 
+                                {
+                                    // Right at end of buffer: accept full ghost text
+                                    self.console_state.accept_ghost_text();
+                                    self.console_state.clear_ghost_text();
+                                } else {
+                                    self.console_state.move_cursor_right();
+                                }
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Up => {
+                            if is_initial_press {
+                                // History navigation: Up cycles backward through history
+                                if self.console_state.history_nav_cache.is_empty() {
+                                    if let Ok(recent) = self.history.get_recent(200) {
+                                        let cmds: Vec<String> = recent.into_iter().map(|e| e.command).collect();
+                                        self.console_state.start_history_nav(cmds);
+                                    }
+                                }
+                                self.console_state.history_nav_up();
+                                self.console_state.clear_ghost_text();
+                                self.refresh_syntax_highlight();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Down => {
+                            if is_initial_press {
+                                self.console_state.history_nav_down();
+                                self.console_state.clear_ghost_text();
+                                self.refresh_syntax_highlight();
                             }
                             return Ok(true);
                         }
                         KeyCode::Enter => {
                             if is_initial_press {
-                                let cmd = self.console_state.input_buffer.clone();
-                                self.console_state.input_buffer.clear();
-                                self.console_state.cursor_position = 0;
+                                let raw_cmd = self.console_state.input_buffer.clone();
+                                self.console_state.clear_input();
+                                self.console_state.clear_ghost_text();
+                                self.console_state.reset_history_nav();
+                                self.console_state.highlighted_input.clear();
                                 self.console_state.scroll_offset = 0;
-                                
-                                if !cmd.trim().is_empty() {
-                                    self.spawn_console_command(cmd);
+
+                                if !raw_cmd.trim().is_empty() {
+                                    let cmd = self.expand_macros(&raw_cmd);
+
+                                    // Intercept 'explain' meta-command
+                                    if cmd.trim() == "explain" {
+                                        if let Some(block_id) = self.console_state.blocks.iter()
+                                            .rev()
+                                            .find(|b| b.explain_hint)
+                                            .map(|b| b.id)
+                                        {
+                                            if let Some(mut_block) = self.console_state.get_block_mut(block_id) {
+                                                mut_block.is_explaining = true;
+                                            }
+                                            self.spawn_ollama_explanation(block_id);
+                                        } else {
+                                            let block_id = self.console_state.start_command("explain".to_string());
+                                            if let Some(block) = self.console_state.get_block_mut(block_id) {
+                                                let max_lines = self.config.read().console.max_output_lines;
+                                                block.push_line(crate::app::console_state::OutputLine::stderr("No failed command with stderr output found to explain."), max_lines);
+                                                block.complete(1);
+                                            }
+                                            self.console_state.active_block_id = None;
+                                        }
+                                        return Ok(true);
+                                    }
+
+                                    // Handle pkg meta-commands
+                                    let mut final_cmd = cmd.clone();
+                                    if final_cmd.trim().starts_with("pkg ") {
+                                        let parts: Vec<&str> = final_cmd.trim().split_whitespace().collect();
+                                        if parts.len() >= 3 {
+                                            let subcmd = parts[1];
+                                            let pkg = parts[2..].join(" ");
+                                            final_cmd = match subcmd {
+                                                "info" => format!("equery meta {}", pkg),
+                                                "find" => format!("emerge -s {}", pkg),
+                                                "uses" => format!("equery uses {}", pkg),
+                                                "deps" => format!("equery d {}", pkg),
+                                                "web"  => format!("equery meta -w {}", pkg),
+                                                _ => final_cmd,
+                                            };
+                                        }
+                                    }
+
+                                    // Handle auto-detect meta-commands for modern tools
+                                    let has_cmd = |name: &str| -> bool {
+                                        std::env::var_os("PATH").map_or(false, |paths| {
+                                            std::env::split_paths(&paths).any(|dir| {
+                                                dir.join(name).is_file() || dir.join(format!("{}.exe", name)).is_file()
+                                            })
+                                        })
+                                    };
+
+                                    let trimmed_cmd = final_cmd.trim();
+                                    if trimmed_cmd == "tree" || trimmed_cmd.starts_with("tree ") {
+                                        let args = trimmed_cmd.strip_prefix("tree").unwrap_or("").trim();
+                                        if has_cmd("eza") {
+                                            final_cmd = format!("eza --tree --color=always {}", args).trim().to_string();
+                                        } else if has_cmd("tree") {
+                                            final_cmd = format!("tree -C {}", args).trim().to_string();
+                                        }
+                                    } else if trimmed_cmd.starts_with("search ") {
+                                        let args = trimmed_cmd.strip_prefix("search ").unwrap_or("").trim();
+                                        if has_cmd("rg") {
+                                            // ripgrep
+                                            final_cmd = format!("rg -p {}", args).trim().to_string();
+                                        } else {
+                                            // fallback grep
+                                            final_cmd = format!("grep --color=always -rn {}", args).trim().to_string();
+                                        }
+                                    } else if trimmed_cmd.starts_with("find ") {
+                                        let args = trimmed_cmd.strip_prefix("find ").unwrap_or("").trim();
+                                        if has_cmd("fd") {
+                                            // fd-find
+                                            final_cmd = format!("fd -c always {}", args).trim().to_string();
+                                        } else {
+                                            final_cmd = format!("find . -name {}", args).trim().to_string();
+                                        }
+                                    }
+
+                                    // Save for future macro use
+                                    let parts: Vec<&str> = final_cmd.split_whitespace().collect();
+                                    self.console_state.last_command = Some(final_cmd.clone());
+                                    if parts.len() > 1 {
+                                        self.console_state.last_args = Some(parts.last().unwrap().to_string());
+                                    }
+
+                                    self.spawn_console_command(final_cmd);
                                 }
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Tab => {
+                            // Accept full ghost text on Tab as alternative to Right
+                            if is_initial_press && self.console_state.ghost_text.is_some() {
+                                self.console_state.accept_ghost_text();
+                                self.console_state.clear_ghost_text();
                             }
                             return Ok(true);
                         }
                         _ => {}
                     }
                 }
+                ConsoleMode::HistorySearch => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            if is_initial_press {
+                                self.console_state.exit_history_search(false);
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Enter => {
+                            if is_initial_press {
+                                self.console_state.exit_history_search(true);
+                                self.refresh_ghost_text();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Up => {
+                            if is_initial_press {
+                                self.console_state.history_search_up();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Down => {
+                            if is_initial_press {
+                                self.console_state.history_search_down();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Char(c) => {
+                            if is_initial_press {
+                                self.console_state.history_search_query.push(c);
+                                self.update_history_search_results();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Backspace => {
+                            if is_initial_press {
+                                self.console_state.history_search_query.pop();
+                                self.update_history_search_results();
+                            }
+                            return Ok(true);
+                        }
+                        _ => {}
+                    }
+                }
+                ConsoleMode::Confirm => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if is_initial_press {
+                                // Execute the confirmed command
+                                if let Some(cmd) = self.console_state.confirm_command.take() {
+                                    self.console_state.confirm_action = None;
+                                    self.console_state.mode = ConsoleMode::Normal;
+                                    self.spawn_console_command(cmd);
+                                }
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::Esc => {
+                            if is_initial_press {
+                                // Cancel — return to Normal mode
+                                self.console_state.confirm_command = None;
+                                self.console_state.confirm_action = None;
+                                self.console_state.mode = ConsoleMode::Normal;
+                            }
+                            return Ok(true);
+                        }
+                        _ => { return Ok(true); }
+                    }
+                }
             }
-        }
-
+        }
+
+
+
         // Handle tab-specific hotkeys first
         if self.tab_manager.current() == TabType::Cpu {
             let process_count = self

@@ -21,6 +21,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub hotkeys: HotkeysConfig,
     pub powershell: PowerShellConfig,
+    pub console: ConsoleConfig,
     pub theme: ThemeConfig,
 }
 
@@ -210,6 +211,17 @@ pub struct PowerShellConfig {
 fn default_everything_refresh_interval_ms() -> u64 {
     5000
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConsoleConfig {
+    #[serde(default = "default_history_limit")]
+    pub history_limit: usize,
+    #[serde(default = "default_max_output_lines")]
+    pub max_output_lines: usize,
+}
+
+fn default_history_limit() -> usize { 1000 }
+fn default_max_output_lines() -> usize { 500 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThemeConfig {
