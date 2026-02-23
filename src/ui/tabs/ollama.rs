@@ -9,13 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::app::{
     state::{
-        sort_ollama_models, ChatRole, OllamaActivityView, OllamaInputMode,
-        OllamaModelSortColumn, OllamaPanelFocus, OllamaRunningSortColumn, OllamaView,
+        sort_ollama_models, ChatRole, OllamaActivityView, OllamaInputMode, OllamaModelSortColumn,
+        OllamaPanelFocus, OllamaRunningSortColumn, OllamaView,
     },
     App,
 };
-use crate::ui::theme::Theme;
 use crate::integrations::ollama::ChatLogEntry;
+use crate::ui::theme::Theme;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let ollama_data = app.state.ollama_data.read();
@@ -103,19 +103,16 @@ fn render_full(
     } else {
         3
     };
-    let max_prompt = area
-        .height
-        .saturating_sub(3 + 8 + 5 + 6)
-        .max(3);
+    let max_prompt = area.height.saturating_sub(3 + 8 + 5 + 6).max(3);
     let prompt_height = prompt_height.min(max_prompt);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(10),   // Main content (models/running)
-            Constraint::Length(8), // Running models / VRAM panel
-            Constraint::Length(5), // Activity log
+            Constraint::Length(3),             // Header
+            Constraint::Min(10),               // Main content (models/running)
+            Constraint::Length(8),             // Running models / VRAM panel
+            Constraint::Length(5),             // Activity log
             Constraint::Length(prompt_height), // Command input / Help
         ])
         .split(area);
@@ -174,8 +171,8 @@ fn render_compact(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(10),   // Main content
+            Constraint::Length(3),             // Header
+            Constraint::Min(10),               // Main content
             Constraint::Length(prompt_height), // Help
         ])
         .split(area);
@@ -469,9 +466,7 @@ fn render_running_models_table(f: &mut Frame, area: Rect, app: &App, theme: &The
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from(
-            if app.state.ollama_state.running_sort_column
-                == OllamaRunningSortColumn::MessageCount
-            {
+            if app.state.ollama_state.running_sort_column == OllamaRunningSortColumn::MessageCount {
                 format!("Msgs {sort_indicator}")
             } else {
                 "Msgs".to_string()
@@ -655,7 +650,10 @@ fn format_chat_lines(messages: &[crate::app::state::ChatMessage]) -> Vec<Line<'_
         let mut message_lines = message.text.lines();
         if let Some(first) = message_lines.next() {
             lines.push(Line::from(vec![
-                Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
                 Span::styled(first, Style::default().fg(text_color)),
             ]));
@@ -1197,11 +1195,7 @@ fn render_action_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         OllamaInputMode::None => "",
     };
 
-    let input_text = format!(
-        "{}{}_",
-        prefix,
-        app.state.ollama_state.input_buffer
-    );
+    let input_text = format!("{}{}_", prefix, app.state.ollama_state.input_buffer);
     let inner_width = area.width.saturating_sub(2) as usize;
     let wrapped = wrap_text_lines(&input_text, inner_width);
     let mut text_lines: Vec<Line> = Vec::new();
@@ -1210,10 +1204,7 @@ fn render_action_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     } else {
         let mut iter = wrapped.into_iter();
         if let Some(first) = iter.next() {
-            let trimmed = first
-                .strip_prefix(prefix)
-                .unwrap_or(&first)
-                .to_string();
+            let trimmed = first.strip_prefix(prefix).unwrap_or(&first).to_string();
             text_lines.push(Line::from(vec![
                 Span::styled(
                     prefix,
@@ -1225,7 +1216,10 @@ fn render_action_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ]));
         }
         for line in iter {
-            text_lines.push(Line::from(Span::styled(line, Style::default().fg(Color::White))));
+            text_lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::White),
+            )));
         }
     }
 
@@ -1262,7 +1256,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 
     let mut actions = Vec::new();
-    actions.push(QuickAction { key: "R", label: "Chat" });
+    actions.push(QuickAction {
+        key: "R",
+        label: "Chat",
+    });
 
     if app.state.ollama_state.current_view == OllamaView::Running {
         actions.push(QuickAction {
@@ -1274,7 +1271,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key: "D",
             label: "Delete",
         });
-        actions.push(QuickAction { key: "P", label: "Pull" });
+        actions.push(QuickAction {
+            key: "P",
+            label: "Pull",
+        });
         actions.push(QuickAction {
             key: "C",
             label: "Command",
@@ -1285,7 +1285,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         key: "L",
         label: "Refresh",
     });
-    actions.push(QuickAction { key: "V", label: "View" });
+    actions.push(QuickAction {
+        key: "V",
+        label: "View",
+    });
     actions.push(QuickAction {
         key: "N/M/T",
         label: "Sort",
@@ -1300,7 +1303,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         });
     }
 
-    actions.push(QuickAction { key: "Esc", label: "Back" });
+    actions.push(QuickAction {
+        key: "Esc",
+        label: "Back",
+    });
     actions.push(QuickAction {
         key: "Left/Right",
         label: "Focus",
@@ -1368,10 +1374,7 @@ fn render_pull_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Span::raw(":"),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            input_text,
-            Style::default().fg(Color::White),
-        )),
+        Line::from(Span::styled(input_text, Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
@@ -1417,10 +1420,7 @@ fn render_command_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Span::raw(":"),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            input_text,
-            Style::default().fg(Color::White),
-        )),
+        Line::from(Span::styled(input_text, Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
@@ -1452,15 +1452,11 @@ fn render_command_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn render_delete_confirm(f: &mut Frame, area: Rect, app: &App, _theme: &Theme) {
     let (title, label) = match app.state.ollama_state.pending_delete.clone() {
-        Some(crate::app::state::OllamaDeleteTarget::Model(name)) => {
-            ("Delete model", name)
-        }
-        Some(crate::app::state::OllamaDeleteTarget::ChatLog(entry)) => {
-            (
-                "Delete chat log",
-                format!("{} ({})", entry.model, entry.ended_at_display),
-            )
-        }
+        Some(crate::app::state::OllamaDeleteTarget::Model(name)) => ("Delete model", name),
+        Some(crate::app::state::OllamaDeleteTarget::ChatLog(entry)) => (
+            "Delete chat log",
+            format!("{} ({})", entry.model, entry.ended_at_display),
+        ),
         None => ("Delete", "selected item".to_string()),
     };
     let rect = centered_rect(60, 7, area);
@@ -1518,7 +1514,3 @@ fn centered_rect(percent_width: u16, percent_height: u16, area: Rect) -> Rect {
 
     horizontal_layout[1]
 }
-
-
-
-

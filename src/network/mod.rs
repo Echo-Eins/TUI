@@ -20,10 +20,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Binary handshake format sizes (same for all clients)
-const PUBKEY_SIZE: usize = 33;        // Compressed secp256r1
+const PUBKEY_SIZE: usize = 33; // Compressed secp256r1
 const HANDSHAKE_NONCE_SIZE: usize = 32;
-const SIGNATURE_SIZE: usize = 64;     // ECDSA r||s format
-const HANDSHAKE_MSG_SIZE: usize = PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE + SIGNATURE_SIZE;  // 129 bytes
+const SIGNATURE_SIZE: usize = 64; // ECDSA r||s format
+const HANDSHAKE_MSG_SIZE: usize = PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE + SIGNATURE_SIZE; // 129 bytes
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub mod session;
@@ -63,7 +63,10 @@ pub struct DiscoveryService {
 impl DiscoveryService {
     pub fn new(config: &Config) -> Result<Self, NetworkError> {
         let daemon = ServiceDaemon::new().map_err(|e| NetworkError::MdnsError(e.to_string()))?;
-        let service_type = format!("_{}._tcp.local.", config.network.mdns_service_name.to_lowercase());
+        let service_type = format!(
+            "_{}._tcp.local.",
+            config.network.mdns_service_name.to_lowercase()
+        );
 
         Ok(Self {
             daemon,
@@ -77,17 +80,26 @@ impl DiscoveryService {
 
     pub async fn start(&self) -> Result<(), NetworkError> {
         self.running.store(true, Ordering::Relaxed);
-        let receiver = self.daemon.browse(&self.service_type)
+        let receiver = self
+            .daemon
+            .browse(&self.service_type)
             .map_err(|e| NetworkError::MdnsError(e.to_string()))?;
 
         info!("mDNS discovery started for {}", self.service_type);
 
         let service_info = ServiceInfo::new(
-            &self.service_type, &self.device_name,
-            &format!("{}.local.", self.device_name), "", self.port, None,
-        ).map_err(|e| NetworkError::MdnsError(e.to_string()))?;
+            &self.service_type,
+            &self.device_name,
+            &format!("{}.local.", self.device_name),
+            "",
+            self.port,
+            None,
+        )
+        .map_err(|e| NetworkError::MdnsError(e.to_string()))?;
 
-        self.daemon.register(service_info).map_err(|e| NetworkError::MdnsError(e.to_string()))?;
+        self.daemon
+            .register(service_info)
+            .map_err(|e| NetworkError::MdnsError(e.to_string()))?;
 
         let running = self.running.clone();
         tokio::spawn(async move {
@@ -131,7 +143,11 @@ impl Server {
         let addr = format!("{}:{}", config.network.bind_address, config.server.port);
         let listener = TcpListener::bind(&addr).await?;
         info!("TCP server listening on {}", addr);
-        Ok(Self { listener, config, running: Arc::new(AtomicBool::new(true)) })
+        Ok(Self {
+            listener,
+            config,
+            running: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     pub async fn run(&self, session_tx: mpsc::Sender<Session>) -> Result<(), NetworkError> {
@@ -159,7 +175,9 @@ impl Server {
     }
 
     async fn handle_connection(
-        mut stream: TcpStream, addr: SocketAddr, config: Arc<Config>,
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        config: Arc<Config>,
     ) -> Result<Session, NetworkError> {
         let mut crypto = CryptoContext::new(&config.security.private_key, true)?;
 
@@ -175,7 +193,9 @@ impl Server {
 
             // Validate cookie (first 16 bytes of payload)
             if first_packet.payload.len() < 16 {
-                return Err(NetworkError::HandshakeFailed("DiscoveryRequest too short".into()));
+                return Err(NetworkError::HandshakeFailed(
+                    "DiscoveryRequest too short".into(),
+                ));
             }
 
             let request_cookie = &first_packet.payload[..16];
@@ -184,7 +204,12 @@ impl Server {
             if !constant_time_eq(request_cookie, &expected_cookie) {
                 warn!("Invalid discovery cookie from {}", addr);
                 // Send error response
-                Self::send_unencrypted_packet(&mut stream, PacketType::ErrorPacket, b"Invalid cookie").await?;
+                Self::send_unencrypted_packet(
+                    &mut stream,
+                    PacketType::ErrorPacket,
+                    b"Invalid cookie",
+                )
+                .await?;
                 return Err(NetworkError::InvalidCookie);
             }
 
@@ -198,15 +223,17 @@ impl Server {
             response.push((config.server.port >> 8) as u8);
             response.push((config.server.port & 0xFF) as u8);
 
-            Self::send_unencrypted_packet(&mut stream, PacketType::DiscoveryResponse, &response).await?;
+            Self::send_unencrypted_packet(&mut stream, PacketType::DiscoveryResponse, &response)
+                .await?;
             info!("Sent DiscoveryResponse to {}", addr);
 
             // Now wait for HandshakeInit
             let init_packet = Self::receive_packet_with_timeout(&mut stream).await?;
             if init_packet.header.packet_type != PacketType::HandshakeInit {
-                return Err(NetworkError::HandshakeFailed(
-                    format!("Expected HandshakeInit after discovery, got {:?}", init_packet.header.packet_type)
-                ));
+                return Err(NetworkError::HandshakeFailed(format!(
+                    "Expected HandshakeInit after discovery, got {:?}",
+                    init_packet.header.packet_type
+                )));
             }
 
             return Self::process_handshake(stream, addr, config, crypto, init_packet).await;
@@ -214,25 +241,31 @@ impl Server {
 
         // Direct HandshakeInit (without discovery)
         if first_packet.header.packet_type != PacketType::HandshakeInit {
-            return Err(NetworkError::HandshakeFailed(
-                format!("Expected HandshakeInit or DiscoveryRequest, got {:?}", first_packet.header.packet_type)
-            ));
+            return Err(NetworkError::HandshakeFailed(format!(
+                "Expected HandshakeInit or DiscoveryRequest, got {:?}",
+                first_packet.header.packet_type
+            )));
         }
 
         Self::process_handshake(stream, addr, config, crypto, first_packet).await
     }
 
     async fn process_handshake(
-        mut stream: TcpStream, addr: SocketAddr, config: Arc<Config>,
-        mut crypto: CryptoContext, init_packet: Packet,
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        config: Arc<Config>,
+        mut crypto: CryptoContext,
+        init_packet: Packet,
     ) -> Result<Session, NetworkError> {
         // ===== PROCESS HANDSHAKE INIT =====
         // Format: pubkey(33) + nonce(32) + signature(64) = 129 bytes
 
         if init_packet.payload.len() != HANDSHAKE_MSG_SIZE {
-            return Err(NetworkError::HandshakeFailed(
-                format!("HandshakeInit wrong size: {} (expected {})", init_packet.payload.len(), HANDSHAKE_MSG_SIZE)
-            ));
+            return Err(NetworkError::HandshakeFailed(format!(
+                "HandshakeInit wrong size: {} (expected {})",
+                init_packet.payload.len(),
+                HANDSHAKE_MSG_SIZE
+            )));
         }
 
         // Parse components
@@ -240,7 +273,8 @@ impl Server {
         let mut init_nonce = [0u8; HANDSHAKE_NONCE_SIZE];
         let mut init_signature = [0u8; SIGNATURE_SIZE];
         init_pubkey.copy_from_slice(&init_packet.payload[..PUBKEY_SIZE]);
-        init_nonce.copy_from_slice(&init_packet.payload[PUBKEY_SIZE..PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE]);
+        init_nonce
+            .copy_from_slice(&init_packet.payload[PUBKEY_SIZE..PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE]);
         init_signature.copy_from_slice(&init_packet.payload[PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE..]);
 
         // ===== VERIFY CLIENT SIGNATURE =====
@@ -257,7 +291,8 @@ impl Server {
         let our_nonce = CryptoContext::generate_nonce();
 
         // Sign: our_ephemeral_pubkey || client_nonce || our_nonce
-        let mut response_sign_data = Vec::with_capacity(PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE + HANDSHAKE_NONCE_SIZE);
+        let mut response_sign_data =
+            Vec::with_capacity(PUBKEY_SIZE + HANDSHAKE_NONCE_SIZE + HANDSHAKE_NONCE_SIZE);
         response_sign_data.extend_from_slice(&our_ephemeral_public);
         response_sign_data.extend_from_slice(&init_nonce);
         response_sign_data.extend_from_slice(&our_nonce);
@@ -269,7 +304,8 @@ impl Server {
         response_bytes.extend_from_slice(&our_nonce);
         response_bytes.extend_from_slice(&response_signature);
 
-        Self::send_unencrypted_packet(&mut stream, PacketType::HandshakeResponse, &response_bytes).await?;
+        Self::send_unencrypted_packet(&mut stream, PacketType::HandshakeResponse, &response_bytes)
+            .await?;
         info!("Sent signed HandshakeResponse to {}", addr);
 
         // ===== DERIVE SESSION KEYS =====
@@ -279,11 +315,15 @@ impl Server {
         // ===== RECEIVE ENCRYPTED HANDSHAKE COMPLETE =====
         let complete_packet = Self::receive_packet_with_timeout(&mut stream).await?;
         if complete_packet.header.packet_type != PacketType::HandshakeComplete {
-            return Err(NetworkError::HandshakeFailed("Expected HandshakeComplete".into()));
+            return Err(NetworkError::HandshakeFailed(
+                "Expected HandshakeComplete".into(),
+            ));
         }
 
         if complete_packet.payload.len() < NONCE_SIZE {
-            return Err(NetworkError::HandshakeFailed("HandshakeComplete too short".into()));
+            return Err(NetworkError::HandshakeFailed(
+                "HandshakeComplete too short".into(),
+            ));
         }
 
         // Decrypt
@@ -295,7 +335,9 @@ impl Server {
 
         // Verify transcript MAC (plaintext should be 32-byte MAC)
         if plaintext.len() != 32 {
-            return Err(NetworkError::HandshakeFailed("Invalid transcript MAC size".into()));
+            return Err(NetworkError::HandshakeFailed(
+                "Invalid transcript MAC size".into(),
+            ));
         }
 
         // Compute expected MAC: HMAC(hmac_key, client_pub || server_pub || client_nonce || server_nonce)
@@ -307,12 +349,17 @@ impl Server {
 
         let expected_mac = crypto.compute_transcript_mac(&transcript)?;
         if !constant_time_eq(&plaintext, &expected_mac) {
-            return Err(NetworkError::HandshakeFailed("Transcript MAC verification failed".into()));
+            return Err(NetworkError::HandshakeFailed(
+                "Transcript MAC verification failed".into(),
+            ));
         }
 
         info!("Transcript MAC verified for {}", addr);
 
-        info!("Handshake complete with {} - secure channel established", addr);
+        info!(
+            "Handshake complete with {} - secure channel established",
+            addr
+        );
         Ok(Session::new(stream, addr, crypto, config))
     }
 
@@ -335,11 +382,19 @@ impl Server {
         let mut tag = [0u8; TAG_SIZE];
         stream.read_exact(&mut tag).await?;
 
-        Ok(Packet { header, payload, tag })
+        Ok(Packet {
+            header,
+            payload,
+            tag,
+        })
     }
 
     /// Send unencrypted packet: header(4) + payload + zero_tag(16)
-    async fn send_unencrypted_packet(stream: &mut TcpStream, packet_type: PacketType, payload: &[u8]) -> Result<(), NetworkError> {
+    async fn send_unencrypted_packet(
+        stream: &mut TcpStream,
+        packet_type: PacketType,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
         let header = PacketHeader::new(packet_type, payload.len())?;
         stream.write_all(&header.to_bytes()).await?;
         stream.write_all(payload).await?;
@@ -363,7 +418,11 @@ impl Connection {
         Self { stream, crypto }
     }
 
-    pub async fn send(&mut self, packet_type: PacketType, payload: &[u8]) -> Result<(), NetworkError> {
+    pub async fn send(
+        &mut self,
+        packet_type: PacketType,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
         let (ciphertext, nonce, tag) = self.crypto.encrypt(payload)?;
 
         let mut full_payload = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -393,7 +452,10 @@ impl Connection {
 
         if payload_size < NONCE_SIZE {
             return Err(NetworkError::ProtocolError(
-                crate::protocol::ProtocolError::IncompletePacket { expected: NONCE_SIZE, got: payload_size }
+                crate::protocol::ProtocolError::IncompletePacket {
+                    expected: NONCE_SIZE,
+                    got: payload_size,
+                },
             ));
         }
 

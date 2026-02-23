@@ -16,7 +16,11 @@ struct PsSettings {
 }
 
 fn refresh_duration(refresh_interval_ms: u64) -> Duration {
-    let interval_ms = if refresh_interval_ms == 0 { 1000 } else { refresh_interval_ms };
+    let interval_ms = if refresh_interval_ms == 0 {
+        1000
+    } else {
+        refresh_interval_ms
+    };
     Duration::from_millis(interval_ms.max(100))
 }
 
@@ -34,10 +38,8 @@ fn effective_cache_ttl_seconds(cache_ttl_seconds: u64, refresh_interval_ms: u64)
 }
 
 fn build_ps_settings(config: &Config, refresh_interval_ms: u64) -> PsSettings {
-    let effective_cache_ttl = effective_cache_ttl_seconds(
-        config.powershell.cache_ttl_seconds,
-        refresh_interval_ms,
-    );
+    let effective_cache_ttl =
+        effective_cache_ttl_seconds(config.powershell.cache_ttl_seconds, refresh_interval_ms);
     let effective_use_cache = config.powershell.use_cache && effective_cache_ttl > 0;
 
     PsSettings {
@@ -589,7 +591,12 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                let settings_key = (settings.clone(), es_executable.clone(), max_depth, refresh_interval_ms);
+                let settings_key = (
+                    settings.clone(),
+                    es_executable.clone(),
+                    max_depth,
+                    refresh_interval_ms,
+                );
                 if last_settings.as_ref() != Some(&settings_key) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
@@ -697,9 +704,9 @@ pub fn spawn_monitor_tasks(
                 }
 
                 if !ps_available {
-                    let message = unavailable_reason
-                        .clone()
-                        .unwrap_or_else(|| "PowerShell is required for network monitor".to_string());
+                    let message = unavailable_reason.clone().unwrap_or_else(|| {
+                        "PowerShell is required for network monitor".to_string()
+                    });
                     update_monitor_error("Network", &mut last_error, &network_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
@@ -809,9 +816,9 @@ pub fn spawn_monitor_tasks(
                 }
 
                 if !ps_available {
-                    let message = unavailable_reason
-                        .clone()
-                        .unwrap_or_else(|| "PowerShell is required for process monitor".to_string());
+                    let message = unavailable_reason.clone().unwrap_or_else(|| {
+                        "PowerShell is required for process monitor".to_string()
+                    });
                     update_monitor_error("Process", &mut last_error, &process_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;
@@ -912,9 +919,9 @@ pub fn spawn_monitor_tasks(
                 }
 
                 if !ps_available {
-                    let message = unavailable_reason
-                        .clone()
-                        .unwrap_or_else(|| "PowerShell is required for service monitor".to_string());
+                    let message = unavailable_reason.clone().unwrap_or_else(|| {
+                        "PowerShell is required for service monitor".to_string()
+                    });
                     update_monitor_error("Service", &mut last_error, &service_error, Some(message));
                     sleep(refresh_duration(refresh_interval_ms)).await;
                     continue;

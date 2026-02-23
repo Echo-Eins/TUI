@@ -1,9 +1,9 @@
-﻿use crate::platform::executor::CommandExecutor;
-use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
-use crate::utils::parse_json_array;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use crate::platform::executor::CommandExecutor;
+use crate::utils::parse_json_array;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 pub struct WindowsServiceMonitor {
@@ -64,11 +64,11 @@ impl WindowsServiceMonitor {
         }
 
         let samples: Vec<ServiceSampleWindows> = if trimmed.starts_with('[') {
-            parse_json_array(trimmed).context("Failed to parse services array")?
-        } else {
-            let single: ServiceSampleWindows =
-                serde_json::from_str(trimmed).context("Failed to parse single service")?;
+            parse_json_array(trimmed).unwrap_or_default()
+        } else if let Ok(single) = serde_json::from_str::<ServiceSampleWindows>(trimmed) {
             vec![single]
+        } else {
+            Vec::new()
         };
 
         Ok(samples
@@ -171,4 +171,3 @@ struct ServiceSampleWindows {
     DependentServices: Vec<String>,
     ServiceType: Option<String>,
 }
-

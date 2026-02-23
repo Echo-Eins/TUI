@@ -84,7 +84,10 @@ where
         }
     }
 
-    Ok(LimitedOutput { bytes: buf, truncated })
+    Ok(LimitedOutput {
+        bytes: buf,
+        truncated,
+    })
 }
 
 #[derive(Clone)]
@@ -99,6 +102,7 @@ pub struct PowerShellExecutor {
     cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
     cache_ttl: Duration,
     cache_enabled: bool,
+    active_pid: Arc<RwLock<Option<u32>>>,
 }
 
 impl PowerShellExecutor {
@@ -116,6 +120,7 @@ impl PowerShellExecutor {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: Duration::from_secs(cache_ttl_seconds),
             cache_enabled: use_cache && cache_ttl_seconds > 0,
+            active_pid: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -206,8 +211,8 @@ impl PowerShellExecutor {
 }
 
 use crate::platform::executor::{CommandExecutor, StreamMessage};
-use tokio::sync::mpsc;
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 #[async_trait]
 impl CommandExecutor for PowerShellExecutor {
@@ -331,6 +336,7 @@ impl CommandExecutor for PowerShellExecutor {
         let (tx, rx) = mpsc::channel(100);
         let cmd_owned = cmd.to_string();
         let exec = self.executable.clone();
+        let active_pid = Arc::clone(&self.active_pid);
 
         tokio::spawn(async move {
             let full_cmd = format!("{}{}", PS_ENCODING_PREFIX, cmd_owned);
@@ -348,11 +354,14 @@ impl CommandExecutor for PowerShellExecutor {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(StreamMessage::Stderr(format!("Failed to spawn: {}", e))).await;
+                    let _ = tx
+                        .send(StreamMessage::Stderr(format!("Failed to spawn: {}", e)))
+                        .await;
                     let _ = tx.send(StreamMessage::Exit(1)).await;
                     return;
                 }
             };
+            *active_pid.write() = child.id();
 
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
@@ -364,12 +373,16 @@ impl CommandExecutor for PowerShellExecutor {
                     let mut buf = [0u8; 1024];
                     let mut line_buffer = String::new();
                     while let Ok(n) = stdout.read(&mut buf).await {
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         let text = String::from_utf8_lossy(&buf[..n]).to_string();
                         for c in text.chars() {
                             line_buffer.push(c);
                             if c == '\n' {
-                                let _ = tx_clone.send(StreamMessage::Stdout(line_buffer.clone())).await;
+                                let _ = tx_clone
+                                    .send(StreamMessage::Stdout(line_buffer.clone()))
+                                    .await;
                                 line_buffer.clear();
                             }
                         }
@@ -387,12 +400,16 @@ impl CommandExecutor for PowerShellExecutor {
                     let mut buf = [0u8; 1024];
                     let mut line_buffer = String::new();
                     while let Ok(n) = stderr.read(&mut buf).await {
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         let text = String::from_utf8_lossy(&buf[..n]).to_string();
                         for c in text.chars() {
                             line_buffer.push(c);
                             if c == '\n' {
-                                let _ = tx_clone.send(StreamMessage::Stderr(line_buffer.clone())).await;
+                                let _ = tx_clone
+                                    .send(StreamMessage::Stderr(line_buffer.clone()))
+                                    .await;
                                 line_buffer.clear();
                             }
                         }
@@ -408,6 +425,7 @@ impl CommandExecutor for PowerShellExecutor {
                 Ok(status) => status.code().unwrap_or(1),
                 Err(_) => 1,
             };
+            *active_pid.write() = None;
 
             let _ = tx.send(StreamMessage::Exit(exit_code)).await;
         });
@@ -421,10 +439,27 @@ impl CommandExecutor for PowerShellExecutor {
 
     async fn validate(&self, cmd: &str) -> Result<bool> {
         // Very basic validation - compile script block without executing
-        let validation_cmd = format!("$ErrorActionPreference = 'Stop'; [scriptblock]::Create('{}'); exit $LASTEXITCODE", 
-            cmd.replace('\'', "''"));
+        let validation_cmd = format!(
+            "$ErrorActionPreference = 'Stop'; [scriptblock]::Create('{}'); exit $LASTEXITCODE",
+            cmd.replace('\'', "''")
+        );
         let result = self.execute(&validation_cmd).await;
         Ok(result.is_ok())
+    }
+
+    async fn interrupt(&self) -> Result<()> {
+        let pid = *self.active_pid.read();
+        if let Some(pid) = pid {
+            let status = TokioCommand::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status()
+                .await
+                .context("Failed to invoke taskkill")?;
+            if !status.success() {
+                anyhow::bail!("taskkill failed for PID {}", pid);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -436,6 +471,7 @@ impl Clone for PowerShellExecutor {
             cache: Arc::clone(&self.cache),
             cache_ttl: self.cache_ttl,
             cache_enabled: self.cache_enabled,
+            active_pid: Arc::clone(&self.active_pid),
         }
     }
 }

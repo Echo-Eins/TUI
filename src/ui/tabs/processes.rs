@@ -100,12 +100,7 @@ fn render_compact(
     render_process_table(f, chunks[1], data, app, theme);
 }
 
-fn render_header(
-    f: &mut Frame,
-    area: Rect,
-    data: &crate::monitors::ProcessData,
-    _theme: &Theme,
-) {
+fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::ProcessData, _theme: &Theme) {
     let total_processes = data.processes.len();
     let total_memory: u64 = data.processes.iter().map(|p| p.memory).sum();
     let total_threads: usize = data.processes.iter().map(|p| p.threads).sum();
@@ -184,8 +179,7 @@ fn render_process_table(
     let content_height = area.height.saturating_sub(2);
     let footer_height = if area.height > 2 { 1 } else { 0 };
     let header_height = 1u16;
-    let visible_rows = content_height
-        .saturating_sub(header_height + footer_height) as usize;
+    let visible_rows = content_height.saturating_sub(header_height + footer_height) as usize;
 
     let mut scroll_offset = app.state.processes_state.scroll_offset;
     if selected_index < scroll_offset {

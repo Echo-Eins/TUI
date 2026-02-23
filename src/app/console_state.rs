@@ -41,15 +41,24 @@ pub struct OutputLine {
 
 impl OutputLine {
     pub fn stdout(text: impl Into<String>) -> Self {
-        Self { text: text.into(), stream: OutputStream::Stdout }
+        Self {
+            text: text.into(),
+            stream: OutputStream::Stdout,
+        }
     }
 
     pub fn stderr(text: impl Into<String>) -> Self {
-        Self { text: text.into(), stream: OutputStream::Stderr }
+        Self {
+            text: text.into(),
+            stream: OutputStream::Stderr,
+        }
     }
 
     pub fn system(text: impl Into<String>) -> Self {
-        Self { text: text.into(), stream: OutputStream::System }
+        Self {
+            text: text.into(),
+            stream: OutputStream::System,
+        }
     }
 }
 
@@ -78,10 +87,17 @@ impl TaskState {
     /// Badge text for the status indicator.
     pub fn badge(&self) -> String {
         match self {
-            TaskState::Completed { exit_code, elapsed_ms } => {
+            TaskState::Completed {
+                exit_code,
+                elapsed_ms,
+            } => {
                 format!("[✓ {}] [{:.1}s]", exit_code, *elapsed_ms as f64 / 1000.0)
             }
-            TaskState::Failed { exit_code, elapsed_ms, .. } => {
+            TaskState::Failed {
+                exit_code,
+                elapsed_ms,
+                ..
+            } => {
                 let code = exit_code.map_or("?".to_string(), |c| c.to_string());
                 format!("[✗ {}] [{:.1}s]", code, *elapsed_ms as f64 / 1000.0)
             }
@@ -119,6 +135,7 @@ pub struct CommandBlock {
     pub output_lines: Vec<OutputLine>,
     pub state: Option<TaskState>, // None = still running
     pub started_at: Instant,
+    pub finished_at: Option<Instant>,
     /// True if this block failed with a permission error and sudo retry is available.
     pub sudo_hint: bool,
     /// True if the block failed with stderr output, meaning it can be explained by AI.
@@ -138,6 +155,7 @@ impl CommandBlock {
             output_lines: Vec::new(),
             state: None,
             started_at: Instant::now(),
+            finished_at: None,
             sudo_hint: false,
             explain_hint: false,
             is_explaining: false,
@@ -167,11 +185,17 @@ impl CommandBlock {
     /// Complete the block.
     pub fn complete(&mut self, exit_code: i32) {
         let elapsed_ms = self.elapsed_ms();
+        self.finished_at = Some(Instant::now());
         if exit_code == 0 {
-            self.state = Some(TaskState::Completed { exit_code, elapsed_ms });
+            self.state = Some(TaskState::Completed {
+                exit_code,
+                elapsed_ms,
+            });
         } else {
             // Collect last stderr lines for potential error analysis
-            let stderr_tail: String = self.output_lines.iter()
+            let stderr_tail: String = self
+                .output_lines
+                .iter()
                 .filter(|l| l.stream == OutputStream::Stderr)
                 .rev()
                 .take(5)
@@ -193,6 +217,7 @@ impl CommandBlock {
     /// Mark as failed with an error message (no exit code available).
     pub fn fail(&mut self, error: String) {
         let elapsed_ms = self.elapsed_ms();
+        self.finished_at = Some(Instant::now());
         self.state = Some(TaskState::Failed {
             error,
             exit_code: None,
@@ -203,6 +228,7 @@ impl CommandBlock {
     /// Mark as interrupted.
     pub fn interrupt(&mut self) {
         let elapsed_ms = self.elapsed_ms();
+        self.finished_at = Some(Instant::now());
         self.state = Some(TaskState::Interrupted { elapsed_ms });
     }
 }
@@ -410,9 +436,24 @@ impl ConsoleState {
                 // Running: show if elapsed > threshold
                 block.elapsed_ms() >= self.status_threshold_ms
             }
-            Some(_state) => {
-                // Completed/Failed/etc: always show (fade logic can be added later)
-                true
+            Some(TaskState::Completed { elapsed_ms, .. })
+            | Some(TaskState::Failed { elapsed_ms, .. })
+            | Some(TaskState::Interrupted { elapsed_ms }) => {
+                if *elapsed_ms < self.status_threshold_ms {
+                    return false;
+                }
+                if let Some(finished_at) = block.finished_at {
+                    finished_at.elapsed().as_millis() as u64 <= self.status_persist_ms
+                } else {
+                    true
+                }
+            }
+            Some(TaskState::TimedOut { .. }) => {
+                if let Some(finished_at) = block.finished_at {
+                    finished_at.elapsed().as_millis() as u64 <= self.status_persist_ms
+                } else {
+                    true
+                }
             }
         }
     }
@@ -610,5 +651,30 @@ impl ConsoleState {
         self.history_nav_index = None;
         self.history_nav_cache.clear();
         self.history_nav_saved_input.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn badge_respects_threshold_for_completed_and_failed_states() {
+        let state = ConsoleState::new(16);
+
+        let mut fast_ok = CommandBlock::new(1, "echo hi".to_string(), ".".to_string());
+        fast_ok.state = Some(TaskState::Completed {
+            exit_code: 0,
+            elapsed_ms: state.status_threshold_ms.saturating_sub(1),
+        });
+        assert!(!state.should_show_badge(&fast_ok));
+
+        let mut slow_fail = CommandBlock::new(2, "false".to_string(), ".".to_string());
+        slow_fail.state = Some(TaskState::Failed {
+            error: "failed".to_string(),
+            exit_code: Some(1),
+            elapsed_ms: state.status_threshold_ms + 1,
+        });
+        assert!(state.should_show_badge(&slow_fail));
     }
 }

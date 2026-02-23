@@ -1,6 +1,6 @@
-use anyhow::Result;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use anyhow::Result;
 
 pub struct LinuxGpuMonitor {}
 
@@ -19,7 +19,10 @@ impl LinuxGpuMonitor {
         let parts: Vec<&str> = stdout.trim().split(',').map(|s| s.trim()).collect();
 
         if parts.len() < 14 {
-            anyhow::bail!("Invalid nvidia-smi output: expected 14 fields, got {}", parts.len());
+            anyhow::bail!(
+                "Invalid nvidia-smi output: expected 14 fields, got {}",
+                parts.len()
+            );
         }
 
         let name = parts[0].to_string();
@@ -41,7 +44,8 @@ impl LinuxGpuMonitor {
         } else if power_default_limit > 0.0 {
             power_default_limit
         } else {
-            self.get_nvidia_power_limit_from_standard_output().unwrap_or(0.0)
+            self.get_nvidia_power_limit_from_standard_output()
+                .unwrap_or(0.0)
         };
 
         let fan_speed = Self::parse_nvidia_float_or(parts[10], -1.0);
@@ -50,7 +54,9 @@ impl LinuxGpuMonitor {
         let driver_version = parts[13].to_string();
 
         // Parse CUDA version from standard nvidia-smi output
-        let cuda_version = self.get_nvidia_cuda_version().unwrap_or_else(|| "N/A".to_string());
+        let cuda_version = self
+            .get_nvidia_cuda_version()
+            .unwrap_or_else(|| "N/A".to_string());
 
         // Extract GPU index from bus_id
         let gpu_index = bus_id
@@ -129,7 +135,12 @@ impl LinuxGpuMonitor {
                 let parts: Vec<&str> = line.split('/').collect();
                 if parts.len() >= 2 {
                     let right = parts.last()?;
-                    let watts_str = right.trim().trim_end_matches('W').trim().trim_end_matches('|').trim();
+                    let watts_str = right
+                        .trim()
+                        .trim_end_matches('W')
+                        .trim()
+                        .trim_end_matches('|')
+                        .trim();
                     if let Ok(watts) = watts_str.parse::<f32>() {
                         if watts > 0.0 && watts < 10000.0 {
                             return Some(watts);
@@ -142,137 +153,130 @@ impl LinuxGpuMonitor {
     }
 
     async fn get_gpu_processes_linux(&self) -> Result<Vec<GpuProcessInfo>> {
-        let mut processes: Vec<GpuProcessInfo> = Vec::new();
+        let mut processes = Vec::new();
 
-        // Step 1: Get reliable process name + VRAM from query-apps (always works)
-        // Compute processes
-        if let Ok(output) = self.run_nvidia_smi(vec![
-            "--query-compute-apps=pid,process_name,used_memory",
-            "--format=csv,noheader,nounits",
-        ]) {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                if parts.len() >= 3 {
-                    let pid = parts[0].parse::<u32>().unwrap_or(0);
-                    if pid == 0 { continue; }
-                    let name = parts[1].rsplit('/').next().unwrap_or(parts[1]).to_string();
-                    let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-
-                    processes.push(GpuProcessInfo {
-                        pid,
-                        name,
-                        gpu_usage: -1.0,
-                        vram,
-                        process_type: "Compute".to_string(),
-                    });
-                }
-            }
-        }
-
-        // Graphics processes
-        if let Ok(output) = self.run_nvidia_smi(vec![
-            "--query-graphics-apps=pid,process_name,used_memory",
-            "--format=csv,noheader,nounits",
-        ]) {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                if parts.len() >= 3 {
-                    let pid = parts[0].parse::<u32>().unwrap_or(0);
-                    if pid == 0 { continue; }
-
-                    if let Some(existing) = processes.iter_mut().find(|p| p.pid == pid) {
-                        existing.process_type = "Compute+Graphics".to_string();
-                        let new_vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                        if new_vram > existing.vram {
-                            existing.vram = new_vram;
-                        }
-                        continue;
-                    }
-
-                    let name = parts[1].rsplit('/').next().unwrap_or(parts[1]).to_string();
-                    let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-
-                    processes.push(GpuProcessInfo {
-                        pid,
-                        name,
-                        gpu_usage: -1.0,
-                        vram,
-                        process_type: "Graphics".to_string(),
-                    });
-                }
-            }
-        }
-
-        // Step 2: Enrich with SM usage from pmon (may have more accurate gpu_usage %)
+        // Primary method: nvidia-smi pmon (most reliable for per-process data)
         if let Ok(output) = self.run_nvidia_smi(vec!["pmon", "-s", "um", "-c", "1"]) {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let line = line.trim();
+                // Skip header and comment lines (start with #)
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
+                // Format: gpu pid type sm mem enc dec fb command
+                // At minimum we need: gpu(0) pid(1) type(2) sm(3) mem(4) ... fb(7) command(8)
                 if parts.len() >= 9 {
                     let pid = parts[1].parse::<u32>().unwrap_or(0);
-                    if pid == 0 { continue; }
+                    if pid == 0 {
+                        continue;
+                    }
 
+                    let proc_type = parts[2]; // C, G, or C+G
                     let sm_usage = parts[3].parse::<f32>().unwrap_or(-1.0);
                     let fb_mem_mb = parts[7].parse::<u64>().unwrap_or(0);
                     let command = parts[8..].join(" ");
 
-                    if let Some(existing) = processes.iter_mut().find(|p| p.pid == pid) {
-                        // Enrich with SM usage if available
-                        if sm_usage >= 0.0 && sm_usage > existing.gpu_usage {
+                    // Get short process name from command path
+                    let name = command.rsplit('/').next().unwrap_or(&command).to_string();
+
+                    let process_type = match proc_type {
+                        "C" => "Compute".to_string(),
+                        "G" => "Graphics".to_string(),
+                        "C+G" => "Compute+Graphics".to_string(),
+                        _ => proc_type.to_string(),
+                    };
+
+                    // Merge duplicate PIDs (pmon may show multiple lines per GPU)
+                    if let Some(existing) = processes
+                        .iter_mut()
+                        .find(|p: &&mut GpuProcessInfo| p.pid == pid)
+                    {
+                        if fb_mem_mb * 1024 * 1024 > existing.vram {
+                            existing.vram = fb_mem_mb * 1024 * 1024;
+                        }
+                        if sm_usage > existing.gpu_usage {
                             existing.gpu_usage = sm_usage;
                         }
-                        // Update VRAM if pmon reports more
-                        if fb_mem_mb > 0 {
-                            let pmon_vram = fb_mem_mb * 1024 * 1024;
-                            if pmon_vram > existing.vram {
-                                existing.vram = pmon_vram;
-                            }
-                        }
-                        // Update name if query-apps returned a path-less "-"
-                        if existing.name == "-" && command != "-" {
-                            existing.name = command
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or(&command)
-                                .to_string();
-                        }
-                    } else {
-                        // Process only visible in pmon (rare)
-                        let proc_type = parts[2];
-                        let process_type = match proc_type {
-                            "C" => "Compute".to_string(),
-                            "G" => "Graphics".to_string(),
-                            "C+G" => "Compute+Graphics".to_string(),
-                            _ => proc_type.to_string(),
-                        };
-                        let name = if command == "-" {
-                            Self::get_process_name(pid)
-                        } else {
-                            command.rsplit('/').next().unwrap_or(&command).to_string()
-                        };
-
-                        processes.push(GpuProcessInfo {
-                            pid,
-                            name,
-                            gpu_usage: if sm_usage >= 0.0 { sm_usage } else { -1.0 },
-                            vram: fb_mem_mb * 1024 * 1024,
-                            process_type,
-                        });
+                        continue;
                     }
+
+                    processes.push(GpuProcessInfo {
+                        pid,
+                        name,
+                        gpu_usage: sm_usage,
+                        vram: fb_mem_mb * 1024 * 1024,
+                        process_type,
+                    });
                 }
             }
         }
 
-        // Step 3: Resolve any remaining "-" names via /proc/{pid}/comm
-        for p in &mut processes {
-            if p.name == "-" || p.name.is_empty() {
-                p.name = Self::get_process_name(p.pid);
+        // Fallback: query-compute-apps + query-graphics-apps if pmon returned nothing
+        if processes.is_empty() {
+            // Get compute processes
+            if let Ok(output) = self.run_nvidia_smi(vec![
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+            ]) {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 3 {
+                        let pid = parts[0].parse::<u32>().unwrap_or(0);
+                        if pid == 0 {
+                            continue;
+                        }
+                        let name = parts[1].rsplit('/').next().unwrap_or(parts[1]).to_string();
+                        let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+
+                        processes.push(GpuProcessInfo {
+                            pid,
+                            name,
+                            gpu_usage: -1.0,
+                            vram,
+                            process_type: "Compute".to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Get graphics processes
+            if let Ok(output) = self.run_nvidia_smi(vec![
+                "--query-graphics-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+            ]) {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 3 {
+                        let pid = parts[0].parse::<u32>().unwrap_or(0);
+                        if pid == 0 {
+                            continue;
+                        }
+
+                        if let Some(existing) = processes.iter_mut().find(|p| p.pid == pid) {
+                            existing.process_type = "Compute+Graphics".to_string();
+                            let new_vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+                            if new_vram > existing.vram {
+                                existing.vram = new_vram;
+                            }
+                            continue;
+                        }
+
+                        let name = parts[1].rsplit('/').next().unwrap_or(parts[1]).to_string();
+                        let vram = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+
+                        processes.push(GpuProcessInfo {
+                            pid,
+                            name,
+                            gpu_usage: -1.0,
+                            vram,
+                            process_type: "Graphics".to_string(),
+                        });
+                    }
+                }
             }
         }
 
@@ -280,12 +284,6 @@ impl LinuxGpuMonitor {
         processes.sort_by(|a, b| b.vram.cmp(&a.vram));
 
         Ok(processes)
-    }
-
-    fn get_process_name(pid: u32) -> String {
-        std::fs::read_to_string(format!("/proc/{}/comm", pid))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| format!("pid:{}", pid))
     }
 
     fn run_nvidia_smi<I, S>(&self, args: I) -> Result<std::process::Output>

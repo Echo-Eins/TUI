@@ -27,8 +27,7 @@ pub struct CommandHistory {
 impl CommandHistory {
     /// Open or create the history database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path.as_ref())
-            .context("Failed to open history database")?;
+        let conn = Connection::open(path.as_ref()).context("Failed to open history database")?;
 
         // Enable WAL mode for concurrent reads
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -114,12 +113,22 @@ impl CommandHistory {
         let like_pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
 
         // Get the max timestamp for normalization
-        let max_ts: i64 = self.conn
-            .query_row("SELECT COALESCE(MAX(timestamp), 1) FROM command_history", [], |r| r.get(0))
+        let max_ts: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(timestamp), 1) FROM command_history",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(1);
 
-        let min_ts: i64 = self.conn
-            .query_row("SELECT COALESCE(MIN(timestamp), 0) FROM command_history", [], |r| r.get(0))
+        let min_ts: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MIN(timestamp), 0) FROM command_history",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
 
         let ts_range = (max_ts - min_ts).max(1) as f64;
@@ -179,7 +188,11 @@ impl CommandHistory {
                 };
 
                 // Successful command boost
-                let success_boost = if entry.exit_code == Some(0) { 0.05 } else { 0.0 };
+                let success_boost = if entry.exit_code == Some(0) {
+                    0.05
+                } else {
+                    0.0
+                };
 
                 let score = recency * 0.4
                     + frequency * 0.3
@@ -209,10 +222,7 @@ impl CommandHistory {
             return self.get_recent(limit);
         }
 
-        let like_pattern = format!(
-            "%{}%",
-            query.replace('%', "\\%").replace('_', "\\_")
-        );
+        let like_pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
 
         let cwd_clause = if cwd_filter.is_some() {
             "AND cwd = ?3"
@@ -323,9 +333,27 @@ mod tests {
     fn test_record_and_search() {
         let history = CommandHistory::open_in_memory().unwrap();
 
-        history.record("systemctl restart nginx", "/home/user", Some(0), Some(100), "testhost").unwrap();
-        history.record("systemctl status nginx", "/home/user", Some(0), Some(50), "testhost").unwrap();
-        history.record("ls -la", "/home/user", Some(0), Some(10), "testhost").unwrap();
+        history
+            .record(
+                "systemctl restart nginx",
+                "/home/user",
+                Some(0),
+                Some(100),
+                "testhost",
+            )
+            .unwrap();
+        history
+            .record(
+                "systemctl status nginx",
+                "/home/user",
+                Some(0),
+                Some(50),
+                "testhost",
+            )
+            .unwrap();
+        history
+            .record("ls -la", "/home/user", Some(0), Some(10), "testhost")
+            .unwrap();
 
         let results = history.search_prefix("sys", None, 10).unwrap();
         assert_eq!(results.len(), 2);
@@ -339,9 +367,15 @@ mod tests {
     fn test_get_recent() {
         let history = CommandHistory::open_in_memory().unwrap();
 
-        history.record("cmd1", "/", Some(0), Some(10), "host").unwrap();
-        history.record("cmd2", "/", Some(0), Some(10), "host").unwrap();
-        history.record("cmd3", "/", Some(0), Some(10), "host").unwrap();
+        history
+            .record("cmd1", "/", Some(0), Some(10), "host")
+            .unwrap();
+        history
+            .record("cmd2", "/", Some(0), Some(10), "host")
+            .unwrap();
+        history
+            .record("cmd3", "/", Some(0), Some(10), "host")
+            .unwrap();
 
         let recent = history.get_recent(2).unwrap();
         assert_eq!(recent.len(), 2);
@@ -353,7 +387,9 @@ mod tests {
     fn test_empty_command_not_recorded() {
         let history = CommandHistory::open_in_memory().unwrap();
         history.record("", "/", Some(0), Some(10), "host").unwrap();
-        history.record("   ", "/", Some(0), Some(10), "host").unwrap();
+        history
+            .record("   ", "/", Some(0), Some(10), "host")
+            .unwrap();
         assert_eq!(history.count_unique().unwrap(), 0);
     }
 }

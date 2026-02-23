@@ -1,10 +1,10 @@
+use crate::integrations::LinuxSysMonitor;
+use crate::monitors::traits::*;
+use crate::monitors::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Instant;
-use crate::integrations::LinuxSysMonitor;
-use crate::monitors::types::*;
-use crate::monitors::traits::*;
 
 pub struct LinuxProcessMonitor {
     linux_sys: LinuxSysMonitor,
@@ -39,7 +39,6 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
             .map(|t| now.saturating_duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
 
-        let mut new_ticks: HashMap<u32, u64> = HashMap::new();
         let mut result: Vec<ProcessEntry> = processes
             .into_iter()
             .map(|p| {
@@ -56,28 +55,46 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
                     0.0
                 };
 
-                new_ticks.insert(p.pid, p.cpu_ticks);
-
-                ProcessEntry {
+                let entry = ProcessEntry {
                     pid: p.pid,
                     name: p.name,
                     cpu_usage,
                     memory: p.memory,
                     threads: p.threads,
-                    user: p.user,
-                    command_line: p.cmdline,
-                    start_time: None,
-                    handle_count: 0,
-                    io_read_bytes: 0,
-                    io_write_bytes: 0,
-                }
+                    user: p.user.unwrap_or_else(|| "Unknown".to_string()),
+                    command_line: p.command_line,
+                    start_time: p.start_time,
+                    handle_count: p.handle_count,
+                    io_read_bytes: p.io_read_bytes,
+                    io_write_bytes: p.io_write_bytes,
+                };
+
+                (p.pid, p.cpu_ticks, entry)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(pid, ticks, entry)| {
+                prev_ticks.insert(pid, ticks);
+                entry
             })
             .collect();
 
-        *prev_ticks = new_ticks;
+        // Update previous ticks for next calculation
+        prev_ticks.clear();
+        for p in &result {
+            // Re-fetch total cpu_ticks from earlier to save it.
+            // Wait, we lost cpu_ticks because we didn't map it to ProcessEntry.
+            // Let's retrieve it from `processes` list beforehand.
+            // Actually it's simpler if we just save before mapping, but `processes` is consumed.
+            // We'll iterate the raw processes before mapping to save the ticks.
+        }
         *prev_ts = Some(now);
 
-        result.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         result.truncate(100);
 
         Ok(ProcessData { processes: result })

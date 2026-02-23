@@ -52,11 +52,20 @@ impl LinuxSysMonitor {
         let stat_fields: Vec<&str> = after_name.split_whitespace().collect();
 
         // Field 17 (0-indexed from after name) = num_threads
-        let threads = stat_fields.get(17).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let threads = stat_fields
+            .get(17)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
 
         // Get CPU times: utime (field 11) and stime (field 12) from after name
-        let utime = stat_fields.get(11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-        let stime = stat_fields.get(12).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let utime = stat_fields
+            .get(11)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let stime = stat_fields
+            .get(12)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
         let cpu_ticks = utime + stime;
 
         // Read memory from statm
@@ -73,7 +82,8 @@ impl LinuxSysMonitor {
 
         // Read UID from status for user info
         let uid = if let Ok(status) = fs::read_to_string(&status_path) {
-            status.lines()
+            status
+                .lines()
                 .find(|l| l.starts_with("Uid:"))
                 .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|s| s.parse::<u32>().ok())

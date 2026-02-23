@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
 use crate::app::state::{RamPanelFocus, RamProcessSortColumn};
+use crate::app::App;
 use crate::monitors::ProcessMemoryInfo;
 use crate::ui::theme::Theme;
 use crate::utils::format::{create_progress_bar, format_bytes};
@@ -60,7 +60,11 @@ fn render_full(
     theme: &Theme,
 ) {
     let has_zram = !data.zram_devices.is_empty();
-    let zram_height = if has_zram { 4 + data.zram_devices.len() as u16 } else { 0 };
+    let zram_height = if has_zram {
+        4 + data.zram_devices.len() as u16
+    } else {
+        0
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -72,7 +76,7 @@ fn render_full(
                 Constraint::Length(3),           // Pagefile/Swap gauge
                 Constraint::Length(zram_height), // Zram info
                 Constraint::Length(9),           // Memory breakdown
-                Constraint::Min(8),             // Top processes
+                Constraint::Min(8),              // Top processes
             ]
         } else {
             vec![
@@ -178,7 +182,14 @@ fn render_full(
 
     // Top processes
     let processes_focused = app.state.ram_state.focused_panel == RamPanelFocus::TopProcesses;
-    render_top_processes(f, chunks[processes_idx], data, app, theme, processes_focused);
+    render_top_processes(
+        f,
+        chunks[processes_idx],
+        data,
+        app,
+        theme,
+        processes_focused,
+    );
 }
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
@@ -271,12 +282,7 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, th
     f.render_widget(info_para, chunks[1]);
 }
 
-fn render_zram_info(
-    f: &mut Frame,
-    area: Rect,
-    data: &crate::monitors::RamData,
-    theme: &Theme,
-) {
+fn render_zram_info(f: &mut Frame, area: Rect, data: &crate::monitors::RamData, theme: &Theme) {
     let mut lines = Vec::new();
     for z in &data.zram_devices {
         let usage_pct = if z.disksize > 0 {
@@ -287,7 +293,11 @@ fn render_zram_info(
         lines.push(Line::from(vec![
             Span::raw(format!("  {} ", z.name)),
             Span::styled(
-                format!("{} / {} ", format_bytes(z.orig_data_size), format_bytes(z.disksize)),
+                format!(
+                    "{} / {} ",
+                    format_bytes(z.orig_data_size),
+                    format_bytes(z.disksize)
+                ),
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw(create_progress_bar(usage_pct, 15)),
@@ -546,10 +556,7 @@ fn render_top_processes(
         .min(processes.len().saturating_sub(1));
 
     let hotkeys_height = if area.height > 2 { 1 } else { 0 };
-    let visible_rows = area
-        .height
-        .saturating_sub(2 + 1 + hotkeys_height)
-        .max(1) as usize;
+    let visible_rows = area.height.saturating_sub(2 + 1 + hotkeys_height).max(1) as usize;
     let scroll_offset = if selected_index >= visible_rows {
         selected_index - (visible_rows - 1)
     } else {

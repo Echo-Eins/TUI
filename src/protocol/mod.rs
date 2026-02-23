@@ -132,7 +132,11 @@ impl PacketHeader {
         }
         let packet_type = PacketType::try_from(bytes[1])?;
         let length = ((bytes[2] as u16) << 8) | (bytes[3] as u16);
-        Ok(Self { version, packet_type, length })
+        Ok(Self {
+            version,
+            packet_type,
+            length,
+        })
     }
 
     pub fn total_size(&self) -> usize {
@@ -189,31 +193,52 @@ pub struct HandshakeComplete {
 
 impl HandshakeInit {
     pub fn get_ephemeral_public_key(&self) -> Result<[u8; 33], ProtocolError> {
-        self.ephemeral_public_key.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.ephemeral_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
     pub fn get_nonce(&self) -> Result<[u8; 32], ProtocolError> {
-        self.nonce.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
     pub fn get_signature(&self) -> Result<[u8; 64], ProtocolError> {
-        self.signature.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
 }
 
 impl HandshakeResponse {
     pub fn get_ephemeral_public_key(&self) -> Result<[u8; 33], ProtocolError> {
-        self.ephemeral_public_key.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.ephemeral_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
     pub fn get_nonce(&self) -> Result<[u8; 32], ProtocolError> {
-        self.nonce.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
     pub fn get_signature(&self) -> Result<[u8; 64], ProtocolError> {
-        self.signature.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
 }
 
 impl HandshakeComplete {
     pub fn get_transcript_mac(&self) -> Result<[u8; 32], ProtocolError> {
-        self.transcript_mac.as_slice().try_into().map_err(|_| ProtocolError::InvalidDataLength)
+        self.transcript_mac
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidDataLength)
     }
 }
 
@@ -235,11 +260,18 @@ impl ScreenFrame {
 
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
         if data.len() < 8 {
-            return Err(ProtocolError::IncompletePacket { expected: 8, got: data.len() });
+            return Err(ProtocolError::IncompletePacket {
+                expected: 8,
+                got: data.len(),
+            });
         }
         let sequence = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         let timestamp = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        Ok(Self { sequence, timestamp, jpeg_data: data[8..].to_vec() })
+        Ok(Self {
+            sequence,
+            timestamp,
+            jpeg_data: data[8..].to_vec(),
+        })
     }
 }
 
@@ -257,11 +289,20 @@ pub struct MouseClick {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum MouseButton { Left = 0, Right = 1, Middle = 2 }
+pub enum MouseButton {
+    Left = 0,
+    Right = 1,
+    Middle = 2,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum ClickAction { Press = 0, Release = 1, Click = 2, DoubleClick = 3 }
+pub enum ClickAction {
+    Press = 0,
+    Release = 1,
+    Click = 2,
+    DoubleClick = 3,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KeyEvent {
@@ -276,7 +317,10 @@ pub struct ModeSwitch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum InputMode { Mouse = 0, Keyboard = 1 }
+pub enum InputMode {
+    Mouse = 0,
+    Keyboard = 1,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPacket {
@@ -291,9 +335,17 @@ pub struct Packet {
 }
 
 impl Packet {
-    pub fn new(packet_type: PacketType, encrypted_payload: Vec<u8>, tag: [u8; TAG_SIZE]) -> Result<Self, ProtocolError> {
+    pub fn new(
+        packet_type: PacketType,
+        encrypted_payload: Vec<u8>,
+        tag: [u8; TAG_SIZE],
+    ) -> Result<Self, ProtocolError> {
         let header = PacketHeader::new(packet_type, encrypted_payload.len())?;
-        Ok(Self { header, payload: encrypted_payload, tag })
+        Ok(Self {
+            header,
+            payload: encrypted_payload,
+            tag,
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -308,12 +360,19 @@ impl Packet {
         let header = PacketHeader::from_bytes(bytes)?;
         let total_size = header.total_size();
         if bytes.len() < total_size {
-            return Err(ProtocolError::IncompletePacket { expected: total_size, got: bytes.len() });
+            return Err(ProtocolError::IncompletePacket {
+                expected: total_size,
+                got: bytes.len(),
+            });
         }
         let payload_end = HEADER_SIZE + header.length as usize;
         let payload = bytes[HEADER_SIZE..payload_end].to_vec();
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&bytes[payload_end..payload_end + TAG_SIZE]);
-        Ok(Self { header, payload, tag })
+        Ok(Self {
+            header,
+            payload,
+            tag,
+        })
     }
 }

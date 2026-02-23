@@ -1,4 +1,4 @@
-﻿pub mod config;
+pub mod config;
 pub mod console_state;
 pub mod history;
 pub mod monitors_task;
@@ -100,4 +100,3 @@ impl App {
         self.state.handle_event(event).await
     }
 }
-

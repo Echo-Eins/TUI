@@ -1,6 +1,9 @@
-﻿use crate::app::{AppState, console_state::{ConsoleMode, CommandBlock}};
+use crate::app::{
+    console_state::{CommandBlock, ConsoleMode},
+    AppState,
+};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect, Alignment},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block as UiBlock, Borders, Clear, Paragraph, Wrap},
@@ -12,7 +15,7 @@ pub fn render(f: &mut Frame, state: &mut AppState, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Header bar
-            Constraint::Min(5),   // Output / blocks area
+            Constraint::Min(5),    // Output / blocks area
             Constraint::Length(1), // Status bar
             Constraint::Length(3), // Input area
         ])
@@ -51,30 +54,19 @@ fn render_header(f: &mut Frame, state: &AppState, area: Rect) {
     let cwd = &state.console_state.cwd;
     let user_host = format!(
         "{}@{}",
-        state.console_state.username,
-        state.console_state.hostname
+        state.console_state.username, state.console_state.hostname
     );
     let shell = &state.console_state.shell_name;
 
     let header = Line::from(vec![
-        Span::styled(
-            format!(" {} ", cwd),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(format!(" {} ", cwd), Style::default().fg(Color::Cyan)),
         Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} ", shell),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("{} ", shell), Style::default().fg(Color::Yellow)),
         Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} ", user_host),
-            Style::default().fg(Color::Green),
-        ),
+        Span::styled(format!("{} ", user_host), Style::default().fg(Color::Green)),
     ]);
 
-    let header_widget = Paragraph::new(header)
-        .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    let header_widget = Paragraph::new(header).style(Style::default().bg(Color::Rgb(30, 30, 40)));
 
     f.render_widget(header_widget, area);
 }
@@ -84,8 +76,7 @@ fn render_header(f: &mut Frame, state: &AppState, area: Rect) {
 fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
     let user_host = format!(
         "{}@{}",
-        state.console_state.username,
-        state.console_state.hostname
+        state.console_state.username, state.console_state.hostname
     );
 
     let lines = vec![
@@ -97,7 +88,10 @@ fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
         Line::from(vec![
             Span::styled("│  ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                format!("Shell: {}     User: {}", state.console_state.shell_name, user_host),
+                format!(
+                    "Shell: {}     User: {}",
+                    state.console_state.shell_name, user_host
+                ),
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -108,18 +102,36 @@ fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
                 Style::default().fg(Color::White),
             ),
         ]),
+        Line::from(vec![Span::styled("│  ", Style::default().fg(Color::Cyan))]),
         Line::from(vec![
             Span::styled("│  ", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(vec![
-            Span::styled("│  ", Style::default().fg(Color::Cyan)),
-            Span::styled("[i]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[i]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Insert   "),
-            Span::styled("[Esc]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Normal   "),
-            Span::styled("[Ctrl+R]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Ctrl+R]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" History   "),
-            Span::styled("[Tab/→]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Tab/→]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Accept"),
         ]),
         Line::from(Span::styled(
@@ -138,8 +150,7 @@ fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
 // ── Block-based Output Rendering ────────────────────────────────────────────
 
 fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
-    let output_block = UiBlock::default()
-        .borders(Borders::NONE);
+    let output_block = UiBlock::default().borders(Borders::NONE);
 
     let inner = output_block.inner(area);
     f.render_widget(output_block, area);
@@ -151,7 +162,12 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         // Block header: command + status badge
         let mut header_spans = vec![
             Span::styled("┌─ $ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&block.input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &block.input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
 
         // Status badge
@@ -175,7 +191,9 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         }
 
         // Sudo & Explain hint lines
-        if block.sudo_hint || (block.explain_hint && !block.is_explaining && block.explanation.is_none()) {
+        if block.sudo_hint
+            || (block.explain_hint && !block.is_explaining && block.explanation.is_none())
+        {
             all_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -184,20 +202,22 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
                 ),
             ]));
 
-            let mut hint_spans = vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            ];
+            let mut hint_spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
 
             if block.sudo_hint {
                 hint_spans.push(Span::styled(
                     " [Ctrl+S: Re-run with sudo] ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             if block.explain_hint && !block.is_explaining && block.explanation.is_none() {
                 hint_spans.push(Span::styled(
                     " [Ctrl+E: Explain Error with AI] ",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 
@@ -206,23 +226,33 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
 
         // Ollama Explanation Rendering
         if block.is_explaining {
+            all_lines.push(Line::from(vec![Span::styled(
+                "│ ",
+                Style::default().fg(Color::DarkGray),
+            )]));
             all_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            ]));
-            all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(" │ 🤖 Ollama is analyzing the error...", Style::default().fg(Color::Magenta).add_modifier(Modifier::RAPID_BLINK)),
+                Span::styled(
+                    " │ 🤖 Ollama is analyzing the error...",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::RAPID_BLINK),
+                ),
             ]));
         } else if let Some(explanation) = &block.explanation {
-            all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            ]));
+            all_lines.push(Line::from(vec![Span::styled(
+                "│ ",
+                Style::default().fg(Color::DarkGray),
+            )]));
             // Add a small header
             all_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(" ╭─ 🤖 AI Explanation ───────────────", Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    " ╭─ 🤖 AI Explanation ───────────────",
+                    Style::default().fg(Color::Magenta),
+                ),
             ]));
-            
+
             // Handle output text
             for line in explanation.lines() {
                 all_lines.push(Line::from(vec![
@@ -233,7 +263,10 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
             }
             all_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(" ╰───────────────────────────────────", Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    " ╰───────────────────────────────────",
+                    Style::default().fg(Color::Magenta),
+                ),
             ]));
         }
 
@@ -273,9 +306,7 @@ fn get_block_badge(
             let badge = format!("[⟳ {}s]", secs);
             Some((badge, Color::Yellow))
         }
-        Some(task_state) => {
-            Some((task_state.badge(), task_state.badge_color()))
-        }
+        Some(task_state) => Some((task_state.badge(), task_state.badge_color())),
     }
 }
 
@@ -293,7 +324,11 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
 
     let block = UiBlock::default()
         .title(" History Search (Ctrl+R) ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .style(Style::default().bg(Color::Rgb(20, 20, 30)));
@@ -311,7 +346,7 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
         .constraints([
             Constraint::Length(1), // Search query
             Constraint::Length(1), // Separator
-            Constraint::Min(1),   // Results list
+            Constraint::Min(1),    // Results list
         ])
         .split(inner);
 
@@ -330,7 +365,10 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
     // Separator
     let sep = "─".repeat(search_chunks[1].width as usize);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(Color::DarkGray)))),
+        Paragraph::new(Line::from(Span::styled(
+            sep,
+            Style::default().fg(Color::DarkGray),
+        ))),
         search_chunks[1],
     );
 
@@ -347,7 +385,10 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
             let is_selected = i == selected;
             let indicator = if is_selected { " ▸ " } else { "   " };
             let style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::Rgb(50, 50, 70)).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(50, 50, 70))
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -387,8 +428,16 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 // ── Confirm Panel ───────────────────────────────────────────────────────────
 
 fn render_confirm_panel(f: &mut Frame, state: &AppState, area: Rect) {
-    let cmd = state.console_state.confirm_command.as_deref().unwrap_or("???");
-    let action = state.console_state.confirm_action.as_deref().unwrap_or("Confirm action");
+    let cmd = state
+        .console_state
+        .confirm_command
+        .as_deref()
+        .unwrap_or("???");
+    let action = state
+        .console_state
+        .confirm_action
+        .as_deref()
+        .unwrap_or("Confirm action");
 
     let panel_width = (area.width.saturating_sub(10)).min(60);
     let panel_height = 7;
@@ -411,14 +460,27 @@ fn render_confirm_panel(f: &mut Frame, state: &AppState, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  Command: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(cmd, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                cmd,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Execute   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
@@ -443,9 +505,10 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
         ConsoleMode::Confirm => Color::Yellow,
     };
 
-    let mut status_spans = vec![
-        Span::styled(mode_str, Style::default().bg(mode_color).fg(Color::Black)),
-    ];
+    let mut status_spans = vec![Span::styled(
+        mode_str,
+        Style::default().bg(mode_color).fg(Color::Black),
+    )];
 
     // Show running indicator
     if state.console_state.is_running() {
@@ -479,8 +542,8 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     status_spans.push(Span::styled(help, Style::default().fg(Color::DarkGray)));
 
     let status_line = Line::from(status_spans);
-    let status_paragraph = Paragraph::new(status_line)
-        .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    let status_paragraph =
+        Paragraph::new(status_line).style(Style::default().bg(Color::Rgb(30, 30, 40)));
 
     f.render_widget(status_paragraph, area);
 }
@@ -504,9 +567,7 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
     let prompt = "> ";
     let input = &state.console_state.input_buffer;
 
-    let mut spans = vec![
-        Span::styled(prompt, Style::default().fg(Color::Cyan)),
-    ];
+    let mut spans = vec![Span::styled(prompt, Style::default().fg(Color::Cyan))];
 
     // Use syntax-highlighted tokens if available, otherwise plain white
     if !state.console_state.highlighted_input.is_empty() {
@@ -514,7 +575,10 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
             spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
         }
     } else {
-        spans.push(Span::styled(input.as_str(), Style::default().fg(Color::White)));
+        spans.push(Span::styled(
+            input.as_str(),
+            Style::default().fg(Color::White),
+        ));
     }
 
     // Ghost text: show the remainder of the suggestion in dark gray

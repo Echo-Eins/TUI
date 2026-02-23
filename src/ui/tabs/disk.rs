@@ -71,8 +71,8 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, them
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(disk_summary_height.min(14)), // Disk summary with usage bars
-            Constraint::Length(8),   // I/O statistics and graphs
-            Constraint::Min(8),      // Details & Processes
+            Constraint::Length(8),                           // I/O statistics and graphs
+            Constraint::Min(8),                              // Details & Processes
         ])
         .split(area);
 
@@ -121,7 +121,9 @@ fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskDa
             ),
             Span::styled(
                 format!("{} ", disk.model),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{} {} ", disk.media_type, disk.bus_type),
@@ -141,11 +143,13 @@ fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskDa
         let bar = create_progress_bar(usage_pct, 30);
         lines.push(Line::from(vec![
             Span::raw("   "),
-            Span::styled(
-                bar,
-                Style::default().fg(get_usage_color(usage_pct)),
-            ),
-            Span::raw(format!(" {:.0}%  {} / {}", usage_pct, format_bytes(used_space), format_bytes(disk.size))),
+            Span::styled(bar, Style::default().fg(get_usage_color(usage_pct))),
+            Span::raw(format!(
+                " {:.0}%  {} / {}",
+                usage_pct,
+                format_bytes(used_space),
+                format_bytes(disk.size)
+            )),
         ]));
 
         // Partitions on one line
@@ -153,10 +157,7 @@ fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskDa
         if !parts.is_empty() {
             lines.push(Line::from(vec![
                 Span::raw("   Partitions: "),
-                Span::styled(
-                    parts.join("  "),
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled(parts.join("  "), Style::default().fg(Color::Gray)),
             ]));
         }
     }
@@ -173,13 +174,15 @@ fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskDa
     f.render_widget(para, area);
 }
 
-fn render_combined_details(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, theme: &Theme) {
+fn render_combined_details(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::DiskData,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     // Left: logical drives table
@@ -201,7 +204,12 @@ fn render_combined_details(f: &mut Frame, area: Rect, data: &crate::monitors::Di
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw(bar),
-            Span::raw(format!(" {:.0}%  {} / {}", usage_pct, format_bytes(drive.used), format_bytes(drive.total))),
+            Span::raw(format!(
+                " {:.0}%  {} / {}",
+                usage_pct,
+                format_bytes(drive.used),
+                format_bytes(drive.total)
+            )),
         ]));
     }
 
@@ -256,7 +264,6 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::DiskData, t
 
     f.render_widget(para, area);
 }
-
 
 fn render_io_stats(
     f: &mut Frame,
@@ -439,7 +446,6 @@ fn render_io_graphs(
         f.render_widget(text, area);
     }
 }
-
 
 fn render_process_table(
     f: &mut Frame,

@@ -23,16 +23,16 @@ pub struct CoreUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrequencyInfo {
-    pub base_clock: f32,      // GHz
-    pub avg_frequency: f32,   // GHz
-    pub max_frequency: f32,   // GHz
+    pub base_clock: f32,    // GHz
+    pub avg_frequency: f32, // GHz
+    pub max_frequency: f32, // GHz
     pub boost_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerInfo {
-    pub current_power: f32,   // Watts
-    pub max_power: f32,       // Watts (TDP)
+    pub current_power: f32, // Watts
+    pub max_power: f32,     // Watts (TDP)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ pub struct ProcessInfo {
     pub name: String,
     pub cpu_usage: f32,
     pub threads: usize,
-    pub memory: u64,  // Bytes
+    pub memory: u64, // Bytes
 }
 
 // ======== GPU ========
@@ -246,8 +246,8 @@ pub struct NetworkInterface {
     // Statistics
     pub bytes_received: u64,
     pub bytes_sent: u64,
-    pub download_speed: f64,  // Mbps
-    pub upload_speed: f64,     // Mbps
+    pub download_speed: f64, // Mbps
+    pub upload_speed: f64,   // Mbps
     pub peak_download: f64,
     pub peak_upload: f64,
 }
@@ -275,8 +275,8 @@ pub struct TrafficSample {
 pub struct BandwidthConsumer {
     pub process_name: String,
     pub pid: u32,
-    pub download_speed: f64,  // Mbps
-    pub upload_speed: f64,    // Mbps
+    pub download_speed: f64, // Mbps
+    pub upload_speed: f64,   // Mbps
     pub total_bytes_received: u64,
     pub total_bytes_sent: u64,
     pub estimated: bool,

@@ -89,9 +89,7 @@ impl Session {
         info!("Session started with {}", self.addr);
 
         // Send session start
-        self.connection
-            .send(PacketType::SessionStart, &[])
-            .await?;
+        self.connection.send(PacketType::SessionStart, &[]).await?;
 
         // Initialize input controller
         let mut input = match InputController::new() {
@@ -226,7 +224,11 @@ impl Session {
         self.stop();
         let _ = capture_handle.await;
 
-        info!("Session with {} ended after {}ms", self.addr, self.uptime_ms());
+        info!(
+            "Session with {} ended after {}ms",
+            self.addr,
+            self.uptime_ms()
+        );
 
         Ok(())
     }
@@ -319,8 +321,8 @@ impl Session {
                     let new_mode = input.toggle_mode();
                     info!("Mode toggled to {:?}", new_mode);
 
-                    let ack = serde_json::to_vec(&ModeSwitch { mode: new_mode })
-                        .unwrap_or_default();
+                    let ack =
+                        serde_json::to_vec(&ModeSwitch { mode: new_mode }).unwrap_or_default();
                     self.connection.send(PacketType::ModeAck, &ack).await?;
                 }
             }
@@ -349,7 +351,9 @@ impl Session {
             payload.len()
         );
 
-        self.connection.send(PacketType::ScreenFrame, &payload).await
+        self.connection
+            .send(PacketType::ScreenFrame, &payload)
+            .await
     }
 
     /// Send session end notification

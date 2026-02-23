@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use crate::integrations::PowerShellExecutor;
-use crate::monitors::types::*;
 use crate::monitors::traits::*;
+use crate::monitors::types::*;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 pub struct WindowsRamMonitor {

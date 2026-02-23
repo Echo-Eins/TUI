@@ -206,8 +206,7 @@ fn render_service_table(
     let content_height = area.height.saturating_sub(2);
     let footer_height = if area.height > 2 { 1 } else { 0 };
     let header_height = 1u16;
-    let visible_rows = content_height
-        .saturating_sub(header_height + footer_height) as usize;
+    let visible_rows = content_height.saturating_sub(header_height + footer_height) as usize;
 
     let mut scroll_offset = app.state.services_state.scroll_offset;
     if selected_index < scroll_offset {
@@ -524,8 +523,7 @@ fn render_details_panel(
             )]));
         }
 
-        let details_focused =
-            app.state.services_state.focused_panel == ServicesPanelFocus::Details;
+        let details_focused = app.state.services_state.focused_panel == ServicesPanelFocus::Details;
         let border_color = if details_focused {
             Color::Cyan
         } else {
@@ -537,7 +535,11 @@ fn render_details_panel(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
 
-        let scroll = app.state.services_state.details_scroll.min(u16::MAX as usize) as u16;
+        let scroll = app
+            .state
+            .services_state
+            .details_scroll
+            .min(u16::MAX as usize) as u16;
         let paragraph = Paragraph::new(details)
             .block(block)
             .wrap(Wrap { trim: true })
@@ -545,8 +547,7 @@ fn render_details_panel(
 
         f.render_widget(paragraph, area);
     } else {
-        let details_focused =
-            app.state.services_state.focused_panel == ServicesPanelFocus::Details;
+        let details_focused = app.state.services_state.focused_panel == ServicesPanelFocus::Details;
         let border_color = if details_focused {
             Color::Cyan
         } else {
@@ -621,7 +622,3 @@ fn sort_services(services: &mut Vec<ServiceEntry>, column: ServiceSortColumn, as
         }
     });
 }
-
-
-
-

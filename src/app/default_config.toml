@@ -5,7 +5,7 @@ compact_mode = false
 theme = "dark"
 
 [tabs]
-enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services", "disk_analyzer", "settings"]
+enabled = ["cpu", "gpu", "ram", "disk", "network", "ollama", "processes", "services", "console", "disk_analyzer", "settings"]
 default = "cpu"
 
 [monitors.cpu]
@@ -109,6 +109,9 @@ cache_ttl_seconds = 5
 [console]
 history_limit = 1000
 max_output_lines = 500
+status_threshold_ms = 400
+status_persist_ms = 1800
+enable_ai_explain = true
 
 [theme.dark]
 background = "black"

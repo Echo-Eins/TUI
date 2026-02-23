@@ -1,7 +1,7 @@
+pub mod executor;
 #[allow(dead_code)]
 pub mod linux;
 pub mod windows;
-pub mod executor;
 
 pub use executor::CommandExecutor;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub fn get_executor() -> Arc<dyn CommandExecutor> {
             false,
         ))
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         Arc::new(linux::shell::LinuxCommandExecutor::new())

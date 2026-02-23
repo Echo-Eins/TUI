@@ -32,7 +32,9 @@ pub fn detect_permission_failure(exit_code: i32, stderr: &str) -> bool {
     }
 
     let stderr_lower = stderr.to_lowercase();
-    PERMISSION_PATTERNS.iter().any(|pattern| stderr_lower.contains(pattern))
+    PERMISSION_PATTERNS
+        .iter()
+        .any(|pattern| stderr_lower.contains(pattern))
 }
 
 // ── Command Blacklist ──────────────────────────────────────────────────────
@@ -74,7 +76,9 @@ const BLACKLIST_PATTERNS: &[&str] = &[
 /// Check if a command is blacklisted and should never be retried with sudo.
 pub fn is_blacklisted(cmd: &str) -> bool {
     let cmd_trimmed = cmd.trim();
-    BLACKLIST_PATTERNS.iter().any(|pattern| cmd_trimmed.contains(pattern))
+    BLACKLIST_PATTERNS
+        .iter()
+        .any(|pattern| cmd_trimmed.contains(pattern))
 }
 
 // ── Sudo Availability ──────────────────────────────────────────────────────
@@ -139,10 +143,22 @@ mod tests {
 
     #[test]
     fn test_permission_denied() {
-        assert!(detect_permission_failure(1, "Failed to restart nginx.service: Access denied"));
-        assert!(detect_permission_failure(126, "bash: /usr/sbin/nginx: Permission denied"));
-        assert!(detect_permission_failure(1, "Error: Operation not permitted"));
-        assert!(detect_permission_failure(1, "You must be root to perform this action"));
+        assert!(detect_permission_failure(
+            1,
+            "Failed to restart nginx.service: Access denied"
+        ));
+        assert!(detect_permission_failure(
+            126,
+            "bash: /usr/sbin/nginx: Permission denied"
+        ));
+        assert!(detect_permission_failure(
+            1,
+            "Error: Operation not permitted"
+        ));
+        assert!(detect_permission_failure(
+            1,
+            "You must be root to perform this action"
+        ));
     }
 
     #[test]
@@ -175,8 +191,14 @@ mod tests {
 
     #[test]
     fn test_sudo_command() {
-        assert_eq!(sudo_command("systemctl restart nginx"), "sudo systemctl restart nginx");
-        assert_eq!(sudo_command("sudo systemctl restart nginx"), "sudo systemctl restart nginx");
+        assert_eq!(
+            sudo_command("systemctl restart nginx"),
+            "sudo systemctl restart nginx"
+        );
+        assert_eq!(
+            sudo_command("sudo systemctl restart nginx"),
+            "sudo systemctl restart nginx"
+        );
         assert_eq!(sudo_command("  cat /etc/shadow  "), "sudo cat /etc/shadow");
     }
 }

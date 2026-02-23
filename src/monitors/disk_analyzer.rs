@@ -1,4 +1,4 @@
-﻿use crate::platform::executor::CommandExecutor;
+use crate::platform::executor::CommandExecutor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -362,10 +362,7 @@ fn parse_everything_output(output: &str, drive_root: &str) -> Vec<RootFolderInfo
         .collect()
 }
 
-fn parse_everything_json(
-    value: serde_json::Value,
-    drive_root: &str,
-) -> Vec<RootFolderInfo> {
+fn parse_everything_json(value: serde_json::Value, drive_root: &str) -> Vec<RootFolderInfo> {
     let items = match value {
         serde_json::Value::Array(items) => items,
         serde_json::Value::Object(map) => {
@@ -385,7 +382,9 @@ fn parse_everything_json(
     let mut entries = Vec::new();
 
     for item in items {
-        let serde_json::Value::Object(map) = item else { continue };
+        let serde_json::Value::Object(map) = item else {
+            continue;
+        };
 
         let mut path = get_string_ci(&map, &["path", "full_path", "fullpath", "full"]);
         let filename = get_string_ci(&map, &["filename"]);
@@ -400,10 +399,9 @@ fn parse_everything_json(
         }
 
         if path.is_none() {
-            if let (Some(parent), Some(name_value)) = (
-                get_string_ci(&map, &["parent", "directory"]),
-                name.clone(),
-            ) {
+            if let (Some(parent), Some(name_value)) =
+                (get_string_ci(&map, &["parent", "directory"]), name.clone())
+            {
                 let parent = parent.trim_end_matches('\\');
                 path = Some(format!("{}\\{}", parent, name_value));
             }
@@ -485,8 +483,8 @@ fn looks_like_full_path(value: &str) -> bool {
         return false;
     }
 
-    let has_drive = trimmed.as_bytes().get(1) == Some(&b':')
-        && trimmed.as_bytes().get(2) == Some(&b'\\');
+    let has_drive =
+        trimmed.as_bytes().get(1) == Some(&b':') && trimmed.as_bytes().get(2) == Some(&b'\\');
     let is_unc = trimmed.starts_with("\\\\");
 
     has_drive || is_unc
@@ -528,10 +526,7 @@ fn get_string_ci(
     })
 }
 
-fn get_u64_ci(
-    map: &serde_json::Map<String, serde_json::Value>,
-    keys: &[&str],
-) -> Option<u64> {
+fn get_u64_ci(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<u64> {
     find_value_ci(map, keys).and_then(|value| match value {
         serde_json::Value::Number(n) => n.as_u64().or_else(|| n.as_f64().map(|v| v as u64)),
         serde_json::Value::String(s) => parse_numeric(s),
@@ -547,4 +542,3 @@ struct DriveSample {
     Total: Option<u64>,
     Free: Option<u64>,
 }
-

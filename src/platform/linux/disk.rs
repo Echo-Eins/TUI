@@ -7,9 +7,7 @@ use std::time::Instant;
 
 impl LinuxSysMonitor {
     pub fn get_disk_info(&self) -> Result<Vec<DiskInfo>> {
-        let output = Command::new("df")
-            .args(["-B1", "-T"])
-            .output()?;
+        let output = Command::new("df").args(["-B1", "-T"]).output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut disks = Vec::new();
@@ -158,7 +156,11 @@ impl LinuxSysMonitor {
                     .unwrap_or_default();
 
                 current = Some(BtrfsInfo {
-                    label: if label == "none" { String::new() } else { label },
+                    label: if label == "none" {
+                        String::new()
+                    } else {
+                        label
+                    },
                     uuid,
                     total_size: 0,
                     used: 0,

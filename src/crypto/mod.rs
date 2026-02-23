@@ -161,15 +161,19 @@ impl CryptoContext {
     }
 
     /// Verify signature from peer
-    pub fn verify_peer_signature(&self, data: &[u8], signature: &[u8; 64]) -> Result<(), CryptoError> {
+    pub fn verify_peer_signature(
+        &self,
+        data: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), CryptoError> {
         let peer_public = self
             .peer_public_key
             .as_ref()
             .ok_or(CryptoError::InvalidPublicKey)?;
 
         let verifying_key = VerifyingKey::from(peer_public);
-        let sig =
-            Signature::from_bytes(signature.into()).map_err(|_| CryptoError::SignatureVerificationFailed)?;
+        let sig = Signature::from_bytes(signature.into())
+            .map_err(|_| CryptoError::SignatureVerificationFailed)?;
 
         verifying_key
             .verify(data, &sig)
@@ -252,22 +256,33 @@ impl CryptoContext {
 
         // Initialize ciphers
         let (outgoing_key, incoming_key) = if self.is_server {
-            (&session_keys.server_to_client_key, &session_keys.client_to_server_key)
+            (
+                &session_keys.server_to_client_key,
+                &session_keys.client_to_server_key,
+            )
         } else {
-            (&session_keys.client_to_server_key, &session_keys.server_to_client_key)
+            (
+                &session_keys.client_to_server_key,
+                &session_keys.server_to_client_key,
+            )
         };
 
         self.outgoing_cipher = Some(
-            Aes128Gcm::new_from_slice(outgoing_key).map_err(|_| CryptoError::KeyDerivationFailed)?,
+            Aes128Gcm::new_from_slice(outgoing_key)
+                .map_err(|_| CryptoError::KeyDerivationFailed)?,
         );
         self.incoming_cipher = Some(
-            Aes128Gcm::new_from_slice(incoming_key).map_err(|_| CryptoError::KeyDerivationFailed)?,
+            Aes128Gcm::new_from_slice(incoming_key)
+                .map_err(|_| CryptoError::KeyDerivationFailed)?,
         );
         self.session_keys = Some(session_keys);
 
         // Reset nonce counters
         self.outgoing_nonce_counter = 0;
         self.last_incoming_nonce = None;
+
+        // Use handshake nonces as deterministic random parts for message nonces.
+        self.outgoing_nonce_random.copy_from_slice(&our_nonce[0..8]);
 
         // Set incoming nonce random from peer
         let mut incoming_random = [0u8; 8];
@@ -315,12 +330,18 @@ impl CryptoContext {
 
     /// Encrypt a message
     /// Returns (ciphertext, nonce, tag)
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, [u8; NONCE_SIZE], [u8; TAG_SIZE]), CryptoError> {
+    pub fn encrypt(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, [u8; NONCE_SIZE], [u8; TAG_SIZE]), CryptoError> {
         // Get nonce first (requires mutable borrow)
         let nonce_bytes = self.next_outgoing_nonce()?;
 
         // Then get cipher reference
-        let cipher = self.outgoing_cipher.as_ref().ok_or(CryptoError::EncryptionFailed)?;
+        let cipher = self
+            .outgoing_cipher
+            .as_ref()
+            .ok_or(CryptoError::EncryptionFailed)?;
         let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = cipher
@@ -351,7 +372,10 @@ impl CryptoContext {
         // Validate nonce first (replay protection)
         self.validate_incoming_nonce(nonce)?;
 
-        let cipher = self.incoming_cipher.as_ref().ok_or(CryptoError::DecryptionFailed)?;
+        let cipher = self
+            .incoming_cipher
+            .as_ref()
+            .ok_or(CryptoError::DecryptionFailed)?;
         let nonce_obj = Nonce::from(*nonce);
 
         // Reconstruct ciphertext with tag appended
@@ -368,7 +392,7 @@ impl CryptoContext {
 
     /// Compute HMAC-SHA256 for transcript verification
     pub fn compute_transcript_mac(&self, transcript: &[u8]) -> Result<[u8; 32], CryptoError> {
-        use hmac::{Hmac, Mac, digest::KeyInit};
+        use hmac::{digest::KeyInit, Hmac, Mac};
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
@@ -441,10 +465,20 @@ mod tests {
 
         // Derive keys
         server
-            .derive_session_keys(server_eph_secret, &client_eph_pub, &server_nonce, &client_nonce)
+            .derive_session_keys(
+                server_eph_secret,
+                &client_eph_pub,
+                &server_nonce,
+                &client_nonce,
+            )
             .unwrap();
         client
-            .derive_session_keys(client_eph_secret, &server_eph_pub, &client_nonce, &server_nonce)
+            .derive_session_keys(
+                client_eph_secret,
+                &server_eph_pub,
+                &client_nonce,
+                &server_nonce,
+            )
             .unwrap();
 
         // Test encryption/decryption
@@ -474,10 +508,20 @@ mod tests {
         let client_nonce = CryptoContext::generate_nonce();
 
         server
-            .derive_session_keys(server_eph_secret, &client_eph_pub, &server_nonce, &client_nonce)
+            .derive_session_keys(
+                server_eph_secret,
+                &client_eph_pub,
+                &server_nonce,
+                &client_nonce,
+            )
             .unwrap();
         client
-            .derive_session_keys(client_eph_secret, &server_eph_pub, &client_nonce, &server_nonce)
+            .derive_session_keys(
+                client_eph_secret,
+                &server_eph_pub,
+                &client_nonce,
+                &server_nonce,
+            )
             .unwrap();
 
         let (ciphertext_1, nonce_1, tag_1) = server.encrypt(b"msg-1").unwrap();
