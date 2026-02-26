@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt as StdCommandExt;
+use std::os::unix::process::CommandExt;
 
 pub struct LinuxCommandExecutor {
     active_pid: Arc<RwLock<Option<u32>>>,

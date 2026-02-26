@@ -5,6 +5,26 @@ use std::fs;
 use std::process::Command;
 use std::time::Instant;
 
+#[derive(Debug, Clone)]
+pub struct MountInfo {
+    pub mount_point: String,
+    pub device: String,
+    pub fs_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpaceInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskTemp {
+    pub name: String,
+    pub temp: f32,
+}
+
 impl LinuxSysMonitor {
     pub fn get_disk_info(&self) -> Result<Vec<DiskInfo>> {
         let output = Command::new("df").args(["-B1", "-T"]).output()?;
@@ -63,6 +83,67 @@ impl LinuxSysMonitor {
         Ok(disks)
     }
 
+    pub fn get_mounts(&self) -> Result<Vec<MountInfo>> {
+        let content = fs::read_to_string("/proc/mounts")?;
+        let mut mounts = Vec::new();
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                mounts.push(MountInfo {
+                    device: parts[0].to_string(),
+                    mount_point: parts[1].to_string(),
+                    fs_type: parts[2].to_string(),
+                });
+            }
+        }
+        Ok(mounts)
+    }
+
+    pub fn get_disk_space(&self, mount: &str) -> Result<SpaceInfo> {
+        let mut stat = std::mem::MaybeUninit::uninit();
+        let c_path = std::ffi::CString::new(mount)?;
+        
+        let res = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if res == 0 {
+            let stat = unsafe { stat.assume_init() };
+            let total = stat.f_blocks * stat.f_frsize as libc::fsblkcnt_t;
+            let available = stat.f_bavail * stat.f_frsize as libc::fsblkcnt_t;
+            let used = total.saturating_sub(stat.f_bfree * stat.f_frsize as libc::fsblkcnt_t);
+            
+            Ok(SpaceInfo {
+                total_bytes: total as u64,
+                used_bytes: used as u64,
+                free_bytes: available as u64,
+            })
+        } else {
+            anyhow::bail!("statvfs failed for {}", mount);
+        }
+    }
+
+    pub fn get_disk_temperatures(&self) -> HashMap<String, f32> {
+        // Basic fallback implementation that reads from /sys/class/hwmon
+        // Full implementation might use smartctl or specific nvme paths
+        let mut temps = HashMap::new();
+        if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(name) = fs::read_to_string(path.join("name")) {
+                    if name.trim().contains("nvme") || name.trim().contains("drivetemp") {
+                        if let Ok(temp_str) = fs::read_to_string(path.join("temp1_input")) {
+                            if let Ok(temp_milli) = temp_str.trim().parse::<f32>() {
+                                temps.insert(
+                                    name.trim().to_string(),
+                                    temp_milli / 1000.0,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        temps
+    }
+
     pub fn get_block_devices(&self) -> Result<Vec<BlockDeviceInfo>> {
         let output = Command::new("lsblk")
             .args([
@@ -100,10 +181,10 @@ impl LinuxSysMonitor {
 
         result.push(BlockDeviceInfo {
             name: name.clone(),
-            model: device.model.unwrap_or_default(),
+            model: device.model,
             dev_type: device.dev_type,
             size: device.size.unwrap_or(0),
-            rotational: device.rota.unwrap_or(false),
+            rota: device.rota.unwrap_or(false),
             transport: device.tran.unwrap_or_default(),
             filesystem: device.fstype,
             mount_point: device.mountpoint,
@@ -390,10 +471,10 @@ pub struct DiskInfo {
 #[derive(Debug, Clone)]
 pub struct BlockDeviceInfo {
     pub name: String,
-    pub model: String,
+    pub model: Option<String>,
     pub dev_type: String,
     pub size: u64,
-    pub rotational: bool,
+    pub rota: bool,
     pub transport: String,
     pub filesystem: Option<String>,
     pub mount_point: Option<String>,

@@ -5,6 +5,7 @@ pub mod disk;
 pub mod memory;
 pub mod network;
 pub mod process;
+pub mod services;
 pub mod shell;
 
 pub use cpu::CpuInfo;

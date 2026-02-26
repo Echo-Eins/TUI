@@ -15,7 +15,7 @@ use theme::Theme;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     // Get the full size of the frame
-    let size = f.size();
+    let size = f.area();
 
     // Render a background block to ensure the frame is filled
     // This forces ratatui to update the entire screen
