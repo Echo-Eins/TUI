@@ -211,6 +211,8 @@ impl PowerShellExecutor {
 }
 
 use crate::platform::executor::{CommandExecutor, StreamMessage};
+use crate::utils::ansi;
+use crate::utils::utf8_buffer::Utf8AccumulationBuffer;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -332,16 +334,26 @@ impl CommandExecutor for PowerShellExecutor {
         Ok(stdout)
     }
 
-    async fn execute_stream(&self, cmd: &str) -> Result<mpsc::Receiver<StreamMessage>> {
+    async fn execute_stream(
+        &self,
+        cmd: &str,
+        cwd: Option<&str>,
+        env: Option<&HashMap<String, String>>,
+        terminal_size: Option<(u16, u16)>,
+    ) -> Result<mpsc::Receiver<StreamMessage>> {
         let (tx, rx) = mpsc::channel(100);
         let cmd_owned = cmd.to_string();
         let exec = self.executable.clone();
         let active_pid = Arc::clone(&self.active_pid);
+        let cwd_owned = cwd.map(|s| s.to_string());
+        let env_owned = env.cloned();
+        let term_size = terminal_size;
 
         tokio::spawn(async move {
             let full_cmd = format!("{}{}", PS_ENCODING_PREFIX, cmd_owned);
             let encoded_command = encode_powershell_command(&full_cmd);
-            let mut child = match TokioCommand::new(&exec)
+            let mut command = TokioCommand::new(&exec);
+            command
                 .args(&[
                     "-NoProfile",
                     "-NonInteractive",
@@ -349,9 +361,27 @@ impl CommandExecutor for PowerShellExecutor {
                     &encoded_command,
                 ])
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-            {
+                .stderr(Stdio::piped());
+
+            // Set working directory if provided
+            if let Some(ref cwd) = cwd_owned {
+                command.current_dir(cwd);
+            }
+
+            // Set accumulated session environment variables
+            if let Some(ref env) = env_owned {
+                for (key, value) in env {
+                    command.env(key, value);
+                }
+            }
+
+            // Set terminal size hints for commands that format output
+            if let Some((cols, rows)) = term_size {
+                command.env("COLUMNS", cols.to_string());
+                command.env("LINES", rows.to_string());
+            }
+
+            let mut child = match command.spawn() {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = tx
@@ -363,70 +393,119 @@ impl CommandExecutor for PowerShellExecutor {
             };
             *active_pid.write() = child.id();
 
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-
-            // Read stdout
-            if let Some(mut stdout) = stdout {
+            // Spawn stdout reader task
+            let stdout_handle = if let Some(mut stdout) = child.stdout.take() {
                 let tx_clone = tx.clone();
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
                     let mut line_buffer = String::new();
+                    let mut utf8_buf = Utf8AccumulationBuffer::new();
                     while let Ok(n) = stdout.read(&mut buf).await {
                         if n == 0 {
                             break;
                         }
-                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let text = utf8_buf.push(&buf[..n]);
                         for c in text.chars() {
-                            line_buffer.push(c);
-                            if c == '\n' {
-                                let _ = tx_clone
-                                    .send(StreamMessage::Stdout(line_buffer.clone()))
-                                    .await;
-                                line_buffer.clear();
+                            match c {
+                                '\n' => {
+                                    let clean = ansi::strip_ansi(&line_buffer);
+                                    let _ = tx_clone.send(StreamMessage::Stdout(clean)).await;
+                                    line_buffer.clear();
+                                }
+                                '\r' => {
+                                    line_buffer.clear();
+                                }
+                                _ => {
+                                    line_buffer.push(c);
+                                }
+                            }
+                        }
+                    }
+                    let remaining = utf8_buf.flush();
+                    if !remaining.is_empty() {
+                        for c in remaining.chars() {
+                            match c {
+                                '\n' => {
+                                    let clean = ansi::strip_ansi(&line_buffer);
+                                    let _ = tx_clone.send(StreamMessage::Stdout(clean)).await;
+                                    line_buffer.clear();
+                                }
+                                '\r' => { line_buffer.clear(); }
+                                _ => { line_buffer.push(c); }
                             }
                         }
                     }
                     if !line_buffer.is_empty() {
-                        let _ = tx_clone.send(StreamMessage::Stdout(line_buffer)).await;
+                        let clean = ansi::strip_ansi(&line_buffer);
+                        let _ = tx_clone.send(StreamMessage::Stdout(clean)).await;
                     }
-                });
-            }
+                }))
+            } else {
+                None
+            };
 
-            // Read stderr
-            if let Some(mut stderr) = stderr {
+            // Spawn stderr reader task
+            let stderr_handle = if let Some(mut stderr) = child.stderr.take() {
                 let tx_clone = tx.clone();
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
                     let mut line_buffer = String::new();
+                    let mut utf8_buf = Utf8AccumulationBuffer::new();
                     while let Ok(n) = stderr.read(&mut buf).await {
                         if n == 0 {
                             break;
                         }
-                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let text = utf8_buf.push(&buf[..n]);
                         for c in text.chars() {
-                            line_buffer.push(c);
-                            if c == '\n' {
-                                let _ = tx_clone
-                                    .send(StreamMessage::Stderr(line_buffer.clone()))
-                                    .await;
-                                line_buffer.clear();
+                            match c {
+                                '\n' => {
+                                    let clean = ansi::strip_ansi(&line_buffer);
+                                    let _ = tx_clone.send(StreamMessage::Stderr(clean)).await;
+                                    line_buffer.clear();
+                                }
+                                '\r' => { line_buffer.clear(); }
+                                _ => { line_buffer.push(c); }
+                            }
+                        }
+                    }
+                    let remaining = utf8_buf.flush();
+                    if !remaining.is_empty() {
+                        for c in remaining.chars() {
+                            match c {
+                                '\n' => {
+                                    let clean = ansi::strip_ansi(&line_buffer);
+                                    let _ = tx_clone.send(StreamMessage::Stderr(clean)).await;
+                                    line_buffer.clear();
+                                }
+                                '\r' => { line_buffer.clear(); }
+                                _ => { line_buffer.push(c); }
                             }
                         }
                     }
                     if !line_buffer.is_empty() {
-                        let _ = tx_clone.send(StreamMessage::Stderr(line_buffer)).await;
+                        let clean = ansi::strip_ansi(&line_buffer);
+                        let _ = tx_clone.send(StreamMessage::Stderr(clean)).await;
                     }
-                });
-            }
+                }))
+            } else {
+                None
+            };
 
-            // Wait for exit
+            // Wait for the child process to exit
             let exit_code = match child.wait().await {
                 Ok(status) => status.code().unwrap_or(1),
                 Err(_) => 1,
             };
-            *active_pid.write() = None;
 
+            // CRITICAL: Wait for stdout/stderr tasks to finish BEFORE sending Exit.
+            if let Some(handle) = stdout_handle {
+                let _ = handle.await;
+            }
+            if let Some(handle) = stderr_handle {
+                let _ = handle.await;
+            }
+
+            *active_pid.write() = None;
             let _ = tx.send(StreamMessage::Exit(exit_code)).await;
         });
 

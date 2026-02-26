@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
 
 /// Message sent through the streaming channel from command execution.
@@ -20,7 +21,17 @@ pub trait CommandExecutor: Send + Sync {
     async fn execute(&self, cmd: &str) -> Result<String>;
 
     /// Execute a command and return its output as a stream of `StreamMessage`.
-    async fn execute_stream(&self, cmd: &str) -> Result<Receiver<StreamMessage>>;
+    ///
+    /// - `cwd`: Optional working directory for the command.
+    /// - `env`: Optional extra environment variables to inject.
+    /// - `terminal_size`: Optional (cols, rows) for COLUMNS/LINES env vars.
+    async fn execute_stream(
+        &self,
+        cmd: &str,
+        cwd: Option<&str>,
+        env: Option<&HashMap<String, String>>,
+        terminal_size: Option<(u16, u16)>,
+    ) -> Result<Receiver<StreamMessage>>;
 
     /// Get autocompletion suggestions for a given input.
     async fn suggest(&self, input: &str) -> Result<Vec<String>>;

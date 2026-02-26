@@ -1,4 +1,5 @@
 use ratatui::style::Color;
+use std::collections::HashMap;
 use std::time::Instant;
 
 // ── Console Modes ──────────────────────────────────────────────────────────
@@ -297,6 +298,11 @@ pub struct ConsoleState {
     pub username: String,
     pub hostname: String,
     pub cwd: String,
+
+    // Session environment (accumulated via `export VAR=val`)
+    pub env_vars: HashMap<String, String>,
+    /// Previous CWD for `cd -` support
+    pub prev_cwd: Option<String>,
 }
 
 impl Default for ConsoleState {
@@ -348,6 +354,8 @@ impl ConsoleState {
             username,
             hostname,
             cwd,
+            env_vars: HashMap::new(),
+            prev_cwd: None,
         }
     }
 
@@ -458,28 +466,56 @@ impl ConsoleState {
         }
     }
 
-    // ── Input helpers ──────────────────────────────────────────────────
+    // ── Input helpers (char-based cursor) ─────────────────────────────
+    //
+    // `cursor_position` is a CHARACTER offset (not byte offset).
+    // All methods convert between char index and byte index using
+    // `char_indices()` to ensure correct behavior with multi-byte UTF-8.
+
+    /// Convert a char-based cursor position to a byte index in the input buffer.
+    fn cursor_byte_pos(&self) -> usize {
+        self.input_buffer
+            .char_indices()
+            .nth(self.cursor_position)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input_buffer.len())
+    }
+
+    /// Number of characters in the input buffer.
+    fn input_char_count(&self) -> usize {
+        self.input_buffer.chars().count()
+    }
 
     pub fn insert_char(&mut self, c: char) {
-        if self.cursor_position >= self.input_buffer.len() {
+        let byte_pos = self.cursor_byte_pos();
+        if byte_pos >= self.input_buffer.len() {
             self.input_buffer.push(c);
-            self.cursor_position = self.input_buffer.len();
         } else {
-            self.input_buffer.insert(self.cursor_position, c);
-            self.cursor_position += 1;
+            self.input_buffer.insert(byte_pos, c);
         }
+        self.cursor_position += 1;
     }
 
     pub fn backspace(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
-            self.input_buffer.remove(self.cursor_position);
+            let byte_pos = self.cursor_byte_pos();
+            // Find the byte range of the char at this position
+            if let Some((_, ch)) = self.input_buffer.char_indices().nth(self.cursor_position) {
+                self.input_buffer
+                    .drain(byte_pos..byte_pos + ch.len_utf8());
+            }
         }
     }
 
     pub fn delete_char(&mut self) {
-        if self.cursor_position < self.input_buffer.len() {
-            self.input_buffer.remove(self.cursor_position);
+        let char_count = self.input_char_count();
+        if self.cursor_position < char_count {
+            let byte_pos = self.cursor_byte_pos();
+            if let Some((_, ch)) = self.input_buffer.char_indices().nth(self.cursor_position) {
+                self.input_buffer
+                    .drain(byte_pos..byte_pos + ch.len_utf8());
+            }
         }
     }
 
@@ -490,9 +526,67 @@ impl ConsoleState {
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_position < self.input_buffer.len() {
+        if self.cursor_position < self.input_char_count() {
             self.cursor_position += 1;
         }
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.cursor_position = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.cursor_position = self.input_char_count();
+    }
+
+    /// Kill (delete) from cursor to end of line. Returns the killed text.
+    pub fn kill_to_end(&mut self) -> String {
+        let byte_pos = self.cursor_byte_pos();
+        let killed = self.input_buffer[byte_pos..].to_string();
+        self.input_buffer.truncate(byte_pos);
+        killed
+    }
+
+    /// Kill (delete) from start of line to cursor. Returns the killed text.
+    pub fn kill_to_start(&mut self) -> String {
+        let byte_pos = self.cursor_byte_pos();
+        let killed = self.input_buffer[..byte_pos].to_string();
+        self.input_buffer = self.input_buffer[byte_pos..].to_string();
+        self.cursor_position = 0;
+        killed
+    }
+
+    /// Kill (delete) the word before the cursor. Returns the killed text.
+    pub fn kill_word_back(&mut self) -> String {
+        if self.cursor_position == 0 {
+            return String::new();
+        }
+
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut new_pos = self.cursor_position;
+
+        // Skip trailing whitespace
+        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+        // Skip word characters
+        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+
+        // Calculate byte positions
+        let start_byte = self
+            .input_buffer
+            .char_indices()
+            .nth(new_pos)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input_buffer.len());
+        let end_byte = self.cursor_byte_pos();
+
+        let killed = self.input_buffer[start_byte..end_byte].to_string();
+        self.input_buffer.drain(start_byte..end_byte);
+        self.cursor_position = new_pos;
+        killed
     }
 
     pub fn clear_input(&mut self) {
@@ -522,28 +616,34 @@ impl ConsoleState {
         if let Some(ghost) = self.ghost_text.take() {
             // Ghost text represents the full command; replace input with it
             self.input_buffer = ghost;
-            self.cursor_position = self.input_buffer.len();
+            self.cursor_position = self.input_char_count();
         }
     }
 
     /// Accept the next word from the ghost text.
     pub fn accept_ghost_word(&mut self) {
         if let Some(ghost) = &self.ghost_text {
-            // Find the next word boundary in the ghost text after the current input
-            if ghost.len() > self.input_buffer.len() {
-                let remaining = &ghost[self.input_buffer.len()..];
+            let input_chars = self.input_buffer.chars().count();
+            let ghost_chars = ghost.chars().count();
+            if ghost_chars > input_chars {
+                // Get the remaining part of ghost text after current input (char-safe)
+                let remaining: String = ghost.chars().skip(input_chars).collect();
                 // Skip leading spaces, then take until next space
                 let trimmed = remaining.trim_start();
-                let leading_spaces = remaining.len() - trimmed.len();
-                let word_end = trimmed.find(' ').unwrap_or(trimmed.len());
-                let accept_len = leading_spaces + word_end;
+                let leading_spaces = remaining.chars().count() - trimmed.chars().count();
+                let word_end = trimmed
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map(|(i, _)| trimmed[..i].chars().count())
+                    .unwrap_or_else(|| trimmed.chars().count());
+                let accept_char_count = leading_spaces + word_end;
 
-                let to_append = &remaining[..accept_len];
-                self.input_buffer.push_str(to_append);
-                self.cursor_position = self.input_buffer.len();
+                let to_append: String = remaining.chars().take(accept_char_count).collect();
+                self.input_buffer.push_str(&to_append);
+                self.cursor_position = self.input_char_count();
 
                 // If we've consumed all ghost text, clear it
-                if self.input_buffer.len() >= ghost.len() {
+                if self.input_buffer.chars().count() >= ghost_chars {
                     self.ghost_text = None;
                 }
             }

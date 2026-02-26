@@ -42,8 +42,8 @@ chrono = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 
-# PTY support for terminal execution
-portable-pty = "0.8.1"
+# Unicode display width for accurate column calculations
+unicode-width = "0.2"
 async-trait = "0.1.80"
 
 
@@ -78,6 +78,9 @@ windows-sys = { version = "0.52", features = [
 ]}
 enigo = "0.2"
 scrap = "0.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "TUI"

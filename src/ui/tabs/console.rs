@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block as UiBlock, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub fn render(f: &mut Frame, state: &mut AppState, area: Rect) {
     let chunks = Layout::default()
@@ -277,10 +278,14 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         )));
     }
 
-    // Scrolling logic
+    // Scrolling logic — clamp scroll_offset to prevent over-scrolling
     let visible_height = inner.height as usize;
     let content_height = all_lines.len();
     let max_scroll = content_height.saturating_sub(visible_height);
+    // Clamp scroll_offset to the valid range
+    if state.console_state.scroll_offset as usize > max_scroll {
+        state.console_state.scroll_offset = max_scroll as u16;
+    }
     let view_offset = max_scroll.saturating_sub(state.console_state.scroll_offset as usize);
 
     let paragraph = Paragraph::new(all_lines)
@@ -583,8 +588,10 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
 
     // Ghost text: show the remainder of the suggestion in dark gray
     if let Some(ghost) = &state.console_state.ghost_text {
-        if ghost.len() > input.len() && ghost.starts_with(input.as_str()) {
-            let remainder = &ghost[input.len()..];
+        let input_char_count = input.chars().count();
+        let ghost_char_count = ghost.chars().count();
+        if ghost_char_count > input_char_count && ghost.starts_with(input.as_str()) {
+            let remainder: String = ghost.chars().skip(input_char_count).collect();
             spans.push(Span::styled(
                 remainder,
                 Style::default().fg(Color::Rgb(80, 80, 100)),
@@ -597,7 +604,13 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
 
     // Render cursor if in insert mode
     if state.console_state.mode == ConsoleMode::Insert {
-        let cursor_x = inner.x + prompt.len() as u16 + state.console_state.cursor_position as u16;
+        // Compute visual cursor position using unicode display width
+        let text_before_cursor: String = input.chars()
+            .take(state.console_state.cursor_position)
+            .collect();
+        let cursor_x = inner.x
+            + UnicodeWidthStr::width(prompt) as u16
+            + UnicodeWidthStr::width(text_before_cursor.as_str()) as u16;
         let cursor_y = inner.y;
 
         if cursor_x < inner.x + inner.width {

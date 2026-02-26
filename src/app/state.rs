@@ -722,7 +722,7 @@ impl AppState {
     }
 
     fn allow_text_input(&mut self) -> bool {
-        Self::allow_with_throttle(&mut self.last_text_input, Duration::from_millis(35))
+        Self::allow_with_throttle(&mut self.last_text_input, Duration::from_millis(8))
     }
 
     fn suggested_chat_prompt_height(&self, rows: u16) -> u16 {
@@ -1325,6 +1325,255 @@ impl AppState {
         });
     }
 
+    // ── Shell builtin interception ──────────────────────────────────────
+
+    /// Try to intercept a shell builtin command. Returns `Some(true)` if handled,
+    /// `Some(false)` should never happen (reserved), `None` if not a builtin.
+    fn try_intercept_builtin(&mut self, cmd: &str) -> Option<bool> {
+        let trimmed = cmd.trim();
+        let max_lines = self.config.read().console.max_output_lines;
+
+        // ── cd ─────────────────────────────────────────────────────────
+        if trimmed == "cd" || trimmed.starts_with("cd ") {
+            let arg = trimmed.strip_prefix("cd").unwrap_or("").trim();
+            let target = if arg.is_empty() {
+                // cd with no args → home directory
+                dirs::home_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.console_state.cwd.clone())
+            } else if arg == "-" {
+                // cd - → previous directory
+                match &self.console_state.prev_cwd {
+                    Some(prev) => prev.clone(),
+                    None => {
+                        let block_id = self.console_state.start_command(trimmed.to_string());
+                        if let Some(block) = self.console_state.get_block_mut(block_id) {
+                            block.push_line(
+                                crate::app::console_state::OutputLine::stderr(
+                                    "cd: OLDPWD not set",
+                                ),
+                                max_lines,
+                            );
+                            block.complete(1);
+                        }
+                        self.console_state.active_block_id = None;
+                        return Some(true);
+                    }
+                }
+            } else if arg.starts_with('~') {
+                // cd ~/path → expand home
+                let home = dirs::home_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~".to_string());
+                let rest = arg.strip_prefix('~').unwrap_or("");
+                format!("{}{}", home, rest)
+            } else if arg.starts_with('/') || arg.starts_with('\\') {
+                // Absolute path
+                arg.to_string()
+            } else {
+                // Relative path — resolve from current CWD
+                let base = std::path::Path::new(&self.console_state.cwd);
+                base.join(arg).display().to_string()
+            };
+
+            // Try to canonicalize
+            let resolved = std::path::Path::new(&target);
+            match std::fs::canonicalize(resolved) {
+                Ok(canonical) => {
+                    let new_cwd = canonical.display().to_string();
+                    let old_cwd = self.console_state.cwd.clone();
+                    self.console_state.prev_cwd = Some(old_cwd);
+                    self.console_state.cwd = new_cwd.clone();
+
+                    let block_id = self.console_state.start_command(trimmed.to_string());
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.push_line(
+                            crate::app::console_state::OutputLine::stdout(new_cwd),
+                            max_lines,
+                        );
+                        block.complete(0);
+                    }
+                    self.console_state.active_block_id = None;
+                }
+                Err(e) => {
+                    let block_id = self.console_state.start_command(trimmed.to_string());
+                    if let Some(block) = self.console_state.get_block_mut(block_id) {
+                        block.push_line(
+                            crate::app::console_state::OutputLine::stderr(format!(
+                                "cd: {}: {}",
+                                target, e
+                            )),
+                            max_lines,
+                        );
+                        block.complete(1);
+                    }
+                    self.console_state.active_block_id = None;
+                }
+            }
+            return Some(true);
+        }
+
+        // ── export ─────────────────────────────────────────────────────
+        if trimmed.starts_with("export ") {
+            let assignment = trimmed.strip_prefix("export ").unwrap_or("").trim();
+            let block_id = self.console_state.start_command(trimmed.to_string());
+
+            if let Some((key, value)) = assignment.split_once('=') {
+                let key = key.trim().to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                self.console_state.env_vars.insert(key.clone(), value.clone());
+                if let Some(block) = self.console_state.get_block_mut(block_id) {
+                    block.push_line(
+                        crate::app::console_state::OutputLine::stdout(format!(
+                            "{}={}",
+                            key, value
+                        )),
+                        max_lines,
+                    );
+                    block.complete(0);
+                }
+            } else {
+                if let Some(block) = self.console_state.get_block_mut(block_id) {
+                    block.push_line(
+                        crate::app::console_state::OutputLine::stderr(
+                            "export: usage: export VAR=value",
+                        ),
+                        max_lines,
+                    );
+                    block.complete(1);
+                }
+            }
+            self.console_state.active_block_id = None;
+            return Some(true);
+        }
+
+        // ── unset ──────────────────────────────────────────────────────
+        if trimmed.starts_with("unset ") {
+            let var_name = trimmed.strip_prefix("unset ").unwrap_or("").trim();
+            let block_id = self.console_state.start_command(trimmed.to_string());
+            self.console_state.env_vars.remove(var_name);
+            if let Some(block) = self.console_state.get_block_mut(block_id) {
+                block.complete(0);
+            }
+            self.console_state.active_block_id = None;
+            return Some(true);
+        }
+
+        // ── clear ──────────────────────────────────────────────────────
+        if trimmed == "clear" {
+            self.console_state.blocks.clear();
+            self.console_state.scroll_offset = 0;
+            self.console_state.selected_block = None;
+            return Some(true);
+        }
+
+        // ── exit ───────────────────────────────────────────────────────
+        if trimmed == "exit" || trimmed.starts_with("exit ") {
+            let block_id = self.console_state.start_command(trimmed.to_string());
+            if let Some(block) = self.console_state.get_block_mut(block_id) {
+                block.push_line(
+                    crate::app::console_state::OutputLine::stderr(
+                        "exit: not supported in embedded console (use Ctrl+Q to quit the application)",
+                    ),
+                    max_lines,
+                );
+                block.complete(1);
+            }
+            self.console_state.active_block_id = None;
+            return Some(true);
+        }
+
+        // ── source / . / alias ─────────────────────────────────────────
+        if trimmed == "source"
+            || trimmed.starts_with("source ")
+            || (trimmed.starts_with(". ") && trimmed.len() > 2)
+            || trimmed.starts_with("alias ")
+            || trimmed == "alias"
+        {
+            let block_id = self.console_state.start_command(trimmed.to_string());
+            if let Some(block) = self.console_state.get_block_mut(block_id) {
+                block.push_line(
+                    crate::app::console_state::OutputLine::stderr(
+                        "Shell builtins like source/alias only persist per-command in the embedded console.",
+                    ),
+                    max_lines,
+                );
+                block.push_line(
+                    crate::app::console_state::OutputLine::stderr(
+                        "Use 'export VAR=val' to set session environment variables.",
+                    ),
+                    max_lines,
+                );
+                block.complete(1);
+            }
+            self.console_state.active_block_id = None;
+            return Some(true);
+        }
+
+        None // Not a builtin — proceed with normal execution
+    }
+
+    // ── Interactive command detection ──────────────────────────────────
+
+    /// Check if a command would start an interactive/TUI program that cannot
+    /// work without a proper PTY (pseudo-terminal).
+    fn is_interactive_command(cmd: &str) -> bool {
+        let trimmed = cmd.trim();
+        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+        // Exact matches for known interactive programs
+        const INTERACTIVE_PROGRAMS: &[&str] = &[
+            "vim", "nvim", "vi", "nano", "emacs", "micro", "joe", "pico",
+            "less", "more", "most",
+            "top", "htop", "btop", "atop", "glances", "nmon",
+            "python", "python3", "ipython", "node", "irb", "ghci", "lua",
+            "bash", "zsh", "fish", "sh", "csh", "tcsh", "ksh",
+            "ssh", "telnet", "ftp", "sftp",
+            "mysql", "psql", "sqlite3", "mongo", "redis-cli",
+            "tmux", "screen", "byobu",
+            "mc", "ranger", "nnn", "lf", "vifm",
+            "gdb", "lldb",
+        ];
+
+        if INTERACTIVE_PROGRAMS.contains(&first_word) {
+            return true;
+        }
+
+        // Pattern matches for specific argument combinations
+        if first_word == "sudo" {
+            let args: Vec<&str> = trimmed.split_whitespace().collect();
+            // sudo -i, sudo -s, sudo su, sudo bash, etc.
+            if args.len() >= 2 {
+                let second = args[1];
+                if second == "-i" || second == "-s" || second == "su" {
+                    return true;
+                }
+                // sudo <interactive_program>
+                if INTERACTIVE_PROGRAMS.contains(&second) {
+                    return true;
+                }
+            }
+            // bare "sudo" with no args
+            if args.len() == 1 {
+                return true;
+            }
+        }
+
+        if first_word == "su" {
+            let args: Vec<&str> = trimmed.split_whitespace().collect();
+            // bare "su" or "su -" starts interactive shell
+            if args.len() <= 2 {
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn spawn_console_command(&mut self, command: String) {
         if self.console_state.is_running() {
             return;
@@ -1334,11 +1583,20 @@ impl AppState {
 
         let executor = self.console_executor.clone();
 
+        // Capture console state for the spawned task
+        let cwd = self.console_state.cwd.clone();
+        let env = self.console_state.env_vars.clone();
+        let terminal_size = Some(self.terminal_size);
+
         // Setup channels for streaming output
         let tx = self.async_tx.clone();
 
         tokio::spawn(async move {
-            match executor.execute_stream(&command).await {
+            let env_ref = if env.is_empty() { None } else { Some(&env) };
+            match executor
+                .execute_stream(&command, Some(&cwd), env_ref, terminal_size)
+                .await
+            {
                 Ok(mut rx) => {
                     while let Some(msg) = rx.recv().await {
                         match msg {
@@ -1678,26 +1936,33 @@ impl AppState {
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         let is_initial_press = matches!(key.kind, KeyEventKind::Press);
-        // Handle Ctrl+C to quit
+        // Handle Ctrl+C
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if is_initial_press
-                && self.tab_manager.current() == TabType::Console
-                && self.console_state.is_running()
-            {
-                if let Some(block_id) = self.console_state.active_block_id {
-                    let msg = match self.console_executor.interrupt().await {
-                        Ok(()) => "Interrupt signal sent to active command.".to_string(),
-                        Err(e) => format!("Failed to interrupt active command: {}", e),
-                    };
-                    if let Some(block) = self.console_state.get_block_mut(block_id) {
-                        let max_lines = self.config.read().console.max_output_lines;
-                        block.push_line(
-                            crate::app::console_state::OutputLine::system(msg),
-                            max_lines,
-                        );
+            if is_initial_press && self.tab_manager.current() == TabType::Console {
+                if self.console_state.is_running() {
+                    // Interrupt the running command
+                    if let Some(block_id) = self.console_state.active_block_id {
+                        let msg = match self.console_executor.interrupt().await {
+                            Ok(()) => "Interrupt signal sent to active command.".to_string(),
+                            Err(e) => format!("Failed to interrupt active command: {}", e),
+                        };
+                        if let Some(block) = self.console_state.get_block_mut(block_id) {
+                            let max_lines = self.config.read().console.max_output_lines;
+                            block.push_line(
+                                crate::app::console_state::OutputLine::system(msg),
+                                max_lines,
+                            );
+                        }
                     }
+                    return Ok(true);
+                } else if !self.console_state.input_buffer.is_empty() {
+                    // Clear the input buffer when no command is running
+                    self.console_state.clear_input();
+                    self.console_state.clear_ghost_text();
+                    self.console_state.reset_history_nav();
+                    self.console_state.highlighted_input.clear();
+                    return Ok(true);
                 }
-                return Ok(true);
             }
             return Ok(false);
         }
@@ -1788,6 +2053,43 @@ impl AppState {
                         return Ok(true);
                     }
 
+                    // ── Readline shortcuts ──────────────────────────────
+                    if is_initial_press && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('a') => {
+                                self.console_state.move_cursor_home();
+                                return Ok(true);
+                            }
+                            KeyCode::Char('e') => {
+                                self.console_state.move_cursor_end();
+                                return Ok(true);
+                            }
+                            KeyCode::Char('k') => {
+                                let _ = self.console_state.kill_to_end();
+                                self.refresh_ghost_text();
+                                return Ok(true);
+                            }
+                            KeyCode::Char('u') => {
+                                let _ = self.console_state.kill_to_start();
+                                self.refresh_ghost_text();
+                                return Ok(true);
+                            }
+                            KeyCode::Char('w') => {
+                                let _ = self.console_state.kill_word_back();
+                                self.refresh_ghost_text();
+                                return Ok(true);
+                            }
+                            KeyCode::Char('l') => {
+                                // Ctrl+L: clear screen (like bash)
+                                self.console_state.blocks.clear();
+                                self.console_state.scroll_offset = 0;
+                                self.console_state.selected_block = None;
+                                return Ok(true);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Esc => {
                             if is_initial_press {
@@ -1797,8 +2099,19 @@ impl AppState {
                             }
                             return Ok(true);
                         }
+                        KeyCode::Home => {
+                            if is_initial_press {
+                                self.console_state.move_cursor_home();
+                            }
+                            return Ok(true);
+                        }
+                        KeyCode::End => {
+                            if is_initial_press {
+                                self.console_state.move_cursor_end();
+                            }
+                            return Ok(true);
+                        }
                         KeyCode::Char(c) => {
-                            // Alt+Right captured as Char (depends on terminal)
                             if is_initial_press && self.allow_text_input() {
                                 self.console_state.reset_history_nav();
                                 self.console_state.insert_char(c);
@@ -1919,6 +2232,41 @@ impl AppState {
                                             }
                                             self.console_state.active_block_id = None;
                                         }
+                                        return Ok(true);
+                                    }
+
+                                    // ── Shell builtin interception ─────────────────────
+                                    if let Some(handled) = self.try_intercept_builtin(&cmd) {
+                                        if handled {
+                                            return Ok(true);
+                                        }
+                                    }
+
+                                    // ── Interactive command blocking ───────────────────
+                                    if Self::is_interactive_command(&cmd) {
+                                        let block_id = self
+                                            .console_state
+                                            .start_command(cmd.clone());
+                                        if let Some(block) =
+                                            self.console_state.get_block_mut(block_id)
+                                        {
+                                            let max_lines =
+                                                self.config.read().console.max_output_lines;
+                                            block.push_line(
+                                                crate::app::console_state::OutputLine::stderr(
+                                                    "⚠ Interactive commands are not supported in the embedded console."
+                                                ),
+                                                max_lines,
+                                            );
+                                            block.push_line(
+                                                crate::app::console_state::OutputLine::stderr(
+                                                    "  Use a full terminal emulator for interactive programs."
+                                                ),
+                                                max_lines,
+                                            );
+                                            block.complete(1);
+                                        }
+                                        self.console_state.active_block_id = None;
                                         return Ok(true);
                                     }
 
