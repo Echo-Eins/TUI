@@ -1,4 +1,4 @@
-﻿use ratatui::{
+use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -62,11 +62,11 @@ fn render_full(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(8), // Interface details (per interface)
-            Constraint::Length(8), // Traffic graphs (Download/Upload)
-            Constraint::Length(9), // Diagnostics
-            Constraint::Min(8),    // Active connections and bandwidth consumers
+            Constraint::Length(3),  // Header
+            Constraint::Length(8),  // Interface details (per interface)
+            Constraint::Length(8),  // Traffic graphs (Download/Upload)
+            Constraint::Length(13), // Diagnostics
+            Constraint::Min(6),     // Active connections and bandwidth consumers
         ])
         .split(area);
 
@@ -108,10 +108,10 @@ fn render_compact(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(6), // Quick stats
-            Constraint::Length(8), // Diagnostics
-            Constraint::Min(8),    // Connections (compact)
+            Constraint::Length(3),  // Header
+            Constraint::Length(6),  // Quick stats
+            Constraint::Length(11), // Diagnostics
+            Constraint::Min(7),     // Connections (compact)
         ])
         .split(area);
 
@@ -600,8 +600,24 @@ fn render_diagnostics_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, them
         None => "Idle".to_string(),
     };
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Diagnostics")
+        .border_style(Style::default().fg(theme.network_color));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 3 || inner.height < 3 {
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(2)])
+        .split(inner);
+
+    let mut summary_lines = Vec::new();
+    summary_lines.push(Line::from(vec![
         Span::styled("Tool: ", Style::default().fg(Color::Gray)),
         Span::styled(
             diagnostic_tool_label(ui.selected_tool),
@@ -622,7 +638,7 @@ fn render_diagnostics_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, them
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
-    lines.push(Line::from(vec![
+    summary_lines.push(Line::from(vec![
         Span::styled("Target: ", Style::default().fg(Color::Gray)),
         Span::styled(
             if ui.target_input.is_empty() {
@@ -638,57 +654,141 @@ fn render_diagnostics_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, them
             Style::default().fg(Color::Magenta),
         ),
     ]));
-    lines.push(Line::from(vec![Span::styled(
-        "Keys: E Resolve | D DNS | P Ping | T Trace | M MTU | O Ports | N NAT | Y Export | I Edit | Enter Run | X Cancel | K Clear",
-        Style::default().fg(Color::DarkGray),
-    )]));
-    lines.push(Line::from(vec![
+    summary_lines.push(Line::from(vec![
+        Span::styled("Hint: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            diagnostic_input_hint(ui.selected_tool),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    if let Some(until) = ui.nat_mapping_confirm_until {
+        if until > std::time::Instant::now() {
+            summary_lines.push(Line::from(vec![
+                Span::styled("Confirm: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    "Press Enter again to run NAT Mapping Test (armed)",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+    }
+    summary_lines.push(Line::from(vec![
         Span::styled("Last: ", Style::default().fg(Color::Gray)),
         Span::styled(ui.last_summary.clone(), Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "Details: {}/{}",
+                ui.detail_scroll.saturating_add(1),
+                ui.detail_lines.len().max(1)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     if let Some(error) = &ui.last_error {
-        lines.push(Line::from(vec![
+        summary_lines.push(Line::from(vec![
             Span::styled("Error: ", Style::default().fg(Color::Red)),
             Span::styled(error.clone(), Style::default().fg(Color::Red)),
         ]));
     }
 
-    let recent_logs = ui
-        .event_log
-        .iter()
-        .rev()
-        .take(3)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
-    for entry in recent_logs {
-        lines.push(Line::from(vec![
-            Span::styled("* ", Style::default().fg(Color::DarkGray)),
-            Span::styled(entry, Style::default().fg(Color::Gray)),
-        ]));
+    let summary = Paragraph::new(summary_lines);
+    f.render_widget(summary, sections[0]);
+
+    let mut detail_lines = Vec::new();
+    if ui.detail_lines.is_empty() {
+        detail_lines.push(Line::from(vec![Span::styled(
+            "No detailed result yet. Run a diagnostic.",
+            Style::default().fg(Color::DarkGray),
+        )]));
+    } else {
+        for line in &ui.detail_lines {
+            detail_lines.push(Line::from(vec![Span::styled(
+                line.clone(),
+                Style::default().fg(Color::White),
+            )]));
+        }
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Diagnostics")
-        .border_style(Style::default().fg(theme.network_color));
+    if !ui.event_log.is_empty() {
+        detail_lines.push(Line::from(""));
+        detail_lines.push(Line::from(vec![Span::styled(
+            "Recent events:",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        for event in ui
+            .event_log
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            detail_lines.push(Line::from(vec![
+                Span::styled("- ", Style::default().fg(Color::DarkGray)),
+                Span::styled((*event).clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
 
-    let paragraph = Paragraph::new(lines).block(block);
-    f.render_widget(paragraph, area);
+    let max_scroll = detail_lines
+        .len()
+        .saturating_sub(sections[1].height.saturating_sub(1) as usize);
+    let scroll = ui.detail_scroll.min(max_scroll).min(u16::MAX as usize) as u16;
+    let details = Paragraph::new(detail_lines)
+        .scroll((scroll, 0))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(details, sections[1]);
 }
 
 fn diagnostic_tool_label(tool: NetworkDiagnosticTool) -> &'static str {
     match tool {
         NetworkDiagnosticTool::Resolve => "Resolve",
         NetworkDiagnosticTool::DnsExplain => "DNS Explain",
+        NetworkDiagnosticTool::RouteInspect => "Route Inspect",
+        NetworkDiagnosticTool::NicDeepInfo => "NIC Deep Info",
+        NetworkDiagnosticTool::ConnectionLab => "Connection Lab",
         NetworkDiagnosticTool::Ping => "Ping",
         NetworkDiagnosticTool::Trace => "Trace",
         NetworkDiagnosticTool::MtuProbe => "MTU Probe",
         NetworkDiagnosticTool::PortScan => "Port Scan",
         NetworkDiagnosticTool::NatCapability => "NAT Capability",
+        NetworkDiagnosticTool::NatMappingTest => "NAT Mapping Test",
         NetworkDiagnosticTool::ExportReport => "Export Report",
+    }
+}
+
+fn diagnostic_input_hint(tool: NetworkDiagnosticTool) -> &'static str {
+    match tool {
+        NetworkDiagnosticTool::Resolve => "host/IP (example.org, 1.1.1.1)",
+        NetworkDiagnosticTool::DnsExplain => "input ignored; inspects system DNS stack",
+        NetworkDiagnosticTool::RouteInspect => {
+            "optional target for `ip route get` (default: inspect tables only)"
+        }
+        NetworkDiagnosticTool::NicDeepInfo => {
+            "optional interface name (eth0, wlan0); empty = all interfaces"
+        }
+        NetworkDiagnosticTool::ConnectionLab => {
+            "optional filters: `proto=tcp state=estab limit=200`"
+        }
+        NetworkDiagnosticTool::Ping => {
+            "target [profile=quick|latency|loss] [count=] [timeout=] [interval_ms=] [continuous] [deadline=]"
+        }
+        NetworkDiagnosticTool::Trace => {
+            "target [proto=icmp|udp|tcp] [fallback=on|off] [hops=] [timeout=] [q=] [port=] [resolve=on]"
+        }
+        NetworkDiagnosticTool::MtuProbe => "target host/IP for PMTU probing",
+        NetworkDiagnosticTool::PortScan => "host[:ports], example.org:22,80,443",
+        NetworkDiagnosticTool::NatCapability => "input ignored; probes UPnP/NAT-PMP/PCP clients",
+        NetworkDiagnosticTool::NatMappingTest => {
+            "optional: `tcp 8080 8080 120` (proto in_port out_port ttl), two-step confirm"
+        }
+        NetworkDiagnosticTool::ExportReport => "input ignored; exports recent diagnostics report",
     }
 }
