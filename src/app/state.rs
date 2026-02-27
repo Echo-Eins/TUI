@@ -768,7 +768,10 @@ impl AppState {
         if self.network_ui_state.event_log.len() >= MAX_LOG_LINES {
             self.network_ui_state.event_log.pop_front();
         }
-        self.network_ui_state.event_log.push_back(line);
+        let ts = Local::now().format("%H:%M:%S").to_string();
+        self.network_ui_state
+            .event_log
+            .push_back(format!("[{ts}] {line}"));
     }
 
     #[cfg(target_os = "linux")]
@@ -5333,89 +5336,92 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(format!("query: {}", r.query));
             lines.push(format!("host: {}", r.host));
             if r.addresses.is_empty() {
-                lines.push("resolve returned no addresses".to_string());
+                lines.push("addresses: none returned".to_string());
             } else {
-                lines.push(format!("addresses: {}", r.addresses.join(", ")));
+                lines.push(format!("count: {} addresses", r.addresses.len()));
+                for (i, addr) in r.addresses.iter().enumerate() {
+                    lines.push(format!("  [{}] {}", i + 1, addr));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::DnsExplain(r) => {
             lines.push(format!("resolver mode: {}", r.resolver_mode));
             lines.push(format!("resolv.conf: {}", r.resolv_conf_path));
             if let Some(mode) = &r.network_manager_dns_mode {
-                lines.push(format!("NetworkManager dns mode: {mode}"));
+                lines.push(format!("NM dns mode: {mode}"));
             }
             if !r.dns_servers.is_empty() {
-                let dns = r
-                    .dns_servers
-                    .iter()
-                    .map(|entry| format!("{} ({})", entry.address, entry.source))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("dns servers: {dns}"));
+                lines.push(format!("dns servers: {} configured", r.dns_servers.len()));
+                for entry in &r.dns_servers {
+                    lines.push(format!("  {} (source: {})", entry.address, entry.source));
+                }
             }
             if !r.search_domains.is_empty() {
                 lines.push(format!("search domains: {}", r.search_domains.join(", ")));
             }
             if !r.conflicts.is_empty() {
-                lines.push(format!("conflicts: {}", r.conflicts.join(" | ")));
+                lines.push(format!("conflicts: {} found", r.conflicts.len()));
+                for c in &r.conflicts {
+                    lines.push(format!("  {c}"));
+                }
             }
             if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
             if let Some(egress) = &r.egress {
                 lines.push(format!("egress: {}", egress.output));
             }
-            lines.push(format!(
-                "defaults: {} | policy rules: {}",
-                r.default_routes.len(),
-                r.policy_rules.len()
-            ));
-            if !r.default_routes.is_empty() {
-                let preview = r
-                    .default_routes
-                    .iter()
-                    .take(4)
-                    .map(|route| {
-                        format!(
-                            "{} via {} dev {} metric {}",
-                            route.family,
-                            route
-                                .gateway
-                                .clone()
-                                .unwrap_or_else(|| "direct".to_string()),
-                            route.interface.clone().unwrap_or_else(|| "n/a".to_string()),
-                            route
-                                .metric
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "n/a".to_string())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                lines.push(format!("default routes: {preview}"));
-            }
-            if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
-            }
-        }
-        linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
-            lines.push(format!("interfaces inspected: {}", r.interfaces.len()));
-            for iface in r.interfaces.iter().take(6) {
+            lines.push(format!("default routes: {}", r.default_routes.len()));
+            lines.push(format!("policy rules: {}", r.policy_rules.len()));
+            for (i, route) in r.default_routes.iter().enumerate().take(6) {
                 lines.push(format!(
-                    "{}: {} speed={} driver={} fw={} mtu={} offloads={}",
-                    iface.interface,
-                    iface.status,
-                    iface.speed.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.firmware.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.mtu,
-                    iface.offloads.len()
+                    "  route[{}]: {} via {} dev {} metric={}",
+                    i,
+                    route.family,
+                    route.gateway.clone().unwrap_or_else(|| "direct".to_string()),
+                    route.interface.clone().unwrap_or_else(|| "n/a".to_string()),
+                    route.metric.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string())
                 ));
             }
             if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
+            lines.push(format!("interfaces: {}", r.interfaces.len()));
+            for iface in r.interfaces.iter().take(8) {
+                lines.push(format!(
+                    "{}: {}",
+                    iface.interface,
+                    iface.status,
+                ));
+                lines.push(format!(
+                    "  speed={} driver={} mtu={}",
+                    iface.speed.clone().unwrap_or_else(|| "n/a".to_string()),
+                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string()),
+                    iface.mtu,
+                ));
+                if let Some(fw) = &iface.firmware {
+                    lines.push(format!("  firmware={fw}"));
+                }
+                if !iface.offloads.is_empty() {
+                    let offload_str = iface.offloads.iter()
+                        .map(|o| format!("{}={}", o.name, if o.enabled { "on" } else { "off" }))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push(format!("  offloads: {}", offload_str));
+                }
+            }
+            if !r.warnings.is_empty() {
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
@@ -5424,82 +5430,73 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 .iter()
                 .filter(|entry| entry.state.eq_ignore_ascii_case("ESTAB"))
                 .count();
-            lines.push(format!(
-                "entries={} established={} permission_limited={}",
-                r.entries.len(),
-                established,
-                r.permission_limited
-            ));
-            if let Some(top) = r.entries.first() {
+            let listen = r
+                .entries
+                .iter()
+                .filter(|entry| entry.state.eq_ignore_ascii_case("LISTEN"))
+                .count();
+            lines.push(format!("total entries: {}", r.entries.len()));
+            lines.push(format!("established: {}", established));
+            lines.push(format!("listening: {}", listen));
+            lines.push(format!("permission limited: {}", r.permission_limited));
+            lines.push(String::new());
+            for entry in r.entries.iter().take(12) {
+                let proc_name = entry.process_name.clone().unwrap_or_else(|| "?".to_string());
+                let pid = entry.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
                 lines.push(format!(
-                    "top={} pid={} {}:{} -> {}:{}",
-                    top.process_name
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    top.pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    top.local_address,
-                    top.local_port,
-                    top.remote_address,
-                    top.remote_port
-                ));
-            }
-            for entry in r.entries.iter().take(5) {
-                lines.push(format!(
-                    "{} {}:{} -> {}:{} state={} pid={}",
+                    "{} [{}] pid={} {}:{} -> {}:{} state={}",
+                    proc_name,
                     entry.protocol,
+                    pid,
                     entry.local_address,
                     entry.local_port,
                     entry.remote_address,
                     entry.remote_port,
                     entry.state,
-                    entry
-                        .pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "n/a".to_string())
                 ));
             }
+            if r.entries.len() > 12 {
+                lines.push(format!("  ... and {} more entries", r.entries.len() - 12));
+            }
             if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::Ping(r) => {
+            lines.push(format!("target: {}", r.target));
+            lines.push(format!("profile: {:?}", r.profile));
+            lines.push(format!("mode: {}", if r.continuous { "continuous" } else { "counted" }));
+            lines.push(format!("transmitted: {}", r.transmitted));
+            lines.push(format!("received: {}", r.received));
+            lines.push(format!("loss: {:.1}%", r.packet_loss_percent));
+            lines.push(format!("samples: {}", r.samples_collected));
+            lines.push(String::new());
             lines.push(format!(
-                "target={} profile={:?} mode={}",
-                r.target,
-                r.profile,
-                if r.continuous {
-                    "continuous"
-                } else {
-                    "counted"
-                }
-            ));
+                "min: {} ms", fmt_opt_ms(r.min_latency_ms)));
             lines.push(format!(
-                "tx={} rx={} loss={:.1}% samples={}",
-                r.transmitted, r.received, r.packet_loss_percent, r.samples_collected
-            ));
+                "avg: {} ms", fmt_opt_ms(r.avg_latency_ms)));
             lines.push(format!(
-                "latency min={} avg={} p50={} p95={} p99={} max={} ms",
-                fmt_opt_ms(r.min_latency_ms),
-                fmt_opt_ms(r.avg_latency_ms),
-                fmt_opt_ms(r.p50_latency_ms),
-                fmt_opt_ms(r.p95_latency_ms),
-                fmt_opt_ms(r.p99_latency_ms),
-                fmt_opt_ms(r.max_latency_ms),
-            ));
-            lines.push(format!("jitter={} ms", fmt_opt_ms(r.jitter_ms)));
+                "p50: {} ms", fmt_opt_ms(r.p50_latency_ms)));
+            lines.push(format!(
+                "p95: {} ms", fmt_opt_ms(r.p95_latency_ms)));
+            lines.push(format!(
+                "p99: {} ms", fmt_opt_ms(r.p99_latency_ms)));
+            lines.push(format!(
+                "max: {} ms", fmt_opt_ms(r.max_latency_ms)));
+            lines.push(format!(
+                "jitter: {} ms", fmt_opt_ms(r.jitter_ms)));
         }
         linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
-            lines.push(format!(
-                "target={} requested={:?} used={:?} fallback={} reached={}",
-                r.target, r.requested_protocol, r.used_protocol, r.fallback_used, r.reached_target
-            ));
-            lines.push(format!(
-                "hops={} timeout_ratio={:.2}",
-                r.hops.len(),
-                r.timeout_ratio
-            ));
+            lines.push(format!("target: {}", r.target));
+            lines.push(format!("protocol requested: {:?}", r.requested_protocol));
+            lines.push(format!("protocol used: {:?}", r.used_protocol));
+            lines.push(format!("fallback used: {}", r.fallback_used));
+            lines.push(format!("reached target: {}", r.reached_target));
+            lines.push(format!("total hops: {}", r.hops.len()));
+            lines.push(format!("timeout ratio: {:.2}", r.timeout_ratio));
+            lines.push(String::new());
             for attempt in r.attempts.iter().take(4) {
                 lines.push(format!(
                     "attempt {:?}: hops={} timeouts={} reached={}{}",
@@ -5514,78 +5511,155 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                         .unwrap_or_default()
                 ));
             }
-            for hop in r.hops.iter().take(10) {
+            lines.push(String::new());
+            for hop in r.hops.iter().take(30) {
                 let endpoint = hop
                     .host
                     .as_ref()
                     .or(hop.address.as_ref())
                     .cloned()
                     .unwrap_or_else(|| "*".to_string());
+                let rtt_str = if hop.rtt_ms.is_empty() {
+                    "*".to_string()
+                } else {
+                    let avg = hop.rtt_ms.iter().sum::<f32>() / hop.rtt_ms.len() as f32;
+                    format!("{:.1}ms", avg)
+                };
+                let flags = format!("{}{}",
+                    if hop.timed_out { " !T" } else { "" },
+                    if hop.blocked_suspected { " !B" } else { "" },
+                );
                 lines.push(format!(
-                    "hop {:02}: {} rtt={:?} probes={}/{} timeout={} blocked={}",
+                    "hop {:02}  {:<36} {:>8}  {}/{} probes{}",
                     hop.hop,
                     endpoint,
-                    hop.rtt_ms,
+                    rtt_str,
                     hop.probes_responded,
                     hop.probes_sent,
-                    hop.timed_out,
-                    hop.blocked_suspected
+                    flags,
                 ));
             }
             if !r.blocked_indicators.is_empty() {
-                lines.push(format!(
-                    "blocked indicators: {}",
-                    r.blocked_indicators.join(" | ")
-                ));
+                lines.push(String::new());
+                lines.push(format!("blocked indicators: {}", r.blocked_indicators.join(" | ")));
             }
             if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::MtuProbe(r) => {
+            lines.push(format!("target: {}", r.target));
+            match r.path_mtu {
+                Some(pmtu) => lines.push(format!("path MTU: {} bytes", pmtu)),
+                None => lines.push("path MTU: could not determine".to_string()),
+            }
+            if !r.interfaces.is_empty() {
+                lines.push(String::new());
+                lines.push("Interface MTU values:".to_string());
+                for iface_mtu in &r.interfaces {
+                    lines.push(format!(
+                        "  {} ({}) ipv4={} mtu={}",
+                        iface_mtu.interface, iface_mtu.status, iface_mtu.ipv4, iface_mtu.mtu
+                    ));
+                }
+            }
             if let Some(warning) = &r.warning {
                 lines.push(format!("warning: {warning}"));
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::PortScan(r) => {
+            lines.push(format!("target: {}", r.target));
+            lines.push(format!("ports scanned: {}", r.scanned_ports.len()));
+            lines.push(format!("duration: {} ms", r.duration_ms));
+            lines.push(String::new());
             if !r.open_ports.is_empty() {
-                lines.push(format!("open ports: {:?}", r.open_ports));
+                lines.push(format!("open ports: {} found", r.open_ports.len()));
+                for port in &r.open_ports {
+                    let svc = well_known_port_service(*port);
+                    lines.push(format!("  {} {}", port, svc));
+                }
+            } else {
+                lines.push("open ports: none".to_string());
+            }
+            let closed: Vec<u16> = r
+                .scanned_ports
+                .iter()
+                .filter(|p| !r.open_ports.contains(p))
+                .copied()
+                .collect();
+            if !closed.is_empty() {
+                lines.push(format!("closed/filtered: {} ports", closed.len()));
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
-            let methods = r
-                .methods
-                .iter()
-                .map(|m| format!("{}={:?}", m.method, m.state))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!("methods: {methods}"));
+            lines.push("NAT traversal methods:".to_string());
+            for m in &r.methods {
+                lines.push(format!("  {} = {:?}", m.method, m.state));
+            }
             if !r.warnings.is_empty() {
-                lines.push(format!("warnings: {}", r.warnings.join(" | ")));
+                lines.push(String::new());
+                for w in &r.warnings {
+                    lines.push(format!("warning: {w}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::MappingTest(r) => {
-            lines.push(format!(
-                "{} mapping {} -> {} created={} listed={} removed={}",
+            lines.push(format!("protocol: {}",
                 match r.protocol {
                     linux_netdiag::MappingProtocol::Tcp => "TCP",
                     linux_netdiag::MappingProtocol::Udp => "UDP",
-                },
-                r.external_port,
-                r.internal_port,
-                r.created,
-                r.visible_in_gateway_table,
-                r.removed
+                }
             ));
+            lines.push(format!("external port: {}", r.external_port));
+            lines.push(format!("internal port: {}", r.internal_port));
+            lines.push(format!("created: {}", r.created));
+            lines.push(format!("visible in gw: {}", r.visible_in_gateway_table));
+            lines.push(format!("removed: {}", r.removed));
             if !r.details.is_empty() {
-                lines.push(format!("details: {}", r.details.join(" | ")));
+                lines.push(String::new());
+                for d in &r.details {
+                    lines.push(format!("  {d}"));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::ExportReport(r) => {
             lines.push(format!("report entries: {}", r.entries));
+            lines.push("Report has been exported successfully.".to_string());
         }
     }
     lines
+}
+
+/// Map well-known ports to service names
+#[cfg(target_os = "linux")]
+fn well_known_port_service(port: u16) -> &'static str {
+    match port {
+        20 => "(FTP data)",
+        21 => "(FTP)",
+        22 => "(SSH)",
+        23 => "(Telnet)",
+        25 => "(SMTP)",
+        53 => "(DNS)",
+        80 => "(HTTP)",
+        110 => "(POP3)",
+        143 => "(IMAP)",
+        443 => "(HTTPS)",
+        465 => "(SMTPS)",
+        587 => "(SMTP/submission)",
+        993 => "(IMAPS)",
+        995 => "(POP3S)",
+        3306 => "(MySQL)",
+        3389 => "(RDP)",
+        5432 => "(PostgreSQL)",
+        5900 => "(VNC)",
+        6379 => "(Redis)",
+        8080 => "(HTTP alt)",
+        8443 => "(HTTPS alt)",
+        27017 => "(MongoDB)",
+        _ => "",
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -5600,27 +5674,42 @@ fn network_result_log_lines(result: &linux_netdiag::NetworkDiagnosticsResult) ->
 fn network_result_raw_lines(
     result: &linux_netdiag::NetworkDiagnosticsResult,
 ) -> (Vec<String>, Vec<String>) {
-    // Re-use detail lines as pseudo-stdout; we don't have true stdout/stderr separation
-    // from the engine, so detail_lines become stdout and warnings become stderr.
     let stdout = network_result_detail_lines(result);
-    let stderr = match result {
+    let mut stderr: Vec<String> = Vec::new();
+    match result {
         linux_netdiag::NetworkDiagnosticsResult::DnsExplain(r) => {
-            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for c in &r.conflicts { stderr.push(format!("CONFLICT: {c}")); }
         }
         linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
-            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
         }
         linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
-            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
         }
         linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
-            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            if r.permission_limited {
+                stderr.push("NOTE: Results limited by permissions — run with sudo for full info".to_string());
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
-            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for b in &r.blocked_indicators { stderr.push(format!("BLOCKED: {b}")); }
         }
-        _ => Vec::new(),
-    };
+        linux_netdiag::NetworkDiagnosticsResult::Ping(r) => {
+            if r.packet_loss_percent > 0.0 {
+                stderr.push(format!("LOSS: {:.1}% packet loss detected", r.packet_loss_percent));
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::MtuProbe(r) => {
+            if let Some(w) = &r.warning { stderr.push(format!("WARN: {w}")); }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
+            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+        }
+        _ => {}
+    }
     (stdout, stderr)
 }
 
@@ -5713,9 +5802,63 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 advice.push("Results are permission-limited.".to_string());
                 advice.push("Run TUI+ with sudo for full socket details.".to_string());
             }
+            let estab = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("ESTAB")).count();
+            if estab > 50 {
+                advice.push(format!("High connection count ({estab} established)."));
+                advice.push("Check for connection leaks or misbehaving processes.".to_string());
+            }
         }
-        _ => {
-            advice.push("No specific advice for this tool.".to_string());
+        linux_netdiag::NetworkDiagnosticsResult::Resolve(r) => {
+            if r.addresses.is_empty() {
+                advice.push("No addresses resolved — check DNS config.".to_string());
+                advice.push("Run DNS Explain to inspect resolver chain.".to_string());
+            } else if r.addresses.len() > 1 {
+                advice.push(format!("Multiple addresses ({}) — load-balanced or CDN.", r.addresses.len()));
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
+            if r.default_routes.is_empty() {
+                advice.push("No default routes found — connectivity may be limited.".to_string());
+            }
+            if !r.warnings.is_empty() {
+                advice.push("Route warnings detected — review for misconfigs.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
+            for iface in &r.interfaces {
+                if iface.mtu < 1500 && !iface.interface.starts_with("lo") {
+                    advice.push(format!("{}: Low MTU ({}) — may cause fragmentation.", iface.interface, iface.mtu));
+                }
+            }
+            if !r.warnings.is_empty() {
+                for w in &r.warnings {
+                    advice.push(format!("Check: {w}"));
+                }
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
+            let any_available = r.methods.iter().any(|m| format!("{:?}", m.state).contains("Available"));
+            if any_available {
+                advice.push("NAT traversal available — port forwarding is possible.".to_string());
+            } else {
+                advice.push("No NAT traversal methods available.".to_string());
+                advice.push("Consider manual port forwarding on router.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::MappingTest(r) => {
+            if r.created {
+                advice.push("Port mapping created successfully.".to_string());
+                if !r.removed {
+                    advice.push("Mapping was not auto-removed — remember to clean up.".to_string());
+                }
+            } else {
+                advice.push("Port mapping creation failed.".to_string());
+                advice.push("Check NAT Capability to verify available methods.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::ExportReport(_) => {
+            advice.push("Report exported successfully.".to_string());
+            advice.push("Check working directory for the exported file.".to_string());
         }
     }
     advice
