@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -102,7 +102,7 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
     // Quick stats
     let mut lines = Vec::new();
 
-    if let Some(iface) = data.interfaces.first() {
+    if let Some(iface) = primary_interface(data) {
         lines.push(Line::from(vec![
             Span::styled("Status: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -170,9 +170,9 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
 }
 
 fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
-    let header_text = if let Some(iface) = data.interfaces.first() {
+    let header_text = if let Some(iface) = primary_interface(data) {
         format!(
-            "{} | {} | ↓ {:.2} Mbps ↑ {:.2} Mbps | Connections: {}",
+            "{} | {} | DL {:.2} Mbps | UL {:.2} Mbps | Connections: {}",
             iface.name,
             iface.status,
             iface.download_speed,
@@ -202,7 +202,7 @@ fn render_interface_details(
     data: &crate::monitors::NetworkData,
     theme: &Theme,
 ) {
-    if let Some(iface) = data.interfaces.first() {
+    if let Some(iface) = primary_interface(data) {
         let lines = vec![
             Line::from(vec![
                 Span::styled("Interface: ", Style::default().fg(Color::Gray)),
@@ -450,6 +450,41 @@ fn render_connections_compact(
         .column_spacing(1);
 
     f.render_widget(table, area);
+}
+
+fn primary_interface(
+    data: &crate::monitors::NetworkData,
+) -> Option<&crate::monitors::NetworkInterface> {
+    data.interfaces
+        .iter()
+        .max_by(|a, b| {
+            let a_score = interface_score(a);
+            let b_score = interface_score(b);
+            a_score
+                .partial_cmp(&b_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .or_else(|| data.interfaces.first())
+}
+
+fn interface_score(iface: &crate::monitors::NetworkInterface) -> f64 {
+    let mut score = 0.0;
+    if iface.name != "lo" {
+        score += 1000.0;
+    }
+    if iface.status.eq_ignore_ascii_case("connected") {
+        score += 400.0;
+    }
+    if !iface.gateway.is_empty() {
+        score += 300.0;
+    }
+    if !iface.ipv4_address.is_empty() {
+        score += 200.0;
+    }
+    if !iface.ipv6_address.is_empty() {
+        score += 100.0;
+    }
+    score + iface.download_speed + iface.upload_speed
 }
 
 fn render_bandwidth_consumers(

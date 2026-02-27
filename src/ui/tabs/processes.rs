@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -197,9 +197,9 @@ fn render_process_table(
 
     // Create table header with sort indicators
     let sort_indicator = if app.state.processes_state.sort_ascending {
-        "↑"
+        "Asc"
     } else {
-        "↓"
+        "Desc"
     };
 
     let headers = vec![
@@ -305,7 +305,7 @@ fn render_process_table(
 
     // Hotkeys hint
     let hotkeys = vec![Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
         Span::raw(": Navigate  "),
         Span::styled("p/n/c/m/t/u", Style::default().fg(Color::Cyan)),
         Span::raw(": Sort by PID/Name/CPU/Memory/Threads/User  "),

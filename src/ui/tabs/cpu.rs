@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -328,7 +328,7 @@ fn render_full(
 
 fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::CpuData, theme: &Theme) {
     let compact_text = format!(
-        "CPU: {} \u{2502} {}% \u{2502} {:.2} GHz \u{2502} {}°C \u{2502} {:.0}W/{:.0}W",
+        "CPU: {} \u{2502} {}% \u{2502} {:.2} GHz \u{2502} {} C \u{2502} {:.0}W/{:.0}W",
         data.name.split_whitespace().next().unwrap_or("CPU"),
         data.overall_usage as u16,
         data.frequency.avg_frequency,

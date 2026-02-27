@@ -1,4 +1,4 @@
-pub mod tabs;
+﻿pub mod tabs;
 pub mod theme;
 pub mod widgets;
 
@@ -153,11 +153,11 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
     let help_text = match app.state.tab_manager.current() {
-        TabType::Cpu => "[↑↓] Navigate │ [p/n/c/t/m] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Gpu => "[↑↓] Navigate │ [p/n/g/m/t] Sort │ [PgUp/PgDn] Page │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Ram => "[â†â†’] Focus │ [↑↓] Navigate │ [p/n/w/b] Sort │ [F2] Compact │ [Tab] Next Tab │ [Ctrl+C] Exit",
-        TabType::Disk => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
-        _ => "[F2] Compact │ [Tab] Next Tab │ [1-0] Switch Tab │ [Ctrl+C] Exit",
+        TabType::Cpu => "[Up/Down] Navigate | [p/n/c/t/m] Sort | [PgUp/PgDn] Page | [F2] Compact | [Tab] Next Tab | [Ctrl+C] Exit",
+        TabType::Gpu => "[Up/Down] Navigate | [p/n/g/m/t] Sort | [PgUp/PgDn] Page | [F2] Compact | [Tab] Next Tab | [Ctrl+C] Exit",
+        TabType::Ram => "[Left/Right] Focus | [Up/Down] Navigate | [p/n/w/b] Sort | [F2] Compact | [Tab] Next Tab | [Ctrl+C] Exit",
+        TabType::Disk => "[F2] Compact | [Tab] Next Tab | [1-0] Switch Tab | [Ctrl+C] Exit",
+        _ => "[F2] Compact | [Tab] Next Tab | [1-0] Switch Tab | [Ctrl+C] Exit",
     };
 
     let block = Block::default().borders(Borders::ALL);

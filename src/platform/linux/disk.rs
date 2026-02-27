@@ -100,23 +100,51 @@ impl LinuxSysMonitor {
     }
 
     pub fn get_disk_space(&self, mount: &str) -> Result<SpaceInfo> {
-        let mut stat = std::mem::MaybeUninit::uninit();
-        let c_path = std::ffi::CString::new(mount)?;
-        
-        let res = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-        if res == 0 {
+        #[cfg(unix)]
+        {
+            let mut stat = std::mem::MaybeUninit::uninit();
+            let c_path = std::ffi::CString::new(mount)?;
+
+            let res = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+            if res != 0 {
+                anyhow::bail!("statvfs failed for {}", mount);
+            }
+
             let stat = unsafe { stat.assume_init() };
-            let total = stat.f_blocks * stat.f_frsize as libc::fsblkcnt_t;
-            let available = stat.f_bavail * stat.f_frsize as libc::fsblkcnt_t;
-            let used = total.saturating_sub(stat.f_bfree * stat.f_frsize as libc::fsblkcnt_t);
-            
-            Ok(SpaceInfo {
-                total_bytes: total as u64,
-                used_bytes: used as u64,
-                free_bytes: available as u64,
-            })
-        } else {
-            anyhow::bail!("statvfs failed for {}", mount);
+            let total = (stat.f_blocks as u128).saturating_mul(stat.f_frsize as u128);
+            let available = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
+            let free = (stat.f_bfree as u128).saturating_mul(stat.f_frsize as u128);
+            let used = total.saturating_sub(free);
+
+            return Ok(SpaceInfo {
+                total_bytes: total.min(u64::MAX as u128) as u64,
+                used_bytes: used.min(u64::MAX as u128) as u64,
+                free_bytes: available.min(u64::MAX as u128) as u64,
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            let output = Command::new("df").args(["-B1", mount]).output()?;
+            if !output.status.success() {
+                anyhow::bail!("df failed for mount {}", mount);
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout.lines().nth(1).context("unexpected df output")?;
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 5 {
+                anyhow::bail!("unable to parse df output for mount {}", mount);
+            }
+
+            let total_bytes = parts[1].parse::<u64>().unwrap_or(0);
+            let used_bytes = parts[2].parse::<u64>().unwrap_or(0);
+            let free_bytes = parts[3].parse::<u64>().unwrap_or(0);
+            return Ok(SpaceInfo {
+                total_bytes,
+                used_bytes,
+                free_bytes,
+            });
         }
     }
 
@@ -398,10 +426,21 @@ impl LinuxSysMonitor {
                 ms_writing: parts[10].parse().unwrap_or(0),
                 io_in_progress: parts[11].parse().unwrap_or(0),
                 ms_doing_io: parts[12].parse().unwrap_or(0),
+                weighted_ms_doing_io: parts[13].parse().unwrap_or(0),
             });
         }
 
         Ok(stats)
+    }
+
+    /// Compatibility helper: keyed disk stats map by device name.
+    pub fn get_raw_disk_stats(&self) -> Result<HashMap<String, RawDiskStats>> {
+        let stats = self.get_disk_stats()?;
+        let mut map = HashMap::with_capacity(stats.len());
+        for stat in stats {
+            map.insert(stat.name.clone(), stat);
+        }
+        Ok(map)
     }
 
     pub fn get_process_io_samples(&self) -> Result<Vec<ProcessIoSample>> {
@@ -454,6 +493,16 @@ impl LinuxSysMonitor {
         }
 
         Ok(out)
+    }
+
+    /// Compatibility helper: keyed process I/O map by PID.
+    pub fn get_process_io(&self) -> Result<HashMap<u32, ProcessIoSample>> {
+        let samples = self.get_process_io_samples()?;
+        let mut map = HashMap::with_capacity(samples.len());
+        for sample in samples {
+            map.insert(sample.pid, sample);
+        }
+        Ok(map)
     }
 }
 
@@ -512,6 +561,7 @@ pub struct RawDiskStats {
     pub ms_writing: u64,
     pub io_in_progress: u64,
     pub ms_doing_io: u64,
+    pub weighted_ms_doing_io: u64,
 }
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,10 @@
-use super::LinuxSysMonitor;
+use super::{LinuxSysMonitor, RaplDomainSample, RaplSnapshot};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use std::time::Instant;
 
 impl LinuxSysMonitor {
     pub fn get_cpu_usage(&self) -> Result<f32> {
@@ -321,34 +323,65 @@ impl LinuxSysMonitor {
 
     /// Read CPU power consumption from RAPL (Running Average Power Limit)
     pub fn get_cpu_power(&self) -> Option<(f32, f32)> {
-        // Try reading RAPL power data
-        let rapl_dir = Path::new("/sys/class/powercap");
-        if !rapl_dir.exists() {
+        let domains = self.read_rapl_domains();
+        if domains.is_empty() {
             return None;
         }
 
-        for entry in fs::read_dir(rapl_dir).ok()?.flatten() {
-            let path = entry.path();
-            let name = fs::read_to_string(path.join("name")).unwrap_or_default();
-            if name.trim() == "package-0" {
-                let energy_uj = fs::read_to_string(path.join("energy_uj"))
-                    .ok()?
-                    .trim()
-                    .parse::<u64>()
-                    .ok()?;
-                let max_power_uw = fs::read_to_string(path.join("constraint_0_max_power_uw"))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<f32>().ok())
-                    .unwrap_or(0.0);
+        let now = Instant::now();
+        let max_power = domains
+            .iter()
+            .map(|d| d.max_power_watts)
+            .sum::<f32>()
+            .max(0.0);
 
-                let tdp = max_power_uw / 1_000_000.0; // Convert uW to W
-                                                      // Energy is in microjoules; we'd need two samples to compute power
-                                                      // For now, return 0 for current (will be computed by the monitor)
-                let _ = energy_uj;
-                return Some((0.0, if tdp > 0.0 { tdp } else { 65.0 }));
-            }
+        let mut current_domains = HashMap::with_capacity(domains.len());
+        for d in &domains {
+            current_domains.insert(
+                d.key.clone(),
+                RaplDomainSample {
+                    energy_uj: d.energy_uj,
+                    max_range_uj: d.max_range_uj,
+                },
+            );
         }
-        None
+
+        let current = RaplSnapshot {
+            timestamp: now,
+            domains: current_domains,
+        };
+
+        let mut prev = self.rapl_snapshot.lock();
+        let watts = if let Some(previous) = prev.as_ref() {
+            let elapsed = now.saturating_duration_since(previous.timestamp).as_secs_f64();
+            if elapsed > 0.0 {
+                let mut delta_uj_sum = 0u128;
+                for d in &domains {
+                    if let Some(old) = previous.domains.get(&d.key) {
+                        let delta = if d.energy_uj >= old.energy_uj {
+                            d.energy_uj.saturating_sub(old.energy_uj)
+                        } else if old.max_range_uj > old.energy_uj {
+                            old.max_range_uj
+                                .saturating_sub(old.energy_uj)
+                                .saturating_add(d.energy_uj)
+                        } else {
+                            0
+                        };
+                        delta_uj_sum = delta_uj_sum.saturating_add(delta as u128);
+                    }
+                }
+
+                (delta_uj_sum as f64 / 1_000_000.0 / elapsed) as f32
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        *prev = Some(current);
+        let tdp = if max_power > 0.0 { max_power } else { 65.0 };
+        Some((watts.max(0.0), tdp))
     }
 
     /// Check if CPU boost/turbo is enabled via sysfs
@@ -385,6 +418,113 @@ impl LinuxSysMonitor {
         }
         freqs
     }
+
+    fn read_rapl_domains(&self) -> Vec<RaplDomainReading> {
+        let base = Path::new("/sys/class/powercap");
+        if !base.exists() {
+            return Vec::new();
+        }
+
+        let mut paths = Vec::new();
+        self.collect_rapl_paths(base, &mut paths, 0);
+        if paths.is_empty() {
+            return Vec::new();
+        }
+
+        let mut package_domains = Vec::new();
+        let mut all_domains = Vec::new();
+
+        for path in paths {
+            let name = fs::read_to_string(path.join("name"))
+                .map(|s| s.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            let energy_uj = fs::read_to_string(path.join("energy_uj"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if energy_uj == 0 {
+                continue;
+            }
+
+            let max_range_uj = fs::read_to_string(path.join("max_energy_range_uj"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let max_power_watts = read_rapl_max_power_watts(&path);
+
+            let domain = RaplDomainReading {
+                key: path.to_string_lossy().to_string(),
+                energy_uj,
+                max_range_uj,
+                max_power_watts,
+            };
+
+            if name.contains("package") || name.contains("pkg") || name.contains("psys") {
+                package_domains.push(domain.clone());
+            }
+            all_domains.push(domain);
+        }
+
+        if !package_domains.is_empty() {
+            package_domains
+        } else {
+            all_domains
+        }
+    }
+
+    fn collect_rapl_paths(&self, path: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        if depth > 3 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if !entry_path.is_dir() {
+                continue;
+            }
+
+            if entry_path.join("energy_uj").exists() {
+                out.push(entry_path.clone());
+            }
+            self.collect_rapl_paths(&entry_path, out, depth + 1);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RaplDomainReading {
+    key: String,
+    energy_uj: u64,
+    max_range_uj: u64,
+    max_power_watts: f32,
+}
+
+fn read_rapl_max_power_watts(path: &Path) -> f32 {
+    let mut max_uw = 0u64;
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0.0;
+    };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let is_power_limit = file_name.starts_with("constraint_")
+            && (file_name.ends_with("_max_power_uw") || file_name.ends_with("_power_limit_uw"));
+        if !is_power_limit {
+            continue;
+        }
+
+        if let Ok(content) = fs::read_to_string(entry.path()) {
+            if let Ok(value) = content.trim().parse::<u64>() {
+                max_uw = max_uw.max(value);
+            }
+        }
+    }
+
+    max_uw as f32 / 1_000_000.0
 }
 
 #[derive(Debug)]

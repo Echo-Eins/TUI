@@ -27,7 +27,7 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
         let processes = self.linux_sys.get_processes()?;
         let now = Instant::now();
 
-        let clock_ticks_per_sec = 100u64; // Linux typically 100
+        let clock_ticks_per_sec = self.linux_sys.get_clock_ticks_per_second();
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get() as f64)
             .unwrap_or(1.0);
@@ -39,6 +39,7 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
             .map(|t| now.saturating_duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
 
+        let mut next_ticks = HashMap::with_capacity(processes.len());
         let mut result: Vec<ProcessEntry> = processes
             .into_iter()
             .map(|p| {
@@ -55,7 +56,9 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
                     0.0
                 };
 
-                let entry = ProcessEntry {
+                next_ticks.insert(p.pid, p.cpu_ticks);
+
+                ProcessEntry {
                     pid: p.pid,
                     name: p.name,
                     cpu_usage,
@@ -67,27 +70,11 @@ impl ProcessMonitorTrait for LinuxProcessMonitor {
                     handle_count: p.handle_count,
                     io_read_bytes: p.io_read_bytes,
                     io_write_bytes: p.io_write_bytes,
-                };
-
-                (p.pid, p.cpu_ticks, entry)
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|(pid, ticks, entry)| {
-                prev_ticks.insert(pid, ticks);
-                entry
+                }
             })
             .collect();
 
-        // Update previous ticks for next calculation
-        prev_ticks.clear();
-        for p in &result {
-            // Re-fetch total cpu_ticks from earlier to save it.
-            // Wait, we lost cpu_ticks because we didn't map it to ProcessEntry.
-            // Let's retrieve it from `processes` list beforehand.
-            // Actually it's simpler if we just save before mapping, but `processes` is consumed.
-            // We'll iterate the raw processes before mapping to save the ticks.
-        }
+        *prev_ticks = next_ticks;
         *prev_ts = Some(now);
 
         result.sort_by(|a, b| {

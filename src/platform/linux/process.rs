@@ -1,20 +1,33 @@
 use super::LinuxSysMonitor;
 use anyhow::Result;
+use chrono::{Local, TimeZone, Utc};
+use std::collections::HashMap;
 use std::fs;
 
 impl LinuxSysMonitor {
+    pub fn get_clock_ticks_per_second(&self) -> u64 {
+        clock_ticks_per_second().unwrap_or(100)
+    }
+
     pub fn get_processes(&self) -> Result<Vec<ProcessInfo>> {
         let mut processes = Vec::new();
+        let boot_time = read_boot_time_unix().unwrap_or(0);
+        let ticks_per_sec = self.get_clock_ticks_per_second();
+        let page_size = page_size_bytes().unwrap_or(4096);
+        let users = read_uid_username_map();
 
         if let Ok(entries) = fs::read_dir("/proc") {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let Ok(pid) = filename.parse::<u32>() else {
+                    continue;
+                };
 
-                if let Ok(pid) = filename.parse::<u32>() {
-                    if let Ok(process) = self.get_process_info(pid) {
-                        processes.push(process);
-                    }
+                if let Ok(process) =
+                    self.get_process_info(pid, boot_time, ticks_per_sec, page_size, &users)
+                {
+                    processes.push(process);
                 }
             }
         }
@@ -22,161 +35,211 @@ impl LinuxSysMonitor {
         Ok(processes)
     }
 
-    fn get_process_info(&self, pid: u32) -> Result<ProcessInfo> {
-        let stat_path = format!("/proc/{}/stat", pid);
-        let cmdline_path = format!("/proc/{}/cmdline", pid);
-        let status_path = format!("/proc/{}/status", pid);
+    fn get_process_info(
+        &self,
+        pid: u32,
+        boot_time_unix: u64,
+        ticks_per_sec: u64,
+        page_size: u64,
+        users: &HashMap<u32, String>,
+    ) -> Result<ProcessInfo> {
+        let stat_path = format!("/proc/{pid}/stat");
+        let cmdline_path = format!("/proc/{pid}/cmdline");
+        let status_path = format!("/proc/{pid}/status");
 
         let stat = fs::read_to_string(&stat_path)?;
+        let name = parse_proc_name_from_stat(&stat).unwrap_or_else(|| "unknown".to_string());
 
-        // Extract name from stat (it's in parentheses)
-        // Handle names with spaces/parens by finding last ')'
-        let name = if let Some(start) = stat.find('(') {
-            if let Some(end) = stat.rfind(')') {
-                stat[start + 1..end].to_string()
-            } else {
-                String::from("unknown")
-            }
-        } else {
-            String::from("unknown")
-        };
-
-        // Read cmdline
-        let cmdline = fs::read_to_string(&cmdline_path)
+        let mut command_line = fs::read_to_string(&cmdline_path)
             .ok()
             .map(|s| s.replace('\0', " ").trim().to_string())
             .filter(|s| !s.is_empty());
+        if command_line.is_none() {
+            command_line = fs::read_to_string(format!("/proc/{pid}/comm"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
 
-        // Parse values from stat - fields after the closing paren
         let after_name = stat.rfind(')').map(|i| &stat[i + 2..]).unwrap_or("");
-        let stat_fields: Vec<&str> = after_name.split_whitespace().collect();
+        let fields: Vec<&str> = after_name.split_whitespace().collect();
 
-        // Field 17 (0-indexed from after name) = num_threads
-        let threads = stat_fields
+        let threads = fields
             .get(17)
-            .and_then(|s| s.parse().ok())
+            .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
 
-        // Get CPU times: utime (field 11) and stime (field 12) from after name
-        // starttime is field 19 (0-indexed from after name)
-        let utime = stat_fields
+        let utime = fields
             .get(11)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        let stime = stat_fields
+        let stime = fields
             .get(12)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        let cpu_ticks = utime + stime;
-        
-        let start_time_ticks = stat_fields
+        let cpu_ticks = utime.saturating_add(stime);
+
+        let start_time_ticks = fields
             .get(19)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-            
-        // Convert start_time_ticks (clock ticks since boot) to UNIX timestamp
-        let start_time = if let Ok(btime_str) = fs::read_to_string("/proc/stat") {
-            let btime = btime_str.lines().find(|l| l.starts_with("btime ")).and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let clock_ticks_per_sec = 100; // standard value
-            btime + (start_time_ticks / clock_ticks_per_sec)
-        } else {
-            0
-        };
 
-        // Format start_time as a string representation
-        let start_time_str = if start_time > 0 {
-            Some(format!("{}", start_time)) // Or format as desired, e.g., using chronos if available
+        let start_time = if boot_time_unix > 0 && ticks_per_sec > 0 && start_time_ticks > 0 {
+            let start_unix = boot_time_unix.saturating_add(start_time_ticks / ticks_per_sec);
+            format_unix_local(start_unix)
         } else {
             None
         };
 
-        // Read memory from statm
-        let statm_path = format!("/proc/{}/statm", pid);
-        let memory = if let Ok(statm) = fs::read_to_string(&statm_path) {
-            let pages: Vec<u64> = statm
-                .split_whitespace()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            pages.get(1).unwrap_or(&0) * 4096 // RSS in pages * page size
-        } else {
-            0
-        };
-
-        // Read UID from status for user info
-        let uid = if let Ok(status) = fs::read_to_string(&status_path) {
-            status
-                .lines()
-                .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        // Resolve UID to username
-        let user_str = self.uid_to_username(uid);
-        let user = Some(user_str);
-
-        // Read IO details
-        let io_path = format!("/proc/{}/io", pid);
-        let mut io_read_bytes = 0;
-        let mut io_write_bytes = 0;
-        if let Ok(io) = fs::read_to_string(&io_path) {
-            for line in io.lines() {
-                if line.starts_with("read_bytes:") {
-                    io_read_bytes = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                } else if line.starts_with("write_bytes:") {
-                    io_write_bytes = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                }
-            }
-        }
-
-        // Count handles (file descriptors)
-        let fd_path = format!("/proc/{}/fd", pid);
-        let handle_count = if let Ok(entries) = fs::read_dir(&fd_path) {
-            entries.flatten().count() as u32
-        } else {
-            0
-        };
+        let memory = read_rss_memory_bytes(pid, page_size).unwrap_or(0);
+        let uid = read_uid_from_status(&status_path).unwrap_or(0);
+        let user = Some(
+            users
+                .get(&uid)
+                .cloned()
+                .unwrap_or_else(|| uid.to_string()),
+        );
+        let (io_read_bytes, io_write_bytes) = read_proc_io_bytes(pid);
+        let handle_count = count_process_handles(pid);
 
         Ok(ProcessInfo {
             pid,
             name,
-            command_line: cmdline,
+            command_line,
             threads,
             memory,
             cpu_ticks,
             uid,
             user,
-            start_time: start_time_str,
+            start_time,
             handle_count,
             io_read_bytes,
             io_write_bytes,
         })
     }
+}
 
-    fn uid_to_username(&self, uid: u32) -> String {
-        if uid == 0 {
-            return "root".to_string();
-        }
+fn parse_proc_name_from_stat(stat: &str) -> Option<String> {
+    let start = stat.find('(')?;
+    let end = stat.rfind(')')?;
+    if end > start {
+        Some(stat[start + 1..end].to_string())
+    } else {
+        None
+    }
+}
 
-        // Try reading /etc/passwd
-        if let Ok(content) = fs::read_to_string("/etc/passwd") {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 3 {
-                    if let Ok(file_uid) = parts[2].parse::<u32>() {
-                        if file_uid == uid {
-                            return parts[0].to_string();
-                        }
-                    }
-                }
+fn read_boot_time_unix() -> Option<u64> {
+    let content = fs::read_to_string("/proc/stat").ok()?;
+    content
+        .lines()
+        .find(|line| line.starts_with("btime "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+fn format_unix_local(ts: u64) -> Option<String> {
+    let dt = Utc.timestamp_opt(ts as i64, 0).single()?;
+    Some(
+        dt.with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
+}
+
+fn read_rss_memory_bytes(pid: u32, page_size: u64) -> Option<u64> {
+    let statm_path = format!("/proc/{pid}/statm");
+    let statm = fs::read_to_string(statm_path).ok()?;
+    let rss_pages = statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some(rss_pages.saturating_mul(page_size))
+}
+
+fn read_uid_from_status(status_path: &str) -> Option<u32> {
+    let status = fs::read_to_string(status_path).ok()?;
+    status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u32>().ok())
+}
+
+fn read_proc_io_bytes(pid: u32) -> (u64, u64) {
+    let io_path = format!("/proc/{pid}/io");
+    let mut read_bytes = 0u64;
+    let mut write_bytes = 0u64;
+
+    if let Ok(io) = fs::read_to_string(io_path) {
+        for line in io.lines() {
+            if let Some(v) = line.strip_prefix("read_bytes:") {
+                read_bytes = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("write_bytes:") {
+                write_bytes = v.trim().parse().unwrap_or(0);
             }
         }
-
-        uid.to_string()
     }
+
+    (read_bytes, write_bytes)
+}
+
+fn count_process_handles(pid: u32) -> u32 {
+    let fd_path = format!("/proc/{pid}/fd");
+    fs::read_dir(fd_path)
+        .ok()
+        .map(|entries| entries.flatten().count() as u32)
+        .unwrap_or(0)
+}
+
+fn read_uid_username_map() -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    if let Ok(content) = fs::read_to_string("/etc/passwd") {
+        for line in content.lines() {
+            let mut parts = line.split(':');
+            let username = parts.next().unwrap_or("").to_string();
+            let _passwd = parts.next();
+            let uid = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(u32::MAX);
+            if uid != u32::MAX && !username.is_empty() {
+                map.insert(uid, username);
+            }
+        }
+    }
+    map
+}
+
+#[cfg(unix)]
+fn clock_ticks_per_second() -> Option<u64> {
+    let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if v > 0 {
+        Some(v as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn clock_ticks_per_second() -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn page_size_bytes() -> Option<u64> {
+    let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if v > 0 {
+        Some(v as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn page_size_bytes() -> Option<u64> {
+    None
 }
 
 #[derive(Debug)]

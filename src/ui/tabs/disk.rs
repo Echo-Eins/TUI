@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -102,7 +102,7 @@ fn render_disk_summary(f: &mut Frame, area: Rect, data: &crate::monitors::DiskDa
         };
 
         let temp_str = if let Some(temp) = disk.temperature {
-            format!(" {:.0}°C", temp)
+            format!(" {:.0} C", temp)
         } else {
             String::new()
         };
@@ -526,10 +526,10 @@ fn render_process_table(
 
 fn get_health_indicator(health_status: &str) -> &'static str {
     match health_status {
-        "Healthy" => "●●●●●",
-        "Warning" => "●●●●○",
-        "Unhealthy" => "●●○○○",
-        _ => "●●●○○",
+        "Healthy" => "[#####]",
+        "Warning" => "[####-]",
+        "Unhealthy" => "[##---]",
+        _ => "[###--]",
     }
 }
 

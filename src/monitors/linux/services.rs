@@ -23,12 +23,12 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
             .map(|s| ServiceEntry {
                 name: s.name,
                 display_name: s.display_name,
-                status: s.status,
-                start_type: s.start_type,
+                status: map_service_status(&s.active_state, &s.sub_state),
+                start_type: map_startup_type(s.unit_file_state.as_deref()),
                 description: s.description,
-                can_stop: true, // Generally true for systemctl, depends on root
-                can_pause_and_continue: false, // systemd doesn't natively map to pause/continue like Windows
-                dependent_services: Vec::new(), // Could be parsed from `systemctl show -p WantedBy` if needed
+                can_stop: s.can_stop,
+                can_pause_and_continue: false,
+                dependent_services: s.dependent_services,
                 service_type: s.service_type,
             })
             .collect();
@@ -102,5 +102,33 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
             );
         }
         Ok(())
+    }
+}
+
+fn map_service_status(active: &str, sub: &str) -> ServiceStatus {
+    match active {
+        "active" => {
+            if sub == "running" || sub == "listening" || sub == "exited" {
+                ServiceStatus::Running
+            } else {
+                ServiceStatus::Running
+            }
+        }
+        "inactive" => ServiceStatus::Stopped,
+        "failed" => ServiceStatus::Stopped,
+        "reloading" => ServiceStatus::ContinuePending,
+        "activating" => ServiceStatus::StartPending,
+        "deactivating" => ServiceStatus::StopPending,
+        _ => ServiceStatus::Unknown,
+    }
+}
+
+fn map_startup_type(unit_file_state: Option<&str>) -> ServiceStartType {
+    match unit_file_state.unwrap_or_default() {
+        "enabled" | "enabled-runtime" => ServiceStartType::Automatic,
+        "disabled" | "masked" | "masked-runtime" => ServiceStartType::Disabled,
+        "static" | "indirect" | "linked" | "linked-runtime" | "generated" | "transient"
+        | "alias" => ServiceStartType::Manual,
+        _ => ServiceStartType::Unknown,
     }
 }

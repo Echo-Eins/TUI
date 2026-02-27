@@ -25,7 +25,7 @@ impl LinuxCpuMonitor {
         let processes = self.linux_sys.get_processes()?;
         let now = Instant::now();
 
-        let clock_ticks_per_sec = 100u64; // sysconf(_SC_CLK_TCK) is typically 100 on Linux
+        let clock_ticks_per_sec = self.linux_sys.get_clock_ticks_per_second();
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get() as f64)
             .unwrap_or(1.0);
@@ -117,15 +117,11 @@ impl CpuMonitorTrait for LinuxCpuMonitor {
         // Get real temperature
         let temperature = self.linux_sys.get_cpu_temperature();
 
-        // Get power info from RAPL if available
+        // Prefer measured package power from RAPL deltas; fallback to usage-based estimate.
         let (current_power, max_power) = match self.linux_sys.get_cpu_power() {
-            Some((_, tdp)) => {
-                // Estimate current power from usage and TDP
-                let estimated = (overall_usage / 100.0) * tdp;
-                (estimated, tdp)
-            }
+            Some((measured, tdp)) if measured > 0.0 => (measured, tdp),
+            Some((_, tdp)) => ((overall_usage / 100.0) * tdp, tdp),
             None => {
-                // Fallback: estimate with 65W TDP
                 let tdp = 65.0;
                 ((overall_usage / 100.0) * tdp, tdp)
             }

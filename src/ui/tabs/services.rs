@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -224,9 +224,9 @@ fn render_service_table(
 
     // Create table header with sort indicators
     let sort_indicator = if app.state.services_state.sort_ascending {
-        "↑"
+        "Asc"
     } else {
-        "↓"
+        "Desc"
     };
 
     let headers = vec![
@@ -327,7 +327,7 @@ fn render_service_table(
 
     // Hotkeys hint
     let hotkeys = vec![Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
         Span::raw(": Navigate  "),
         Span::styled("n/d/s/t", Style::default().fg(Color::Cyan)),
         Span::raw(": Sort by Name/Display/Status/Type  "),
