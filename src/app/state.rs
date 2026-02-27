@@ -212,7 +212,7 @@ pub enum NetworkDiagnosticTool {
 }
 
 impl NetworkDiagnosticTool {
-    const ORDERED: [Self; 12] = [
+    pub const ORDERED: [Self; 12] = [
         Self::Resolve,
         Self::DnsExplain,
         Self::RouteInspect,
@@ -227,8 +227,7 @@ impl NetworkDiagnosticTool {
         Self::ExportReport,
     ];
 
-    #[cfg(target_os = "linux")]
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Resolve => "Resolve",
             Self::DnsExplain => "DNS Explain",
@@ -266,18 +265,182 @@ impl NetworkDiagnosticTool {
     }
 }
 
+// ---- Network UI: Focus zones, result tabs, center view, traffic marker ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkFocusZone {
+    Tools,
+    Interface,
+    Results,
+    Parameters,
+    Activity,
+}
+
+impl NetworkFocusZone {
+    const CYCLE: [Self; 5] = [
+        Self::Tools,
+        Self::Parameters,
+        Self::Interface,
+        Self::Results,
+        Self::Activity,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::CYCLE.iter().position(|z| *z == self).unwrap_or(0);
+        Self::CYCLE[(idx + 1) % Self::CYCLE.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::CYCLE.iter().position(|z| *z == self).unwrap_or(0);
+        if idx == 0 {
+            Self::CYCLE[Self::CYCLE.len() - 1]
+        } else {
+            Self::CYCLE[idx - 1]
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkResultTab {
+    Summary,
+    Details,
+    Raw,
+    Advice,
+    History,
+}
+
+impl NetworkResultTab {
+    pub const TABS: [Self; 5] = [
+        Self::Summary,
+        Self::Details,
+        Self::Raw,
+        Self::Advice,
+        Self::History,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::TABS.iter().position(|t| *t == self).unwrap_or(0);
+        Self::TABS[(idx + 1) % Self::TABS.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::TABS.iter().position(|t| *t == self).unwrap_or(0);
+        if idx == 0 {
+            Self::TABS[Self::TABS.len() - 1]
+        } else {
+            Self::TABS[idx - 1]
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Summary => "Summary",
+            Self::Details => "Details",
+            Self::Raw => "Raw",
+            Self::Advice => "Advice",
+            Self::History => "History",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkCenterView {
+    Interface,
+    Connections,
+}
+
+/// Marker for RX/TX traffic counter reset
+#[derive(Debug, Clone)]
+pub struct TrafficMarker {
+    pub bytes_received_at_mark: u64,
+    pub bytes_sent_at_mark: u64,
+}
+
+/// Category grouping for the tool navigator
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    Dns,
+    Routing,
+    Interfaces,
+    Traffic,
+    Nat,
+    Reporting,
+}
+
+impl ToolCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dns => "DNS",
+            Self::Routing => "Routing",
+            Self::Interfaces => "Interfaces",
+            Self::Traffic => "Traffic",
+            Self::Nat => "NAT",
+            Self::Reporting => "Reporting",
+        }
+    }
+}
+
+impl NetworkDiagnosticTool {
+    pub fn category(self) -> ToolCategory {
+        match self {
+            Self::Resolve | Self::DnsExplain => ToolCategory::Dns,
+            Self::RouteInspect | Self::Trace | Self::MtuProbe => ToolCategory::Routing,
+            Self::NicDeepInfo => ToolCategory::Interfaces,
+            Self::ConnectionLab | Self::Ping | Self::PortScan => ToolCategory::Traffic,
+            Self::NatCapability | Self::NatMappingTest => ToolCategory::Nat,
+            Self::ExportReport => ToolCategory::Reporting,
+        }
+    }
+}
+
 pub struct NetworkUIState {
+    // Focus & navigation
+    pub focus: NetworkFocusZone,
+    pub result_tab: NetworkResultTab,
+    pub center_view: NetworkCenterView,
+
+    // Tool selection & input
     pub input_mode: bool,
     pub target_input: String,
     pub selected_tool: NetworkDiagnosticTool,
+    pub tools_scroll_offset: usize,
+
+    // Job state
     pub running_job: Option<u64>,
     pub nat_mapping_confirm_until: Option<Instant>,
     pub last_job: Option<u64>,
     pub last_summary: String,
     pub last_error: Option<String>,
+
+    // Output
     pub event_log: VecDeque<String>,
     pub detail_lines: Vec<String>,
     pub detail_scroll: usize,
+    pub raw_stdout: Vec<String>,
+    pub raw_stderr: Vec<String>,
+    pub advice_lines: Vec<String>,
+    pub result_history: VecDeque<NetworkDiagHistoryEntry>,
+
+    // Connections scroll
+    pub connections_scroll: usize,
+    pub bandwidth_scroll: usize,
+
+    // Traffic marker for RX/TX toggle
+    pub traffic_marker: Option<TrafficMarker>,
+    pub show_marker_traffic: bool,
+
+    // Interface selector (for multi-interface view)
+    pub selected_interface_idx: usize,
+}
+
+/// Entry in the diagnostics result history
+#[derive(Debug, Clone)]
+pub struct NetworkDiagHistoryEntry {
+    pub job_id: u64,
+    pub tool_label: String,
+    pub target: String,
+    pub summary: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -633,6 +796,27 @@ impl AppState {
                 self.network_ui_state.last_error = None;
                 self.network_ui_state.detail_lines = network_result_detail_lines(&result);
                 self.network_ui_state.detail_scroll = 0;
+
+                // Populate raw and advice tabs
+                let (raw_out, raw_err) = network_result_raw_lines(&result);
+                self.network_ui_state.raw_stdout = raw_out;
+                self.network_ui_state.raw_stderr = raw_err;
+                self.network_ui_state.advice_lines = network_result_advice_lines(&result);
+
+                // Push to result history
+                let timestamp = Local::now().format("%H:%M:%S").to_string();
+                let entry = NetworkDiagHistoryEntry {
+                    job_id,
+                    tool_label: self.network_ui_state.selected_tool.label().to_string(),
+                    target: self.network_ui_state.target_input.clone(),
+                    summary: self.network_ui_state.last_summary.clone(),
+                    timestamp,
+                };
+                if self.network_ui_state.result_history.len() >= 64 {
+                    self.network_ui_state.result_history.pop_front();
+                }
+                self.network_ui_state.result_history.push_back(entry);
+
                 self.push_network_log(format!(
                     "Job #{} completed: {}",
                     job_id, self.network_ui_state.last_summary
@@ -930,6 +1114,18 @@ impl AppState {
         {
             self.network_ui_state.last_error =
                 Some("Interactive diagnostics is available only on Linux".to_string());
+        }
+    }
+
+    fn network_set_traffic_marker(&mut self) {
+        let network_data = self.network_data.read();
+        if let Some(data) = network_data.as_ref() {
+            if let Some(iface) = data.interfaces.first() {
+                self.network_ui_state.traffic_marker = Some(TrafficMarker {
+                    bytes_received_at_mark: iface.bytes_received,
+                    bytes_sent_at_mark: iface.bytes_sent,
+                });
+            }
         }
     }
 
@@ -2340,9 +2536,13 @@ impl AppState {
             },
 
             network_ui_state: NetworkUIState {
+                focus: NetworkFocusZone::Tools,
+                result_tab: NetworkResultTab::Summary,
+                center_view: NetworkCenterView::Interface,
                 input_mode: false,
                 target_input: "1.1.1.1".to_string(),
                 selected_tool: NetworkDiagnosticTool::Ping,
+                tools_scroll_offset: 0,
                 running_job: None,
                 nat_mapping_confirm_until: None,
                 last_job: None,
@@ -2351,9 +2551,18 @@ impl AppState {
                 event_log: VecDeque::with_capacity(80),
                 detail_lines: vec![
                     "Run diagnostics to see detailed output.".to_string(),
-                    "Use PgUp/PgDn/Home/End to scroll details.".to_string(),
+                    "Use Tab to navigate panels. Enter to run tools.".to_string(),
                 ],
                 detail_scroll: 0,
+                raw_stdout: Vec::new(),
+                raw_stderr: Vec::new(),
+                advice_lines: Vec::new(),
+                result_history: VecDeque::with_capacity(64),
+                connections_scroll: 0,
+                bandwidth_scroll: 0,
+                traffic_marker: None,
+                show_marker_traffic: false,
+                selected_interface_idx: 0,
             },
 
             processes_state: ProcessesUIState {
@@ -3334,6 +3543,7 @@ impl AppState {
         }
 
         if self.tab_manager.current() == TabType::Network {
+            // --- Input mode: text editing in Parameters zone ---
             if self.network_ui_state.input_mode {
                 match key.code {
                     KeyCode::Esc => {
@@ -3371,39 +3581,145 @@ impl AppState {
                 }
             }
 
+            // --- Global Network tab keys (work in any focus zone) ---
             match key.code {
+                // Tab / Shift+Tab: cycle focus zones
+                KeyCode::Tab => {
+                    if is_initial_press {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            self.network_ui_state.focus = self.network_ui_state.focus.prev();
+                        } else {
+                            self.network_ui_state.focus = self.network_ui_state.focus.next();
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::BackTab => {
+                    if is_initial_press {
+                        self.network_ui_state.focus = self.network_ui_state.focus.prev();
+                    }
+                    return Ok(true);
+                }
+
+                // Left/Right: switch result sub-tabs when Results focused
+                KeyCode::Left => {
+                    if is_initial_press {
+                        match self.network_ui_state.focus {
+                            NetworkFocusZone::Results => {
+                                self.network_ui_state.result_tab =
+                                    self.network_ui_state.result_tab.prev();
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Right => {
+                    if is_initial_press {
+                        match self.network_ui_state.focus {
+                            NetworkFocusZone::Results => {
+                                self.network_ui_state.result_tab =
+                                    self.network_ui_state.result_tab.next();
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Ok(true);
+                }
+
+                // Up/Down: context-dependent navigation
                 KeyCode::Up => {
                     if !self.allow_nav() {
                         return Ok(true);
                     }
-                    self.network_ui_state.selected_tool =
-                        self.network_ui_state.selected_tool.previous();
-                    self.network_ui_state.nat_mapping_confirm_until = None;
+                    match self.network_ui_state.focus {
+                        NetworkFocusZone::Tools => {
+                            self.network_ui_state.selected_tool =
+                                self.network_ui_state.selected_tool.previous();
+                            self.network_ui_state.nat_mapping_confirm_until = None;
+                        }
+                        NetworkFocusZone::Results | NetworkFocusZone::Activity => {
+                            self.network_ui_state.detail_scroll =
+                                self.network_ui_state.detail_scroll.saturating_sub(1);
+                        }
+                        NetworkFocusZone::Interface => {
+                            match self.network_ui_state.center_view {
+                                NetworkCenterView::Connections => {
+                                    self.network_ui_state.connections_scroll =
+                                        self.network_ui_state.connections_scroll.saturating_sub(1);
+                                }
+                                NetworkCenterView::Interface => {
+                                    self.network_ui_state.selected_interface_idx =
+                                        self.network_ui_state.selected_interface_idx.saturating_sub(1);
+                                }
+                            }
+                        }
+                        NetworkFocusZone::Parameters => {}
+                    }
                     return Ok(true);
                 }
                 KeyCode::Down => {
                     if !self.allow_nav() {
                         return Ok(true);
                     }
-                    self.network_ui_state.selected_tool =
-                        self.network_ui_state.selected_tool.next();
-                    self.network_ui_state.nat_mapping_confirm_until = None;
+                    match self.network_ui_state.focus {
+                        NetworkFocusZone::Tools => {
+                            self.network_ui_state.selected_tool =
+                                self.network_ui_state.selected_tool.next();
+                            self.network_ui_state.nat_mapping_confirm_until = None;
+                        }
+                        NetworkFocusZone::Results | NetworkFocusZone::Activity => {
+                            self.network_ui_state.detail_scroll =
+                                self.network_ui_state.detail_scroll.saturating_add(1);
+                        }
+                        NetworkFocusZone::Interface => {
+                            match self.network_ui_state.center_view {
+                                NetworkCenterView::Connections => {
+                                    self.network_ui_state.connections_scroll =
+                                        self.network_ui_state.connections_scroll.saturating_add(1);
+                                }
+                                NetworkCenterView::Interface => {
+                                    self.network_ui_state.selected_interface_idx =
+                                        self.network_ui_state.selected_interface_idx.saturating_add(1);
+                                }
+                            }
+                        }
+                        NetworkFocusZone::Parameters => {}
+                    }
                     return Ok(true);
                 }
+
+                // PgUp/PgDn/Home/End: scroll in Results/Activity/Connections
                 KeyCode::PageUp => {
                     if !self.allow_widget_scroll() {
                         return Ok(true);
                     }
-                    self.network_ui_state.detail_scroll =
-                        self.network_ui_state.detail_scroll.saturating_sub(8);
+                    match self.network_ui_state.focus {
+                        NetworkFocusZone::Interface => {
+                            self.network_ui_state.connections_scroll =
+                                self.network_ui_state.connections_scroll.saturating_sub(8);
+                        }
+                        _ => {
+                            self.network_ui_state.detail_scroll =
+                                self.network_ui_state.detail_scroll.saturating_sub(8);
+                        }
+                    }
                     return Ok(true);
                 }
                 KeyCode::PageDown => {
                     if !self.allow_widget_scroll() {
                         return Ok(true);
                     }
-                    self.network_ui_state.detail_scroll =
-                        self.network_ui_state.detail_scroll.saturating_add(8);
+                    match self.network_ui_state.focus {
+                        NetworkFocusZone::Interface => {
+                            self.network_ui_state.connections_scroll =
+                                self.network_ui_state.connections_scroll.saturating_add(8);
+                        }
+                        _ => {
+                            self.network_ui_state.detail_scroll =
+                                self.network_ui_state.detail_scroll.saturating_add(8);
+                        }
+                    }
                     return Ok(true);
                 }
                 KeyCode::Home => {
@@ -3411,6 +3727,7 @@ impl AppState {
                         return Ok(true);
                     }
                     self.network_ui_state.detail_scroll = 0;
+                    self.network_ui_state.connections_scroll = 0;
                     return Ok(true);
                 }
                 KeyCode::End => {
@@ -3418,38 +3735,76 @@ impl AppState {
                         return Ok(true);
                     }
                     self.network_ui_state.detail_scroll = usize::MAX / 2;
+                    self.network_ui_state.connections_scroll = usize::MAX / 2;
                     return Ok(true);
                 }
+
+                // Enter: run tool (from Tools or Parameters zone)
                 KeyCode::Enter => {
                     if is_initial_press {
                         self.start_selected_network_diagnostic();
                     }
                     return Ok(true);
                 }
+
+                // i: enter input mode (jump to Parameters zone)
                 KeyCode::Char('i') => {
                     if is_initial_press {
                         self.network_ui_state.input_mode = true;
+                        self.network_ui_state.focus = NetworkFocusZone::Parameters;
                     }
                     return Ok(true);
                 }
+
+                // x: cancel running job
                 KeyCode::Char('x') => {
                     if is_initial_press {
                         self.cancel_network_diagnostic();
                     }
                     return Ok(true);
                 }
+
+                // k: clear activity log
                 KeyCode::Char('k') => {
                     if is_initial_press {
                         self.network_ui_state.event_log.clear();
-                        self.network_ui_state.detail_lines.clear();
-                        self.network_ui_state.detail_lines.push(
-                            "Diagnostics log cleared. Run a tool to collect fresh data."
-                                .to_string(),
-                        );
-                        self.network_ui_state.detail_scroll = 0;
                     }
                     return Ok(true);
                 }
+
+                // v: toggle center view (Interface <-> Connections)
+                KeyCode::Char('v') => {
+                    if is_initial_press {
+                        self.network_ui_state.center_view = match self.network_ui_state.center_view {
+                            NetworkCenterView::Interface => NetworkCenterView::Connections,
+                            NetworkCenterView::Connections => NetworkCenterView::Interface,
+                        };
+                    }
+                    return Ok(true);
+                }
+
+                // 0: toggle traffic marker (RX/TX reset point)
+                KeyCode::Char('0') => {
+                    if is_initial_press {
+                        if self.network_ui_state.show_marker_traffic {
+                            // Already showing marker → switch back to global
+                            self.network_ui_state.show_marker_traffic = false;
+                        } else if self.network_ui_state.traffic_marker.is_some() {
+                            // Marker exists but showing global → reset marker to new point
+                            self.network_ui_state.traffic_marker = None;
+                            // Will be set on next render with current values
+                            self.network_set_traffic_marker();
+                            self.network_ui_state.show_marker_traffic = true;
+                        } else {
+                            // No marker yet → create one
+                            self.network_set_traffic_marker();
+                            self.network_ui_state.show_marker_traffic = true;
+                        }
+                    }
+                    return Ok(true);
+                }
+
+                // Quick-run shortcut keys (only when not in input mode)
                 KeyCode::Char('e') => {
                     if is_initial_press {
                         self.network_ui_state.selected_tool = NetworkDiagnosticTool::Resolve;
@@ -5238,6 +5593,132 @@ fn network_result_log_lines(result: &linux_netdiag::NetworkDiagnosticsResult) ->
     let mut lines = network_result_detail_lines(result);
     lines.truncate(6);
     lines
+}
+
+/// Extract raw stdout/stderr-style lines from a diagnostics result
+#[cfg(target_os = "linux")]
+fn network_result_raw_lines(
+    result: &linux_netdiag::NetworkDiagnosticsResult,
+) -> (Vec<String>, Vec<String>) {
+    // Re-use detail lines as pseudo-stdout; we don't have true stdout/stderr separation
+    // from the engine, so detail_lines become stdout and warnings become stderr.
+    let stdout = network_result_detail_lines(result);
+    let stderr = match result {
+        linux_netdiag::NetworkDiagnosticsResult::DnsExplain(r) => {
+            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+        }
+        linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
+            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+        }
+        linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
+            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+        }
+        linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
+            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+        }
+        linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
+            r.warnings.iter().map(|w| format!("WARN: {w}")).collect()
+        }
+        _ => Vec::new(),
+    };
+    (stdout, stderr)
+}
+
+/// Generate advice lines based on diagnostics result
+#[cfg(target_os = "linux")]
+fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult) -> Vec<String> {
+    let mut advice = Vec::new();
+    match result {
+        linux_netdiag::NetworkDiagnosticsResult::Ping(r) => {
+            if r.packet_loss_percent > 0.0 && r.packet_loss_percent < 5.0 {
+                advice.push("Minor packet loss detected.".to_string());
+                advice.push("Recommended: retry with profile=loss deadline=30".to_string());
+            } else if r.packet_loss_percent >= 5.0 {
+                advice.push("Significant packet loss!".to_string());
+                advice.push("1) Check physical connection".to_string());
+                advice.push("2) Run trace+ to find the lossy hop".to_string());
+                advice.push("3) Run MTU probe to check PMTU black-hole".to_string());
+            } else {
+                advice.push("Connection is stable with no packet loss.".to_string());
+            }
+            if let Some(jitter) = r.jitter_ms {
+                if jitter > 10.0 {
+                    advice.push(format!("High jitter ({jitter:.1}ms) detected."));
+                    advice.push("Consider checking for network congestion.".to_string());
+                }
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
+            if !r.reached_target {
+                advice.push("Target not reached.".to_string());
+                if r.fallback_used {
+                    advice.push("Fallback protocol was used.".to_string());
+                }
+                if r.timeout_ratio > 0.5 {
+                    advice.push("High timeout ratio — path may be filtered.".to_string());
+                    advice.push("Try: proto=tcp port=443 for HTTPS-friendly probing".to_string());
+                }
+            } else {
+                advice.push("Target reached successfully.".to_string());
+            }
+            for indicator in &r.blocked_indicators {
+                advice.push(format!("Blocked indicator: {indicator}"));
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::MtuProbe(r) => {
+            if let Some(pmtu) = r.path_mtu {
+                advice.push(format!("Path MTU: {} bytes", pmtu));
+                if pmtu < 1472 {
+                    advice.push(
+                        "Low PMTU detected — possible tunnel or VPN overhead.".to_string(),
+                    );
+                    advice.push(format!(
+                        "Consider: MSS clamp to {} if using VPN",
+                        pmtu.saturating_sub(40)
+                    ));
+                }
+            } else {
+                advice.push("Could not determine path MTU.".to_string());
+                advice.push("Check if ICMP is allowed on the path.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::PortScan(r) => {
+            if !r.open_ports.is_empty() {
+                advice.push(format!("Open ports: {:?}", r.open_ports));
+            }
+            let closed: Vec<u16> = r
+                .scanned_ports
+                .iter()
+                .filter(|p| !r.open_ports.contains(p))
+                .copied()
+                .collect();
+            if !closed.is_empty() {
+                advice.push(format!("Closed/filtered: {:?}", closed));
+                advice.push("These ports may be behind a firewall.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::DnsExplain(r) => {
+            if !r.conflicts.is_empty() {
+                advice.push("DNS configuration conflicts detected:".to_string());
+                for conflict in &r.conflicts {
+                    advice.push(format!("  - {conflict}"));
+                }
+            }
+            if r.dns_servers.is_empty() {
+                advice.push("No DNS servers found! Check resolv.conf.".to_string());
+            }
+        }
+        linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
+            if r.permission_limited {
+                advice.push("Results are permission-limited.".to_string());
+                advice.push("Run TUI+ with sudo for full socket details.".to_string());
+            }
+        }
+        _ => {
+            advice.push("No specific advice for this tool.".to_string());
+        }
+    }
+    advice
 }
 
 #[cfg(target_os = "linux")]
