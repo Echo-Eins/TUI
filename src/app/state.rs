@@ -8,7 +8,7 @@ use crossterm::event::{
 use crossterm::terminal;
 use parking_lot::RwLock;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -20,6 +20,8 @@ use crate::monitors::{
     CpuData, DiskAnalyzerData, DiskData, GpuData, NetworkData, ProcessData, RamData, ServiceData,
 };
 use crate::platform::executor::StreamMessage;
+#[cfg(target_os = "linux")]
+use crate::platform::linux::network_diagnostics as linux_netdiag;
 use std::fs;
 
 #[derive(Debug)]
@@ -86,6 +88,9 @@ pub struct AppState {
     // RAM UI state
     pub ram_state: RamUIState,
 
+    // Network UI state
+    pub network_ui_state: NetworkUIState,
+
     // Processes UI state
     pub processes_state: ProcessesUIState,
 
@@ -94,6 +99,11 @@ pub struct AppState {
 
     // Ollama UI state
     pub ollama_state: OllamaUIState,
+
+    #[cfg(target_os = "linux")]
+    network_diag_engine: Arc<linux_netdiag::NetworkDiagnosticsEngine>,
+    #[cfg(target_os = "linux")]
+    network_diag_rx: UnboundedReceiver<linux_netdiag::NetworkDiagnosticsEvent>,
 
     async_tx: UnboundedSender<AsyncUpdate>,
     async_rx: UnboundedReceiver<AsyncUpdate>,
@@ -183,6 +193,76 @@ pub struct RamUIState {
     pub selected_index: usize,
     pub sort_column: RamProcessSortColumn,
     pub sort_ascending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkDiagnosticTool {
+    Resolve,
+    DnsExplain,
+    Ping,
+    Trace,
+    MtuProbe,
+    PortScan,
+    NatCapability,
+    ExportReport,
+}
+
+impl NetworkDiagnosticTool {
+    const ORDERED: [Self; 8] = [
+        Self::Resolve,
+        Self::DnsExplain,
+        Self::Ping,
+        Self::Trace,
+        Self::MtuProbe,
+        Self::PortScan,
+        Self::NatCapability,
+        Self::ExportReport,
+    ];
+
+    #[cfg(target_os = "linux")]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Resolve => "Resolve",
+            Self::DnsExplain => "DNS Explain",
+            Self::Ping => "Ping",
+            Self::Trace => "Trace",
+            Self::MtuProbe => "MTU Probe",
+            Self::PortScan => "Port Scan",
+            Self::NatCapability => "NAT Capability",
+            Self::ExportReport => "Export Report",
+        }
+    }
+
+    fn previous(self) -> Self {
+        let idx = Self::ORDERED
+            .iter()
+            .position(|tool| *tool == self)
+            .unwrap_or(0);
+        if idx == 0 {
+            Self::ORDERED[Self::ORDERED.len() - 1]
+        } else {
+            Self::ORDERED[idx - 1]
+        }
+    }
+
+    fn next(self) -> Self {
+        let idx = Self::ORDERED
+            .iter()
+            .position(|tool| *tool == self)
+            .unwrap_or(0);
+        Self::ORDERED[(idx + 1) % Self::ORDERED.len()]
+    }
+}
+
+pub struct NetworkUIState {
+    pub input_mode: bool,
+    pub target_input: String,
+    pub selected_tool: NetworkDiagnosticTool,
+    pub running_job: Option<u64>,
+    pub last_job: Option<u64>,
+    pub last_summary: String,
+    pub last_error: Option<String>,
+    pub event_log: VecDeque<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +563,11 @@ impl AppState {
                 }
             }
         }
+
+        #[cfg(target_os = "linux")]
+        while let Ok(event) = self.network_diag_rx.try_recv() {
+            self.apply_network_diag_event(event);
+        }
     }
     fn allow_horizontal_nav(&mut self) -> bool {
         Self::allow_with_throttle(
@@ -497,6 +582,225 @@ impl AppState {
 
     fn allow_view_toggle(&mut self) -> bool {
         Self::allow_with_throttle(&mut self.last_view_toggle_input, Duration::from_millis(200))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn push_network_log(&mut self, line: String) {
+        const MAX_LOG_LINES: usize = 80;
+        if self.network_ui_state.event_log.len() >= MAX_LOG_LINES {
+            self.network_ui_state.event_log.pop_front();
+        }
+        self.network_ui_state.event_log.push_back(line);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_network_diag_event(&mut self, event: linux_netdiag::NetworkDiagnosticsEvent) {
+        match event {
+            linux_netdiag::NetworkDiagnosticsEvent::Started { job } => {
+                self.network_ui_state.running_job = Some(job.id);
+                self.network_ui_state.last_error = None;
+                self.push_network_log(format!(
+                    "Job #{} started: {}",
+                    job.id,
+                    network_operation_label(job.operation)
+                ));
+            }
+            linux_netdiag::NetworkDiagnosticsEvent::Progress { job_id, message } => {
+                self.push_network_log(format!("Job #{}: {}", job_id, message));
+            }
+            linux_netdiag::NetworkDiagnosticsEvent::Completed { job_id, result } => {
+                if self.network_ui_state.running_job == Some(job_id) {
+                    self.network_ui_state.running_job = None;
+                }
+                self.network_ui_state.last_job = Some(job_id);
+                self.network_ui_state.last_summary = result.summary();
+                self.network_ui_state.last_error = None;
+                self.push_network_log(format!(
+                    "Job #{} completed: {}",
+                    job_id, self.network_ui_state.last_summary
+                ));
+            }
+            linux_netdiag::NetworkDiagnosticsEvent::Failed { job_id, error } => {
+                if self.network_ui_state.running_job == Some(job_id) {
+                    self.network_ui_state.running_job = None;
+                }
+                self.network_ui_state.last_job = Some(job_id);
+                self.network_ui_state.last_error = Some(match error.hint {
+                    Some(hint) => format!("{} ({hint})", error.message),
+                    None => error.message,
+                });
+                if let Some(err) = &self.network_ui_state.last_error {
+                    self.push_network_log(format!("Job #{} failed: {}", job_id, err));
+                }
+            }
+            linux_netdiag::NetworkDiagnosticsEvent::Cancelled { job_id } => {
+                if self.network_ui_state.running_job == Some(job_id) {
+                    self.network_ui_state.running_job = None;
+                }
+                self.push_network_log(format!("Job #{} cancelled", job_id));
+            }
+        }
+    }
+
+    fn start_selected_network_diagnostic(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.network_ui_state.running_job.is_some() {
+                self.network_ui_state.last_error =
+                    Some("Another diagnostics job is already running".to_string());
+                return;
+            }
+
+            let tool = self.network_ui_state.selected_tool;
+            let input = self.network_ui_state.target_input.trim().to_string();
+
+            let request_bundle = match tool {
+                NetworkDiagnosticTool::Resolve => {
+                    if input.is_empty() {
+                        Err("Resolve target is empty".to_string())
+                    } else {
+                        Ok((
+                            linux_netdiag::NetworkDiagnosticsRequest::Resolve(
+                                linux_netdiag::ResolveRequest { query: input },
+                            ),
+                            Duration::from_secs(10),
+                        ))
+                    }
+                }
+                NetworkDiagnosticTool::DnsExplain => Ok((
+                    linux_netdiag::NetworkDiagnosticsRequest::DnsExplain(
+                        linux_netdiag::DnsExplainRequest {
+                            include_gateways: true,
+                        },
+                    ),
+                    Duration::from_secs(12),
+                )),
+                NetworkDiagnosticTool::Ping => {
+                    if input.is_empty() {
+                        Err("Ping target is empty".to_string())
+                    } else {
+                        Ok((
+                            linux_netdiag::NetworkDiagnosticsRequest::Ping(
+                                linux_netdiag::PingRequest {
+                                    target: input,
+                                    count: 4,
+                                    timeout_secs: 2,
+                                },
+                            ),
+                            Duration::from_secs(16),
+                        ))
+                    }
+                }
+                NetworkDiagnosticTool::Trace => {
+                    if input.is_empty() {
+                        Err("Trace target is empty".to_string())
+                    } else {
+                        Ok((
+                            linux_netdiag::NetworkDiagnosticsRequest::Trace(
+                                linux_netdiag::TraceRequest {
+                                    target: input,
+                                    protocol: linux_netdiag::TraceProtocol::Icmp,
+                                    max_hops: 20,
+                                    timeout_secs: 2,
+                                    per_hop_queries: 1,
+                                    port: None,
+                                    resolve_names: false,
+                                },
+                            ),
+                            Duration::from_secs(45),
+                        ))
+                    }
+                }
+                NetworkDiagnosticTool::MtuProbe => {
+                    if input.is_empty() {
+                        Err("MTU target is empty".to_string())
+                    } else {
+                        Ok((
+                            linux_netdiag::NetworkDiagnosticsRequest::MtuProbe(
+                                linux_netdiag::MtuProbeRequest { target: input },
+                            ),
+                            Duration::from_secs(35),
+                        ))
+                    }
+                }
+                NetworkDiagnosticTool::PortScan => {
+                    let (target, ports) = parse_network_scan_input(&input);
+                    if target.is_empty() {
+                        Err("Port scan target is empty".to_string())
+                    } else {
+                        let timeout = Duration::from_millis((ports.len() as u64 * 500).max(6_000));
+                        Ok((
+                            linux_netdiag::NetworkDiagnosticsRequest::PortScan(
+                                linux_netdiag::PortScanRequest {
+                                    target,
+                                    ports,
+                                    timeout_ms: 450,
+                                },
+                            ),
+                            timeout,
+                        ))
+                    }
+                }
+                NetworkDiagnosticTool::NatCapability => Ok((
+                    linux_netdiag::NetworkDiagnosticsRequest::NatCapabilityCheck(
+                        linux_netdiag::NatCapabilityRequest { timeout_secs: 8 },
+                    ),
+                    Duration::from_secs(28),
+                )),
+                NetworkDiagnosticTool::ExportReport => Ok((
+                    linux_netdiag::NetworkDiagnosticsRequest::ExportReport(
+                        linux_netdiag::ExportReportRequest {
+                            format: linux_netdiag::ReportFormat::Json,
+                            max_entries: 32,
+                        },
+                    ),
+                    Duration::from_secs(6),
+                )),
+            };
+
+            match request_bundle {
+                Ok((request, timeout)) => {
+                    let job_id = self.network_diag_engine.start(request, timeout);
+                    self.network_ui_state.running_job = Some(job_id);
+                    self.network_ui_state.last_error = None;
+                    self.push_network_log(format!("Queued {} as job #{}", tool.label(), job_id));
+                }
+                Err(error) => {
+                    self.network_ui_state.last_error = Some(error.clone());
+                    self.push_network_log(format!("Cannot run {}: {}", tool.label(), error));
+                }
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.network_ui_state.last_error =
+                Some("Interactive diagnostics is available only on Linux".to_string());
+        }
+    }
+
+    fn cancel_network_diagnostic(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(job_id) = self.network_ui_state.running_job {
+                if self.network_diag_engine.cancel(job_id) {
+                    self.push_network_log(format!("Cancel requested for job #{}", job_id));
+                } else {
+                    self.push_network_log(format!("Job #{} was not active", job_id));
+                }
+                self.network_ui_state.running_job = None;
+            } else {
+                self.push_network_log("No active diagnostics job to cancel".to_string());
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.network_ui_state.last_error =
+                Some("Interactive diagnostics is available only on Linux".to_string());
+        }
     }
 
     fn reset_activity_expand_state(&mut self) {
@@ -1349,9 +1653,7 @@ impl AppState {
                         let block_id = self.console_state.start_command(trimmed.to_string());
                         if let Some(block) = self.console_state.get_block_mut(block_id) {
                             block.push_line(
-                                crate::app::console_state::OutputLine::stderr(
-                                    "cd: OLDPWD not set",
-                                ),
+                                crate::app::console_state::OutputLine::stderr("cd: OLDPWD not set"),
                                 max_lines,
                             );
                             block.complete(1);
@@ -1425,13 +1727,12 @@ impl AppState {
                     .trim_matches('"')
                     .trim_matches('\'')
                     .to_string();
-                self.console_state.env_vars.insert(key.clone(), value.clone());
+                self.console_state
+                    .env_vars
+                    .insert(key.clone(), value.clone());
                 if let Some(block) = self.console_state.get_block_mut(block_id) {
                     block.push_line(
-                        crate::app::console_state::OutputLine::stdout(format!(
-                            "{}={}",
-                            key, value
-                        )),
+                        crate::app::console_state::OutputLine::stdout(format!("{}={}", key, value)),
                         max_lines,
                     );
                     block.complete(0);
@@ -1527,16 +1828,56 @@ impl AppState {
 
         // Exact matches for known interactive programs
         const INTERACTIVE_PROGRAMS: &[&str] = &[
-            "vim", "nvim", "vi", "nano", "emacs", "micro", "joe", "pico",
-            "less", "more", "most",
-            "top", "htop", "btop", "atop", "glances", "nmon",
-            "python", "python3", "ipython", "node", "irb", "ghci", "lua",
-            "bash", "zsh", "fish", "sh", "csh", "tcsh", "ksh",
-            "ssh", "telnet", "ftp", "sftp",
-            "mysql", "psql", "sqlite3", "mongo", "redis-cli",
-            "tmux", "screen", "byobu",
-            "mc", "ranger", "nnn", "lf", "vifm",
-            "gdb", "lldb",
+            "vim",
+            "nvim",
+            "vi",
+            "nano",
+            "emacs",
+            "micro",
+            "joe",
+            "pico",
+            "less",
+            "more",
+            "most",
+            "top",
+            "htop",
+            "btop",
+            "atop",
+            "glances",
+            "nmon",
+            "python",
+            "python3",
+            "ipython",
+            "node",
+            "irb",
+            "ghci",
+            "lua",
+            "bash",
+            "zsh",
+            "fish",
+            "sh",
+            "csh",
+            "tcsh",
+            "ksh",
+            "ssh",
+            "telnet",
+            "ftp",
+            "sftp",
+            "mysql",
+            "psql",
+            "sqlite3",
+            "mongo",
+            "redis-cli",
+            "tmux",
+            "screen",
+            "byobu",
+            "mc",
+            "ranger",
+            "nnn",
+            "lf",
+            "vifm",
+            "gdb",
+            "lldb",
         ];
 
         if INTERACTIVE_PROGRAMS.contains(&first_word) {
@@ -1795,6 +2136,11 @@ impl AppState {
             Arc::clone(&ollama_error),
         );
 
+        #[cfg(target_os = "linux")]
+        let network_diag_engine = Arc::new(linux_netdiag::NetworkDiagnosticsEngine::new());
+        #[cfg(target_os = "linux")]
+        let network_diag_rx = network_diag_engine.subscribe();
+
         Ok(Self {
             config,
             tab_manager,
@@ -1863,6 +2209,17 @@ impl AppState {
                 sort_ascending: false,
             },
 
+            network_ui_state: NetworkUIState {
+                input_mode: false,
+                target_input: "1.1.1.1".to_string(),
+                selected_tool: NetworkDiagnosticTool::Ping,
+                running_job: None,
+                last_job: None,
+                last_summary: "No diagnostics run yet".to_string(),
+                last_error: None,
+                event_log: VecDeque::with_capacity(80),
+            },
+
             processes_state: ProcessesUIState {
                 selected_index: 0,
                 scroll_offset: 0,
@@ -1915,6 +2272,10 @@ impl AppState {
                 chat_pending: false,
                 command_pending: false,
             },
+            #[cfg(target_os = "linux")]
+            network_diag_engine,
+            #[cfg(target_os = "linux")]
+            network_diag_rx,
             async_tx,
             async_rx,
             last_config_version: 0,
@@ -2244,9 +2605,8 @@ impl AppState {
 
                                     // ── Interactive command blocking ───────────────────
                                     if Self::is_interactive_command(&cmd) {
-                                        let block_id = self
-                                            .console_state
-                                            .start_command(cmd.clone());
+                                        let block_id =
+                                            self.console_state.start_command(cmd.clone());
                                         if let Some(block) =
                                             self.console_state.get_block_mut(block_id)
                                         {
@@ -2831,6 +3191,142 @@ impl AppState {
                     }
                     self.ram_state.sort_column = RamProcessSortColumn::PrivateBytes;
                     self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        if self.tab_manager.current() == TabType::Network {
+            if self.network_ui_state.input_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        if is_initial_press {
+                            self.network_ui_state.input_mode = false;
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Enter => {
+                        if is_initial_press {
+                            self.network_ui_state.input_mode = false;
+                            self.start_selected_network_diagnostic();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Backspace => {
+                        if is_initial_press {
+                            self.network_ui_state.target_input.pop();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Char(c) => {
+                        if is_initial_press
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                        {
+                            self.network_ui_state.target_input.push(c);
+                        }
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+
+            match key.code {
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    self.network_ui_state.selected_tool =
+                        self.network_ui_state.selected_tool.previous();
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    self.network_ui_state.selected_tool =
+                        self.network_ui_state.selected_tool.next();
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    if is_initial_press {
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('i') => {
+                    if is_initial_press {
+                        self.network_ui_state.input_mode = true;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('x') => {
+                    if is_initial_press {
+                        self.cancel_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('k') => {
+                    if is_initial_press {
+                        self.network_ui_state.event_log.clear();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('e') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Resolve;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('d') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::DnsExplain;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('p') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Ping;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('t') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Trace;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('m') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::MtuProbe;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('o') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::PortScan;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('n') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::NatCapability;
+                        self.start_selected_network_diagnostic();
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('y') => {
+                    if is_initial_press {
+                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::ExportReport;
+                        self.start_selected_network_diagnostic();
+                    }
                     return Ok(true);
                 }
                 _ => {}
@@ -3797,6 +4293,58 @@ impl AppState {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_network_scan_input(input: &str) -> (String, Vec<u16>) {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return (String::new(), default_port_profile());
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let target = parts.next().unwrap_or_default().to_string();
+    let rest = parts.collect::<Vec<_>>().join(",");
+
+    let mut ports = if rest.is_empty() {
+        default_port_profile()
+    } else {
+        rest.split([',', ';', ' '])
+            .filter_map(|token| token.trim().parse::<u16>().ok())
+            .filter(|port| *port > 0)
+            .collect::<Vec<_>>()
+    };
+
+    ports.sort_unstable();
+    ports.dedup();
+    if ports.is_empty() {
+        ports = default_port_profile();
+    }
+    if ports.len() > 64 {
+        ports.truncate(64);
+    }
+
+    (target, ports)
+}
+
+#[cfg(target_os = "linux")]
+fn default_port_profile() -> Vec<u16> {
+    vec![22, 53, 80, 123, 443, 587, 993, 3389]
+}
+
+#[cfg(target_os = "linux")]
+fn network_operation_label(op: linux_netdiag::DiagnosticsOperation) -> &'static str {
+    match op {
+        linux_netdiag::DiagnosticsOperation::Resolve => "Resolve",
+        linux_netdiag::DiagnosticsOperation::DnsExplain => "DNS Explain",
+        linux_netdiag::DiagnosticsOperation::Ping => "Ping",
+        linux_netdiag::DiagnosticsOperation::Trace => "Trace",
+        linux_netdiag::DiagnosticsOperation::MtuProbe => "MTU Probe",
+        linux_netdiag::DiagnosticsOperation::PortScan => "Port Scan",
+        linux_netdiag::DiagnosticsOperation::NatCapabilityCheck => "NAT Capability",
+        linux_netdiag::DiagnosticsOperation::MappingTest => "Mapping Test",
+        linux_netdiag::DiagnosticsOperation::ExportReport => "Export Report",
     }
 }
 

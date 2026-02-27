@@ -4,6 +4,7 @@ pub mod cpu;
 pub mod disk;
 pub mod memory;
 pub mod network;
+pub mod network_diagnostics;
 pub mod process;
 pub mod services;
 pub mod shell;
@@ -11,8 +12,8 @@ pub mod shell;
 pub use cpu::CpuInfo;
 pub use disk::{BlockDeviceInfo, BtrfsInfo, DiskInfo, ProcessIoSample, RawDiskStats, SmartData};
 pub use memory::{MemoryHardwareInfo, MemoryInfo, ZramInfo};
-pub use process::ProcessInfo;
 use parking_lot::Mutex;
+pub use process::ProcessInfo;
 use std::collections::HashMap;
 use std::time::Instant;
 

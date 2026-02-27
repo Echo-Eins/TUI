@@ -353,7 +353,9 @@ impl LinuxSysMonitor {
 
         let mut prev = self.rapl_snapshot.lock();
         let watts = if let Some(previous) = prev.as_ref() {
-            let elapsed = now.saturating_duration_since(previous.timestamp).as_secs_f64();
+            let elapsed = now
+                .saturating_duration_since(previous.timestamp)
+                .as_secs_f64();
             if elapsed > 0.0 {
                 let mut delta_uj_sum = 0u128;
                 for d in &domains {

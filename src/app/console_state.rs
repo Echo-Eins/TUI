@@ -502,8 +502,7 @@ impl ConsoleState {
             let byte_pos = self.cursor_byte_pos();
             // Find the byte range of the char at this position
             if let Some((_, ch)) = self.input_buffer.char_indices().nth(self.cursor_position) {
-                self.input_buffer
-                    .drain(byte_pos..byte_pos + ch.len_utf8());
+                self.input_buffer.drain(byte_pos..byte_pos + ch.len_utf8());
             }
         }
     }
@@ -513,8 +512,7 @@ impl ConsoleState {
         if self.cursor_position < char_count {
             let byte_pos = self.cursor_byte_pos();
             if let Some((_, ch)) = self.input_buffer.char_indices().nth(self.cursor_position) {
-                self.input_buffer
-                    .drain(byte_pos..byte_pos + ch.len_utf8());
+                self.input_buffer.drain(byte_pos..byte_pos + ch.len_utf8());
             }
         }
     }

@@ -18,8 +18,8 @@ pub fn strip_ansi(input: &str) -> String {
                 Some('[') => {
                     // CSI sequence: ESC [ ... final_byte
                     chars.next(); // consume '['
-                    // Read parameter bytes (0x30–0x3F) and intermediate bytes (0x20–0x2F)
-                    // then final byte (0x40–0x7E)
+                                  // Read parameter bytes (0x30–0x3F) and intermediate bytes (0x20–0x2F)
+                                  // then final byte (0x40–0x7E)
                     loop {
                         match chars.peek() {
                             Some(&ch) if ('\x40'..='\x7E').contains(&ch) => {
@@ -44,7 +44,7 @@ pub fn strip_ansi(input: &str) -> String {
                     chars.next(); // consume ']'
                     loop {
                         match chars.next() {
-                            Some('\x07') => break,             // BEL terminator
+                            Some('\x07') => break, // BEL terminator
                             Some('\x1b') => {
                                 // Check for ST (ESC \)
                                 if chars.peek() == Some(&'\\') {
@@ -52,9 +52,9 @@ pub fn strip_ansi(input: &str) -> String {
                                 }
                                 break;
                             }
-                            Some('\u{9c}') => break,             // 8-bit ST
-                            None => break,                     // unterminated
-                            _ => {}                            // skip payload
+                            Some('\u{9c}') => break, // 8-bit ST
+                            None => break,           // unterminated
+                            _ => {}                  // skip payload
                         }
                     }
                 }
@@ -112,14 +112,8 @@ mod tests {
 
     #[test]
     fn strip_sgr_color_codes() {
-        assert_eq!(
-            strip_ansi("\x1b[31mred\x1b[0m normal"),
-            "red normal"
-        );
-        assert_eq!(
-            strip_ansi("\x1b[1;32;40mbold green\x1b[m"),
-            "bold green"
-        );
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m normal"), "red normal");
+        assert_eq!(strip_ansi("\x1b[1;32;40mbold green\x1b[m"), "bold green");
     }
 
     #[test]
@@ -130,19 +124,14 @@ mod tests {
 
     #[test]
     fn strip_osc_title_sequence() {
-        assert_eq!(
-            strip_ansi("\x1b]0;Window Title\x07visible"),
-            "visible"
-        );
-        assert_eq!(
-            strip_ansi("\x1b]0;Title\x1b\\visible"),
-            "visible"
-        );
+        assert_eq!(strip_ansi("\x1b]0;Window Title\x07visible"), "visible");
+        assert_eq!(strip_ansi("\x1b]0;Title\x1b\\visible"), "visible");
     }
 
     #[test]
     fn strip_mixed_sequences() {
-        let input = "\x1b[32m➜\x1b[0m \x1b[36m~/code\x1b[0m \x1b[33mgit:\x1b[0m\x1b[31m(main)\x1b[0m";
+        let input =
+            "\x1b[32m➜\x1b[0m \x1b[36m~/code\x1b[0m \x1b[33mgit:\x1b[0m\x1b[31m(main)\x1b[0m";
         assert_eq!(strip_ansi(input), "➜ ~/code git:(main)");
     }
 

@@ -95,12 +95,11 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
             if iface.link_speed == "Unknown"
                 && (iface.download_speed > 0.0 || iface.upload_speed > 0.0)
             {
-                iface.link_speed = format!("{:.1} Mbps", iface.download_speed.max(iface.upload_speed));
+                iface.link_speed =
+                    format!("{:.1} Mbps", iface.download_speed.max(iface.upload_speed));
             }
 
-            let entry = peak_speeds
-                .entry(iface.name.clone())
-                .or_insert((0.0, 0.0));
+            let entry = peak_speeds.entry(iface.name.clone()).or_insert((0.0, 0.0));
             entry.0 = entry.0.max(iface.download_speed);
             entry.1 = entry.1.max(iface.upload_speed);
 

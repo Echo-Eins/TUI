@@ -430,8 +430,12 @@ impl CommandExecutor for PowerShellExecutor {
                                     let _ = tx_clone.send(StreamMessage::Stdout(clean)).await;
                                     line_buffer.clear();
                                 }
-                                '\r' => { line_buffer.clear(); }
-                                _ => { line_buffer.push(c); }
+                                '\r' => {
+                                    line_buffer.clear();
+                                }
+                                _ => {
+                                    line_buffer.push(c);
+                                }
                             }
                         }
                     }
@@ -463,8 +467,12 @@ impl CommandExecutor for PowerShellExecutor {
                                     let _ = tx_clone.send(StreamMessage::Stderr(clean)).await;
                                     line_buffer.clear();
                                 }
-                                '\r' => { line_buffer.clear(); }
-                                _ => { line_buffer.push(c); }
+                                '\r' => {
+                                    line_buffer.clear();
+                                }
+                                _ => {
+                                    line_buffer.push(c);
+                                }
                             }
                         }
                     }
@@ -477,8 +485,12 @@ impl CommandExecutor for PowerShellExecutor {
                                     let _ = tx_clone.send(StreamMessage::Stderr(clean)).await;
                                     line_buffer.clear();
                                 }
-                                '\r' => { line_buffer.clear(); }
-                                _ => { line_buffer.push(c); }
+                                '\r' => {
+                                    line_buffer.clear();
+                                }
+                                _ => {
+                                    line_buffer.push(c);
+                                }
                             }
                         }
                     }

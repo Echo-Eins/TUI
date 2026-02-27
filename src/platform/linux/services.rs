@@ -47,7 +47,8 @@ impl LinuxSysMonitor {
         let mut services = Vec::new();
         let mut block: HashMap<String, String> = HashMap::new();
 
-        let flush_block = |block: &mut HashMap<String, String>, services: &mut Vec<LinuxServiceInfo>| {
+        let flush_block = |block: &mut HashMap<String, String>,
+                           services: &mut Vec<LinuxServiceInfo>| {
             let Some(id) = block.get("Id").cloned() else {
                 block.clear();
                 return;
@@ -111,7 +112,13 @@ impl LinuxSysMonitor {
         let unit_file_states = self.read_unit_file_states().unwrap_or_default();
 
         let output = Command::new("systemctl")
-            .args(["list-units", "--type=service", "--all", "--no-pager", "--no-legend"])
+            .args([
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-pager",
+                "--no-legend",
+            ])
             .output()?;
 
         if !output.status.success() {
@@ -175,7 +182,10 @@ impl LinuxSysMonitor {
             .output()?;
 
         if !output.status.success() {
-            anyhow::bail!("systemctl list-unit-files failed with status: {}", output.status);
+            anyhow::bail!(
+                "systemctl list-unit-files failed with status: {}",
+                output.status
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);

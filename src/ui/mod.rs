@@ -157,6 +157,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         TabType::Gpu => "[Up/Down] Navigate | [p/n/g/m/t] Sort | [PgUp/PgDn] Page | [F2] Compact | [Tab] Next Tab | [Ctrl+C] Exit",
         TabType::Ram => "[Left/Right] Focus | [Up/Down] Navigate | [p/n/w/b] Sort | [F2] Compact | [Tab] Next Tab | [Ctrl+C] Exit",
         TabType::Disk => "[F2] Compact | [Tab] Next Tab | [1-0] Switch Tab | [Ctrl+C] Exit",
+        TabType::Network => "[Up/Down] Select Tool | [I] Edit Target | [Enter] Run | [X] Cancel | [E/D/P/T/M/O/N/Y] Quick Run | [F2] Compact",
         _ => "[F2] Compact | [Tab] Next Tab | [1-0] Switch Tab | [Ctrl+C] Exit",
     };
 

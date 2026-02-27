@@ -6,6 +6,7 @@
     Frame,
 };
 
+use crate::app::state::{NetworkDiagnosticTool, NetworkUIState};
 use crate::app::App;
 use crate::ui::theme::Theme;
 use crate::utils::format::format_bytes;
@@ -13,6 +14,7 @@ use crate::utils::format::format_bytes;
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let network_data = app.state.network_data.read();
     let network_error = app.state.network_error.read();
+    let network_ui = &app.state.network_ui_state;
 
     if let Some(message) = network_error.as_ref() {
         let config = app.state.config.read();
@@ -32,9 +34,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let theme = Theme::from_config(&config);
 
         if app.state.compact_mode {
-            render_compact(f, area, data, &theme);
+            render_compact(f, area, data, network_ui, &theme);
         } else {
-            render_full(f, area, data, &theme);
+            render_full(f, area, data, network_ui, &theme);
         }
     } else {
         let block = Block::default()
@@ -50,14 +52,21 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+fn render_full(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    network_ui: &NetworkUIState,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Length(8), // Interface details (per interface)
             Constraint::Length(8), // Traffic graphs (Download/Upload)
-            Constraint::Min(10),   // Active connections and bandwidth consumers
+            Constraint::Length(9), // Diagnostics
+            Constraint::Min(8),    // Active connections and bandwidth consumers
         ])
         .split(area);
 
@@ -70,6 +79,9 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
     // Traffic graphs
     render_traffic_graphs(f, chunks[2], data, theme);
 
+    // Diagnostics
+    render_diagnostics_panel(f, chunks[3], network_ui, theme);
+
     // Split bottom section for connections and bandwidth consumers
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -77,7 +89,7 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
             Constraint::Percentage(50), // Active connections
             Constraint::Percentage(50), // Bandwidth consumers
         ])
-        .split(chunks[3]);
+        .split(chunks[4]);
 
     // Active connections
     render_connections_table(f, bottom_chunks[0], data, theme);
@@ -86,12 +98,19 @@ fn render_full(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, t
     render_bandwidth_consumers(f, bottom_chunks[1], data, theme);
 }
 
-fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
+fn render_compact(
+    f: &mut Frame,
+    area: Rect,
+    data: &crate::monitors::NetworkData,
+    network_ui: &NetworkUIState,
+    theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Length(6), // Quick stats
+            Constraint::Length(8), // Diagnostics
             Constraint::Min(8),    // Connections (compact)
         ])
         .split(area);
@@ -165,8 +184,10 @@ fn render_compact(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, chunks[1]);
 
+    render_diagnostics_panel(f, chunks[2], network_ui, theme);
+
     // Compact connections (top 5)
-    render_connections_compact(f, chunks[2], data, theme);
+    render_connections_compact(f, chunks[3], data, theme);
 }
 
 fn render_header(f: &mut Frame, area: Rect, data: &crate::monitors::NetworkData, theme: &Theme) {
@@ -571,4 +592,103 @@ fn render_bandwidth_consumers(
         .column_spacing(1);
 
     f.render_widget(table, area);
+}
+
+fn render_diagnostics_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &Theme) {
+    let status = match ui.running_job {
+        Some(job_id) => format!("Running #{}", job_id),
+        None => "Idle".to_string(),
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("Tool: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            diagnostic_tool_label(ui.selected_tool),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Status: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            status,
+            Style::default()
+                .fg(if ui.running_job.is_some() {
+                    Color::Cyan
+                } else {
+                    Color::Green
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Target: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            if ui.target_input.is_empty() {
+                "<empty>".to_string()
+            } else {
+                ui.target_input.clone()
+            },
+            Style::default().fg(Color::White),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            if ui.input_mode { "[INPUT MODE]" } else { "" },
+            Style::default().fg(Color::Magenta),
+        ),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "Keys: E Resolve | D DNS | P Ping | T Trace | M MTU | O Ports | N NAT | Y Export | I Edit | Enter Run | X Cancel | K Clear",
+        Style::default().fg(Color::DarkGray),
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Last: ", Style::default().fg(Color::Gray)),
+        Span::styled(ui.last_summary.clone(), Style::default().fg(Color::White)),
+    ]));
+
+    if let Some(error) = &ui.last_error {
+        lines.push(Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::styled(error.clone(), Style::default().fg(Color::Red)),
+        ]));
+    }
+
+    let recent_logs = ui
+        .event_log
+        .iter()
+        .rev()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    for entry in recent_logs {
+        lines.push(Line::from(vec![
+            Span::styled("* ", Style::default().fg(Color::DarkGray)),
+            Span::styled(entry, Style::default().fg(Color::Gray)),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Diagnostics")
+        .border_style(Style::default().fg(theme.network_color));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn diagnostic_tool_label(tool: NetworkDiagnosticTool) -> &'static str {
+    match tool {
+        NetworkDiagnosticTool::Resolve => "Resolve",
+        NetworkDiagnosticTool::DnsExplain => "DNS Explain",
+        NetworkDiagnosticTool::Ping => "Ping",
+        NetworkDiagnosticTool::Trace => "Trace",
+        NetworkDiagnosticTool::MtuProbe => "MTU Probe",
+        NetworkDiagnosticTool::PortScan => "Port Scan",
+        NetworkDiagnosticTool::NatCapability => "NAT Capability",
+        NetworkDiagnosticTool::ExportReport => "Export Report",
+    }
 }

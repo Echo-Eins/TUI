@@ -159,10 +159,7 @@ impl LinuxSysMonitor {
                     if name.trim().contains("nvme") || name.trim().contains("drivetemp") {
                         if let Ok(temp_str) = fs::read_to_string(path.join("temp1_input")) {
                             if let Ok(temp_milli) = temp_str.trim().parse::<f32>() {
-                                temps.insert(
-                                    name.trim().to_string(),
-                                    temp_milli / 1000.0,
-                                );
+                                temps.insert(name.trim().to_string(), temp_milli / 1000.0);
                             }
                         }
                     }

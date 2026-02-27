@@ -301,9 +301,7 @@ impl LinuxSysMonitor {
                         .unwrap_or(100.0);
                 }
             }
-            if line.starts_with("rtt min/avg/max/")
-                || line.starts_with("round-trip min/avg/max/")
-            {
+            if line.starts_with("rtt min/avg/max/") || line.starts_with("round-trip min/avg/max/") {
                 if let Some(after_eq) = line.split('=').nth(1) {
                     let value_part = after_eq.split_whitespace().next().unwrap_or("");
                     let mut pieces = value_part.split('/');
@@ -436,7 +434,18 @@ impl LinuxSysMonitor {
 
     fn ping_df_payload(&self, target: &str, payload: u32) -> Result<bool> {
         let output = Command::new("ping")
-            .args(["-n", "-c", "1", "-W", "1", "-M", "do", "-s", &payload.to_string(), target])
+            .args([
+                "-n",
+                "-c",
+                "1",
+                "-W",
+                "1",
+                "-M",
+                "do",
+                "-s",
+                &payload.to_string(),
+                target,
+            ])
             .output()
             .with_context(|| format!("failed to execute MTU probe ping for {target}"))?;
         Ok(output.status.success())
@@ -534,7 +543,8 @@ impl LinuxSysMonitor {
     }
 
     fn read_network_traffic_stats(&self) -> Result<HashMap<String, (u64, u64)>> {
-        let content = fs::read_to_string("/proc/net/dev").context("failed to read /proc/net/dev")?;
+        let content =
+            fs::read_to_string("/proc/net/dev").context("failed to read /proc/net/dev")?;
         let mut map = HashMap::new();
         for line in content.lines().skip(2) {
             let Some((iface, data)) = line.split_once(':') else {
@@ -553,7 +563,8 @@ impl LinuxSysMonitor {
     }
 
     fn read_ipv4_default_gateways(&self) -> Result<Vec<GatewayInfo>> {
-        let content = fs::read_to_string("/proc/net/route").context("failed to read /proc/net/route")?;
+        let content =
+            fs::read_to_string("/proc/net/route").context("failed to read /proc/net/route")?;
         let mut gateways = Vec::new();
 
         for line in content.lines().skip(1) {
@@ -715,7 +726,8 @@ impl LinuxSysMonitor {
     fn read_interface_details(&self, iface: &str) -> InterfaceDetails {
         let base = Path::new("/sys/class/net").join(iface);
         let device = base.join("device");
-        let status_raw = read_trimmed(base.join("operstate")).unwrap_or_else(|| "unknown".to_string());
+        let status_raw =
+            read_trimmed(base.join("operstate")).unwrap_or_else(|| "unknown".to_string());
         let status = map_operstate(&status_raw);
 
         let link_speed = read_trimmed(base.join("speed"))
@@ -778,11 +790,7 @@ impl LinuxSysMonitor {
         };
 
         for entry in proc_entries.flatten() {
-            let pid = entry
-                .file_name()
-                .to_string_lossy()
-                .parse::<u32>()
-                .ok();
+            let pid = entry.file_name().to_string_lossy().parse::<u32>().ok();
             let Some(pid) = pid else {
                 continue;
             };
@@ -909,7 +917,12 @@ impl LinuxSysMonitor {
         let owners = self.collect_socket_owners();
         let mut per_pid: HashMap<u32, ProcessBandwidthInfo> = HashMap::new();
 
-        for path in ["/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6"] {
+        for path in [
+            "/proc/net/tcp",
+            "/proc/net/tcp6",
+            "/proc/net/udp",
+            "/proc/net/udp6",
+        ] {
             let Ok(content) = fs::read_to_string(path) else {
                 continue;
             };
@@ -1025,9 +1038,7 @@ fn parse_endpoint(endpoint: &str, is_ipv6: bool) -> Option<(String, u16)> {
 }
 
 fn parse_socket_inode(link_target: &str) -> Option<u64> {
-    let inner = link_target
-        .strip_prefix("socket:[")?
-        .strip_suffix(']')?;
+    let inner = link_target.strip_prefix("socket:[")?.strip_suffix(']')?;
     inner.parse::<u64>().ok()
 }
 
@@ -1198,7 +1209,10 @@ mod tests {
     #[test]
     fn test_parse_ipv4_hex_le() {
         assert_eq!(parse_ipv4_hex_le("0100007F").as_deref(), Some("127.0.0.1"));
-        assert_eq!(parse_ipv4_hex_le("C0A80101").as_deref(), Some("1.1.168.192"));
+        assert_eq!(
+            parse_ipv4_hex_le("C0A80101").as_deref(),
+            Some("1.1.168.192")
+        );
     }
 
     #[test]
@@ -1216,7 +1230,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_resolve_target() {
-        assert_eq!(sanitize_resolve_target("https://example.com/path"), "example.com");
+        assert_eq!(
+            sanitize_resolve_target("https://example.com/path"),
+            "example.com"
+        );
         assert_eq!(sanitize_resolve_target("example.com:443"), "example.com");
         assert_eq!(sanitize_resolve_target("[2001:db8::1]"), "2001:db8::1");
     }

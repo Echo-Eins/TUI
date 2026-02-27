@@ -93,12 +93,7 @@ impl LinuxSysMonitor {
 
         let memory = read_rss_memory_bytes(pid, page_size).unwrap_or(0);
         let uid = read_uid_from_status(&status_path).unwrap_or(0);
-        let user = Some(
-            users
-                .get(&uid)
-                .cloned()
-                .unwrap_or_else(|| uid.to_string()),
-        );
+        let user = Some(users.get(&uid).cloned().unwrap_or_else(|| uid.to_string()));
         let (io_read_bytes, io_write_bytes) = read_proc_io_bytes(pid);
         let handle_count = count_process_handles(pid);
 

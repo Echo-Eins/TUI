@@ -605,7 +605,8 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
     // Render cursor if in insert mode
     if state.console_state.mode == ConsoleMode::Insert {
         // Compute visual cursor position using unicode display width
-        let text_before_cursor: String = input.chars()
+        let text_before_cursor: String = input
+            .chars()
             .take(state.console_state.cursor_position)
             .collect();
         let cursor_x = inner.x
