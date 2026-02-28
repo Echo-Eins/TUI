@@ -145,9 +145,19 @@ fn render_header_bar(
     theme: &Theme,
 ) {
     let iface = primary_interface(data);
-    let job_status = match ui.running_job {
-        Some(id) => format!("#{id} running"),
-        None => "idle".to_string(),
+    // Only show job info when a job is running or has run
+    let job_span: Option<Span> = if let Some(id) = ui.running_job {
+        Some(Span::styled(
+            format!("Job #{id} running"),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+    } else if let Some(id) = ui.last_job {
+        Some(Span::styled(
+            format!("Last:#{id}"),
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        None
     };
 
     let marker_label = if ui.show_marker_traffic {
@@ -158,7 +168,7 @@ fn render_header_bar(
 
     let spans: Vec<Span> = if let Some(iface) = iface {
         let (rx_display, tx_display) = traffic_display(iface, ui);
-        vec![
+        let mut spans = vec![
             Span::styled(
                 format!(" {} ", iface.name),
                 Style::default()
@@ -200,9 +210,12 @@ fn render_header_bar(
             Span::styled("TX:", dim()),
             Span::styled(tx_display, Style::default().fg(Color::Cyan)),
             Span::styled(marker_label, Style::default().fg(Color::Yellow)),
-            Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("Jobs:{}", job_status), dim()),
-        ]
+        ];
+        if let Some(js) = job_span {
+            spans.push(Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)));
+            spans.push(js);
+        }
+        spans
     } else {
         vec![
             Span::styled(
@@ -347,6 +360,7 @@ fn render_center_interface(
         for (i, ifc) in data.interfaces.iter().enumerate() {
             let is_sel = i == iface_idx;
             let iface_type = detect_iface_type(&ifc.name);
+            // Build label with separate type tag and name for correct spacing
             let label = format!(" {}{} ", iface_type, ifc.name);
             if is_sel {
                 iface_tabs.push(Span::styled(
@@ -364,7 +378,9 @@ fn render_center_interface(
                 };
                 iface_tabs.push(Span::styled(label, Style::default().fg(status_fg)));
             }
-            iface_tabs.push(Span::styled(" ", Style::default().fg(Color::DarkGray)));
+            if i + 1 < iface_count {
+                iface_tabs.push(Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)));
+            }
         }
         let sel_block = Block::default()
             .borders(Borders::BOTTOM)
@@ -379,10 +395,8 @@ fn render_center_interface(
 
     // ---- Interface details ----
     let title = if let Some(iface) = iface {
-        let iface_type = detect_iface_type(&iface.name);
         format!(
-            "{}{} ({}/{}) \u{2502} [v]view [\u{2191}\u{2193}]iface",
-            iface_type,
+            "{} ({}/{}) \u{2502} [\u{2190}\u{2192}]panel [v]view [\u{2191}\u{2193}]iface",
             iface.name,
             iface_idx + 1,
             iface_count
@@ -417,8 +431,11 @@ fn render_center_interface(
                 Span::styled(&iface.link_speed, Style::default().fg(Color::Cyan)),
                 Span::styled("  Duplex: ", dim()),
                 Span::styled(&iface.duplex, Style::default().fg(Color::White)),
-                Span::styled("  MTU: ", dim()),
-                Span::styled(iface.mtu.to_string(), Style::default().fg(Color::White)),
+                Span::styled("  IF-MTU: ", dim()),
+                Span::styled(
+                    format!("{} B", iface.mtu),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("IPv4: ", dim()),
@@ -969,30 +986,45 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
     )));
 
     for l in &ui.detail_lines {
-        // Try to parse key=value or key: value for structured display
-        if let Some(eq_pos) = l.find('=').or_else(|| {
-            // Only use colon if it looks like "key: value" not "http://..."
-            let pos = l.find(": ")?;
-            if pos < 20 { Some(pos) } else { None }
-        }) {
-            let sep = if l.as_bytes().get(eq_pos) == Some(&b'=') { '=' } else { ':' };
-            let (key, val) = l.split_at(eq_pos);
-            let val = &val[if sep == ':' { 2 } else { 1 }..];
-            let key = key.trim();
-            let val = val.trim();
+        // Try to parse "key: value" for structured display, but only for
+        // top-level lines (not indented) with a clean key (no paths, URLs, etc.)
+        let parsed = if !l.starts_with(' ') && !l.starts_with('\t') {
+            // Try "key: value" first (but avoid splitting paths like /etc/resolv.conf)
+            if let Some(pos) = l.find(": ") {
+                let key = l[..pos].trim();
+                let val = l[pos + 2..].trim();
+                // Key must be short alphanumeric label (no slashes, dots, colons)
+                if pos <= 24
+                    && !key.is_empty()
+                    && !key.contains('/')
+                    && !key.contains('.')
+                    && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '-')
+                {
+                    Some((key.to_string(), val.to_string()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((key, val)) = parsed {
             // Color the value based on content
             let val_color = if val.contains("fail") || val.contains("error") || val == "false" {
                 Color::Red
             } else if val.contains("warn") || val.contains("PARTIAL") || val.contains("could not") {
                 Color::Yellow
-            } else if val.contains("true") || val.contains("OK") || val.starts_with("0.0%") {
+            } else if val.contains("true") || val.contains("OK") || val == "0" {
                 Color::Green
             } else {
                 Color::Cyan
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {:<18} ", key), dim()),
-                Span::styled(val.to_string(), Style::default().fg(val_color)),
+                Span::styled(val, Style::default().fg(val_color)),
             ]));
         } else {
             // Fallback: color-code known prefixes
@@ -1003,6 +1035,7 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
             } else if l.starts_with("hop ") || l.starts_with("attempt ") {
                 Style::default().fg(Color::Cyan)
             } else if l.starts_with("  ") {
+                // Indented sub-items
                 Style::default().fg(Color::DarkGray)
             } else if l.starts_with("blocked") || l.starts_with("conflicts") {
                 Style::default().fg(Color::Yellow)
@@ -1362,16 +1395,21 @@ fn render_activity_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: 
     }
 
     let visible = inner.height as usize;
+    let total = ui.event_log.len();
+    // Clamp scroll: 0 means show latest (bottom), larger values scroll up
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = ui.activity_scroll.min(max_scroll);
+    // Take a window of events: skip the newest `scroll` entries, then take `visible`
     let lines: Vec<Line> = ui
         .event_log
         .iter()
         .rev()
+        .skip(scroll)
         .take(visible)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .map(|ev| {
-            // Parse structured event: [HH:MM:SS] ...
             let (icon, color) = if ev.contains("failed") || ev.contains("Error") || ev.contains("Cannot") {
                 ("\u{2718}", Color::Red)
             } else if ev.contains("completed") {
@@ -1454,11 +1492,11 @@ fn render_help_bar(f: &mut Frame, area: Rect, ui: &NetworkUIState) {
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Tab", Style::default().fg(Color::White)),
-        Span::styled(":focus ", dim()),
+        Span::styled(" \u{2190}\u{2192}", Style::default().fg(Color::White)),
+        Span::styled(":panel ", dim()),
         Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
         Span::styled(":nav ", dim()),
-        Span::styled("\u{2190}\u{2192}", Style::default().fg(Color::White)),
+        Span::styled("Tab", Style::default().fg(Color::White)),
         Span::styled(":tabs ", dim()),
         Span::styled("Enter", Style::default().fg(Color::White)),
         Span::styled(":run ", dim()),
@@ -1743,20 +1781,20 @@ fn diagnostic_hint(tool: NetworkDiagnosticTool) -> &'static str {
     }
 }
 
-/// Detect interface type icon from name prefix
+/// Detect interface type short tag from name prefix (fixed-width ASCII, no overlapping emojis)
 fn detect_iface_type(name: &str) -> &'static str {
     if name.starts_with("wl") || name.starts_with("wlan") {
-        "\u{1f4f6}" // wireless signal
+        "[W] "
     } else if name.starts_with("eth") || name.starts_with("en") {
-        "\u{1f50c}" // wired plug
+        "[E] "
     } else if name.starts_with("lo") {
-        "\u{1f501}" // loopback
+        "[L] "
     } else if name.starts_with("docker") || name.starts_with("br-") || name.starts_with("veth") {
-        "\u{1f433}" // docker whale
+        "[D] "
     } else if name.starts_with("tun") || name.starts_with("tap") || name.starts_with("wg") {
-        "\u{1f510}" // VPN lock
+        "[V] "
     } else if name.starts_with("virbr") || name.starts_with("vnet") {
-        "\u{1f5a5}" // virtual
+        "[B] "
     } else {
         ""
     }

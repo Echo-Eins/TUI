@@ -46,9 +46,15 @@ async fn main() -> Result<()> {
     loop {
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        if let AppEvent::Input(event) = events.next().await {
-            if !app.handle_event(event).await? {
-                break;
+        match events.next().await {
+            AppEvent::Input(event) => {
+                if !app.handle_event(event).await? {
+                    break;
+                }
+            }
+            AppEvent::Tick => {
+                // Poll async updates (diagnostics results, etc.) on every tick
+                app.tick();
             }
         }
     }

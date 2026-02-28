@@ -425,6 +425,9 @@ pub struct NetworkUIState {
     pub connections_scroll: usize,
     pub bandwidth_scroll: usize,
 
+    // Activity scroll
+    pub activity_scroll: usize,
+
     // Traffic marker for RX/TX toggle
     pub traffic_marker: Option<TrafficMarker>,
     pub show_marker_traffic: bool,
@@ -612,7 +615,7 @@ impl AppState {
         self.console_state.enable_ai_explain = config_snapshot.console.enable_ai_explain;
     }
 
-    fn apply_async_updates(&mut self) {
+    pub fn apply_async_updates(&mut self) {
         // Read config once per tick for inner loops
         let max_lines = self.config.read().console.max_output_lines;
 
@@ -2563,6 +2566,7 @@ impl AppState {
                 result_history: VecDeque::with_capacity(64),
                 connections_scroll: 0,
                 bandwidth_scroll: 0,
+                activity_scroll: 0,
                 traffic_marker: None,
                 show_marker_traffic: false,
                 selected_interface_idx: 0,
@@ -3552,6 +3556,7 @@ impl AppState {
                     KeyCode::Esc => {
                         if is_initial_press {
                             self.network_ui_state.input_mode = false;
+                            self.network_ui_state.focus = NetworkFocusZone::Tools;
                             self.network_ui_state.nat_mapping_confirm_until = None;
                         }
                         return Ok(true);
@@ -3559,6 +3564,7 @@ impl AppState {
                     KeyCode::Enter => {
                         if is_initial_press {
                             self.network_ui_state.input_mode = false;
+                            self.network_ui_state.focus = NetworkFocusZone::Tools;
                             self.start_selected_network_diagnostic();
                         }
                         return Ok(true);
@@ -3586,8 +3592,10 @@ impl AppState {
 
             // --- Global Network tab keys (work in any focus zone) ---
             match key.code {
-                // Tab / Shift+Tab: cycle focus zones
-                KeyCode::Tab => {
+                // Backtick (`) / Shift+Backtick: cycle focus zones
+                // NOTE: Tab/BackTab are NOT intercepted so they pass through
+                // to the global handler which switches between main tabs.
+                KeyCode::Char('`') => {
                     if is_initial_press {
                         if key.modifiers.contains(KeyModifiers::SHIFT) {
                             self.network_ui_state.focus = self.network_ui_state.focus.prev();
@@ -3597,14 +3605,9 @@ impl AppState {
                     }
                     return Ok(true);
                 }
-                KeyCode::BackTab => {
-                    if is_initial_press {
-                        self.network_ui_state.focus = self.network_ui_state.focus.prev();
-                    }
-                    return Ok(true);
-                }
 
-                // Left/Right: switch result sub-tabs when Results focused
+                // Left/Right: switch result sub-tabs when Results focused,
+                // cycle focus zones otherwise
                 KeyCode::Left => {
                     if is_initial_press {
                         match self.network_ui_state.focus {
@@ -3612,7 +3615,9 @@ impl AppState {
                                 self.network_ui_state.result_tab =
                                     self.network_ui_state.result_tab.prev();
                             }
-                            _ => {}
+                            _ => {
+                                self.network_ui_state.focus = self.network_ui_state.focus.prev();
+                            }
                         }
                     }
                     return Ok(true);
@@ -3624,7 +3629,9 @@ impl AppState {
                                 self.network_ui_state.result_tab =
                                     self.network_ui_state.result_tab.next();
                             }
-                            _ => {}
+                            _ => {
+                                self.network_ui_state.focus = self.network_ui_state.focus.next();
+                            }
                         }
                     }
                     return Ok(true);
@@ -3636,14 +3643,19 @@ impl AppState {
                         return Ok(true);
                     }
                     match self.network_ui_state.focus {
-                        NetworkFocusZone::Tools => {
+                        NetworkFocusZone::Tools | NetworkFocusZone::Parameters => {
+                            // Both Tools and Parameters zones navigate tools up
                             self.network_ui_state.selected_tool =
                                 self.network_ui_state.selected_tool.previous();
                             self.network_ui_state.nat_mapping_confirm_until = None;
                         }
-                        NetworkFocusZone::Results | NetworkFocusZone::Activity => {
+                        NetworkFocusZone::Results => {
                             self.network_ui_state.detail_scroll =
                                 self.network_ui_state.detail_scroll.saturating_sub(1);
+                        }
+                        NetworkFocusZone::Activity => {
+                            self.network_ui_state.activity_scroll =
+                                self.network_ui_state.activity_scroll.saturating_sub(1);
                         }
                         NetworkFocusZone::Interface => {
                             match self.network_ui_state.center_view {
@@ -3657,7 +3669,6 @@ impl AppState {
                                 }
                             }
                         }
-                        NetworkFocusZone::Parameters => {}
                     }
                     return Ok(true);
                 }
@@ -3666,14 +3677,19 @@ impl AppState {
                         return Ok(true);
                     }
                     match self.network_ui_state.focus {
-                        NetworkFocusZone::Tools => {
+                        NetworkFocusZone::Tools | NetworkFocusZone::Parameters => {
+                            // Both Tools and Parameters zones navigate tools down
                             self.network_ui_state.selected_tool =
                                 self.network_ui_state.selected_tool.next();
                             self.network_ui_state.nat_mapping_confirm_until = None;
                         }
-                        NetworkFocusZone::Results | NetworkFocusZone::Activity => {
+                        NetworkFocusZone::Results => {
                             self.network_ui_state.detail_scroll =
                                 self.network_ui_state.detail_scroll.saturating_add(1);
+                        }
+                        NetworkFocusZone::Activity => {
+                            self.network_ui_state.activity_scroll =
+                                self.network_ui_state.activity_scroll.saturating_add(1);
                         }
                         NetworkFocusZone::Interface => {
                             match self.network_ui_state.center_view {
@@ -3687,7 +3703,6 @@ impl AppState {
                                 }
                             }
                         }
-                        NetworkFocusZone::Parameters => {}
                     }
                     return Ok(true);
                 }
@@ -3701,6 +3716,10 @@ impl AppState {
                         NetworkFocusZone::Interface => {
                             self.network_ui_state.connections_scroll =
                                 self.network_ui_state.connections_scroll.saturating_sub(8);
+                        }
+                        NetworkFocusZone::Activity => {
+                            self.network_ui_state.activity_scroll =
+                                self.network_ui_state.activity_scroll.saturating_sub(8);
                         }
                         _ => {
                             self.network_ui_state.detail_scroll =
@@ -3718,6 +3737,10 @@ impl AppState {
                             self.network_ui_state.connections_scroll =
                                 self.network_ui_state.connections_scroll.saturating_add(8);
                         }
+                        NetworkFocusZone::Activity => {
+                            self.network_ui_state.activity_scroll =
+                                self.network_ui_state.activity_scroll.saturating_add(8);
+                        }
                         _ => {
                             self.network_ui_state.detail_scroll =
                                 self.network_ui_state.detail_scroll.saturating_add(8);
@@ -3731,6 +3754,7 @@ impl AppState {
                     }
                     self.network_ui_state.detail_scroll = 0;
                     self.network_ui_state.connections_scroll = 0;
+                    self.network_ui_state.activity_scroll = 0;
                     return Ok(true);
                 }
                 KeyCode::End => {
@@ -3739,6 +3763,7 @@ impl AppState {
                     }
                     self.network_ui_state.detail_scroll = usize::MAX / 2;
                     self.network_ui_state.connections_scroll = usize::MAX / 2;
+                    self.network_ui_state.activity_scroll = usize::MAX / 2;
                     return Ok(true);
                 }
 
@@ -3771,6 +3796,7 @@ impl AppState {
                 KeyCode::Char('k') => {
                     if is_initial_press {
                         self.network_ui_state.event_log.clear();
+                        self.network_ui_state.activity_scroll = 0;
                     }
                     return Ok(true);
                 }

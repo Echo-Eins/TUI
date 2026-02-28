@@ -99,4 +99,10 @@ impl App {
             .apply_config_updates(self.config_manager.as_deref());
         self.state.handle_event(event).await
     }
+
+    /// Called on every tick to poll async updates (diagnostics, etc.)
+    /// without requiring a user input event.
+    pub fn tick(&mut self) {
+        self.state.apply_async_updates();
+    }
 }
