@@ -391,6 +391,59 @@ impl NetworkDiagnosticTool {
             Self::ExportReport => ToolCategory::Reporting,
         }
     }
+
+    /// Parameter presets for quick configuration (label, value)
+    pub fn presets(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::Resolve => vec![
+                ("Google DNS", "8.8.8.8"),
+                ("Cloudflare", "1.1.1.1"),
+                ("localhost", "localhost"),
+            ],
+            Self::DnsExplain => vec![],
+            Self::RouteInspect => vec![
+                ("Default", ""),
+                ("Google", "8.8.8.8"),
+                ("Cloudflare", "1.1.1.1"),
+            ],
+            Self::NicDeepInfo => vec![
+                ("All", ""),
+            ],
+            Self::ConnectionLab => vec![
+                ("TCP Established", "proto=tcp state=estab"),
+                ("TCP Listen", "proto=tcp state=listen"),
+                ("All UDP", "proto=udp"),
+                ("All (limit 500)", "limit=500"),
+            ],
+            Self::Ping => vec![
+                ("Quick x5", "8.8.8.8 profile=quick count=5"),
+                ("Latency x20", "8.8.8.8 profile=latency count=20"),
+                ("Loss Test", "8.8.8.8 profile=loss count=50"),
+                ("Cloudflare", "1.1.1.1 profile=latency count=10"),
+            ],
+            Self::Trace => vec![
+                ("ICMP Default", "8.8.8.8"),
+                ("TCP:443", "8.8.8.8 proto=tcp port=443"),
+                ("UDP", "8.8.8.8 proto=udp"),
+                ("Cloudflare TCP", "1.1.1.1 proto=tcp port=443"),
+            ],
+            Self::MtuProbe => vec![
+                ("Google", "8.8.8.8"),
+                ("Cloudflare", "1.1.1.1"),
+            ],
+            Self::PortScan => vec![
+                ("Common Web", "localhost:22,80,443,8080,8443"),
+                ("Databases", "localhost:3306,5432,6379,27017"),
+                ("Full Scan", "localhost:21,22,25,53,80,110,143,443,993,3306,5432,8080"),
+            ],
+            Self::NatCapability => vec![],
+            Self::NatMappingTest => vec![
+                ("TCP 8080", "tcp 8080 8080 120"),
+                ("UDP 9000", "udp 9000 9000 120"),
+            ],
+            Self::ExportReport => vec![],
+        }
+    }
 }
 
 pub struct NetworkUIState {
@@ -434,6 +487,10 @@ pub struct NetworkUIState {
 
     // Interface selector (for multi-interface view)
     pub selected_interface_idx: usize,
+
+    // Result filter
+    pub filter_active: bool,
+    pub filter_input: String,
 }
 
 /// Entry in the diagnostics result history
@@ -2570,6 +2627,8 @@ impl AppState {
                 traffic_marker: None,
                 show_marker_traffic: false,
                 selected_interface_idx: 0,
+                filter_active: false,
+                filter_input: String::new(),
             },
 
             processes_state: ProcessesUIState {
@@ -3590,6 +3649,46 @@ impl AppState {
                 }
             }
 
+            // --- Filter mode: text editing for result filtering ---
+            if self.network_ui_state.filter_active {
+                match key.code {
+                    KeyCode::Esc => {
+                        if is_initial_press {
+                            self.network_ui_state.filter_active = false;
+                            self.network_ui_state.filter_input.clear();
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Enter => {
+                        if is_initial_press {
+                            // Keep filter active but stop editing (apply filter)
+                            self.network_ui_state.filter_active = false;
+                            // Don't clear — keep filter_input for display
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Backspace => {
+                        if is_initial_press {
+                            self.network_ui_state.filter_input.pop();
+                            if self.network_ui_state.filter_input.is_empty() {
+                                self.network_ui_state.filter_active = false;
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Char(c) => {
+                        if is_initial_press
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                        {
+                            self.network_ui_state.filter_input.push(c);
+                        }
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+
             // --- Global Network tab keys (work in any focus zone) ---
             match key.code {
                 // Backtick (`) / Shift+Backtick: cycle focus zones
@@ -3833,88 +3932,25 @@ impl AppState {
                     return Ok(true);
                 }
 
-                // Quick-run shortcut keys (only when not in input mode)
-                KeyCode::Char('e') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Resolve;
-                        self.start_selected_network_diagnostic();
+                // /: enter filter mode for results
+                KeyCode::Char('/') => {
+                    if is_initial_press && !self.network_ui_state.input_mode {
+                        self.network_ui_state.filter_active = true;
+                        self.network_ui_state.filter_input.clear();
+                        self.network_ui_state.focus = NetworkFocusZone::Results;
                     }
                     return Ok(true);
                 }
-                KeyCode::Char('d') => {
+
+                // 1-4: apply parameter preset for current tool
+                KeyCode::Char(c @ '1'..='4') => {
                     if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::DnsExplain;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('r') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::RouteInspect;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('f') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::NicDeepInfo;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('c') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::ConnectionLab;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('p') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Ping;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('t') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::Trace;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('m') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::MtuProbe;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('o') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::PortScan;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('n') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::NatCapability;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('a') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::NatMappingTest;
-                        self.start_selected_network_diagnostic();
-                    }
-                    return Ok(true);
-                }
-                KeyCode::Char('y') => {
-                    if is_initial_press {
-                        self.network_ui_state.selected_tool = NetworkDiagnosticTool::ExportReport;
-                        self.start_selected_network_diagnostic();
+                        let preset_idx = (c as u8 - b'1') as usize;
+                        let tool = self.network_ui_state.selected_tool;
+                        let presets = tool.presets();
+                        if let Some((_label, value)) = presets.get(preset_idx) {
+                            self.network_ui_state.target_input = value.to_string();
+                        }
                     }
                     return Ok(true);
                 }
@@ -5364,9 +5400,20 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             if r.addresses.is_empty() {
                 lines.push("addresses: none returned".to_string());
             } else {
-                lines.push(format!("count: {} addresses", r.addresses.len()));
-                for (i, addr) in r.addresses.iter().enumerate() {
-                    lines.push(format!("  [{}] {}", i + 1, addr));
+                let ipv4: Vec<_> = r.addresses.iter().filter(|a| !a.contains(':')).collect();
+                let ipv6: Vec<_> = r.addresses.iter().filter(|a| a.contains(':')).collect();
+                lines.push(format!("total: {} addresses ({} IPv4, {} IPv6)", r.addresses.len(), ipv4.len(), ipv6.len()));
+                if !ipv4.is_empty() {
+                    lines.push("IPv4:".to_string());
+                    for (i, addr) in ipv4.iter().enumerate() {
+                        lines.push(format!("  [{}] {}", i + 1, addr));
+                    }
+                }
+                if !ipv6.is_empty() {
+                    lines.push("IPv6:".to_string());
+                    for (i, addr) in ipv6.iter().enumerate() {
+                        lines.push(format!("  [{}] {}", i + 1, addr));
+                    }
                 }
             }
         }
@@ -5377,6 +5424,7 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 lines.push(format!("NM dns mode: {mode}"));
             }
             if !r.dns_servers.is_empty() {
+                lines.push(String::new());
                 lines.push(format!("dns servers: {} configured", r.dns_servers.len()));
                 for entry in &r.dns_servers {
                     lines.push(format!("  {} (source: {})", entry.address, entry.source));
@@ -5385,8 +5433,25 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             if !r.search_domains.is_empty() {
                 lines.push(format!("search domains: {}", r.search_domains.join(", ")));
             }
+            if !r.split_dns_domains.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("split DNS: {} domains", r.split_dns_domains.len()));
+                for d in &r.split_dns_domains {
+                    lines.push(format!("  {d}"));
+                }
+            }
+            if !r.default_gateways.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("gateways: {} found", r.default_gateways.len()));
+                for gw in &r.default_gateways {
+                    let port_str = gw.port.map(|p| format!(":{p}")).unwrap_or_default();
+                    let metric_str = gw.metric.map(|m| format!(" metric={m}")).unwrap_or_default();
+                    lines.push(format!("  {} {}{}{}", gw.interface, gw.address, port_str, metric_str));
+                }
+            }
             if !r.conflicts.is_empty() {
-                lines.push(format!("conflicts: {} found", r.conflicts.len()));
+                lines.push(String::new());
+                lines.push(format!("CONFLICTS: {} found", r.conflicts.len()));
                 for c in &r.conflicts {
                     lines.push(format!("  {c}"));
                 }
@@ -5403,17 +5468,33 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
             lines.push(format!("default routes: {}", r.default_routes.len()));
             lines.push(format!("policy rules: {}", r.policy_rules.len()));
-            for (i, route) in r.default_routes.iter().enumerate().take(6) {
+            lines.push(String::new());
+            for (i, route) in r.default_routes.iter().enumerate() {
+                let gw = route.gateway.clone().unwrap_or_else(|| "direct".to_string());
+                let dev = route.interface.clone().unwrap_or_else(|| "n/a".to_string());
+                let metric = route.metric.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string());
+                let proto = route.protocol.clone().unwrap_or_else(|| "-".to_string());
+                let scope = route.scope.clone().unwrap_or_else(|| "-".to_string());
                 lines.push(format!(
-                    "  route[{}]: {} via {} dev {} metric={}",
-                    i,
-                    route.family,
-                    route.gateway.clone().unwrap_or_else(|| "direct".to_string()),
-                    route.interface.clone().unwrap_or_else(|| "n/a".to_string()),
-                    route.metric.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string())
+                    "  route[{}]: {} via {} dev {} metric={} proto={} scope={}",
+                    i, route.family, gw, dev, metric, proto, scope,
                 ));
             }
+            if !r.policy_rules.is_empty() {
+                lines.push(String::new());
+                lines.push("Policy rules:".to_string());
+                for rule in r.policy_rules.iter().take(12) {
+                    let prio = rule.priority.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+                    let tbl = rule.table.clone().unwrap_or_else(|| "?".to_string());
+                    let act = rule.action.clone().unwrap_or_else(|| "lookup".to_string());
+                    lines.push(format!("  prio={} {} table={} action={}", prio, rule.family, tbl, act));
+                }
+                if r.policy_rules.len() > 12 {
+                    lines.push(format!("  ... and {} more rules", r.policy_rules.len() - 12));
+                }
+            }
             if !r.warnings.is_empty() {
+                lines.push(String::new());
                 for w in &r.warnings {
                     lines.push(format!("warning: {w}"));
                 }
@@ -5421,28 +5502,78 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         }
         linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
             lines.push(format!("interfaces: {}", r.interfaces.len()));
-            for iface in r.interfaces.iter().take(8) {
+            lines.push(String::new());
+            for iface in &r.interfaces {
+                lines.push(format!("{}: {}", iface.interface, iface.status));
                 lines.push(format!(
-                    "{}: {}",
-                    iface.interface,
-                    iface.status,
-                ));
-                lines.push(format!(
-                    "  speed={} driver={} mtu={}",
+                    "  speed={} duplex={} mtu={}",
                     iface.speed.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string()),
+                    iface.duplex.clone().unwrap_or_else(|| "n/a".to_string()),
                     iface.mtu,
                 ));
+                lines.push(format!(
+                    "  driver={} mac={}",
+                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string()),
+                    iface.mac_address,
+                ));
                 if let Some(fw) = &iface.firmware {
-                    lines.push(format!("  firmware={fw}"));
+                    lines.push(format!("  firmware: {fw}"));
                 }
+                if let Some(bus) = &iface.bus_info {
+                    lines.push(format!("  bus: {bus}"));
+                }
+                // Error counters
+                let rx_err = iface.rx_errors.unwrap_or(0);
+                let tx_err = iface.tx_errors.unwrap_or(0);
+                let rx_drop = iface.rx_dropped.unwrap_or(0);
+                let tx_drop = iface.tx_dropped.unwrap_or(0);
+                if rx_err > 0 || tx_err > 0 || rx_drop > 0 || tx_drop > 0 {
+                    lines.push(format!(
+                        "  errors: rx_err={} tx_err={} rx_drop={} tx_drop={}",
+                        rx_err, tx_err, rx_drop, tx_drop,
+                    ));
+                } else {
+                    lines.push("  errors: none".to_string());
+                }
+                // Offloads
                 if !iface.offloads.is_empty() {
-                    let offload_str = iface.offloads.iter()
-                        .map(|o| format!("{}={}", o.name, if o.enabled { "on" } else { "off" }))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    lines.push(format!("  offloads: {}", offload_str));
+                    let on: Vec<_> = iface.offloads.iter().filter(|o| o.enabled).map(|o| o.name.as_str()).collect();
+                    let off: Vec<_> = iface.offloads.iter().filter(|o| !o.enabled).map(|o| o.name.as_str()).collect();
+                    if !on.is_empty() {
+                        lines.push(format!("  offload ON: {}", on.join(", ")));
+                    }
+                    if !off.is_empty() {
+                        lines.push(format!("  offload OFF: {}", off.join(", ")));
+                    }
                 }
+                // Wi-Fi info
+                if let Some(wifi) = &iface.wifi {
+                    lines.push("  Wi-Fi link:".to_string());
+                    if let Some(ssid) = &wifi.ssid {
+                        lines.push(format!("    SSID: {ssid}"));
+                    }
+                    if let Some(freq) = wifi.frequency_mhz {
+                        let band = if freq < 3000 { "2.4GHz" } else if freq < 6000 { "5GHz" } else { "6GHz" };
+                        lines.push(format!("    freq: {} MHz ({})", freq, band));
+                    }
+                    if let Some(signal) = wifi.signal_dbm {
+                        let quality = if signal > -50.0 { "Excellent" }
+                            else if signal > -60.0 { "Good" }
+                            else if signal > -70.0 { "Fair" }
+                            else { "Weak" };
+                        lines.push(format!("    signal: {:.0} dBm ({})", signal, quality));
+                    }
+                    if let Some(tx_rate) = &wifi.tx_bitrate {
+                        lines.push(format!("    tx rate: {tx_rate}"));
+                    }
+                }
+                // Notes
+                if !iface.notes.is_empty() {
+                    for note in &iface.notes {
+                        lines.push(format!("  note: {note}"));
+                    }
+                }
+                lines.push(String::new());
             }
             if !r.warnings.is_empty() {
                 for w in &r.warnings {
@@ -5451,38 +5582,47 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
-            let established = r
-                .entries
-                .iter()
-                .filter(|entry| entry.state.eq_ignore_ascii_case("ESTAB"))
-                .count();
-            let listen = r
-                .entries
-                .iter()
-                .filter(|entry| entry.state.eq_ignore_ascii_case("LISTEN"))
-                .count();
+            let established = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("ESTAB")).count();
+            let listen = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("LISTEN")).count();
+            let time_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("TIME-WAIT")).count();
+            let close_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("CLOSE-WAIT")).count();
             lines.push(format!("total entries: {}", r.entries.len()));
-            lines.push(format!("established: {}", established));
-            lines.push(format!("listening: {}", listen));
+            lines.push(format!("established: {}  listening: {}", established, listen));
+            lines.push(format!("time-wait: {}  close-wait: {}", time_wait, close_wait));
             lines.push(format!("permission limited: {}", r.permission_limited));
             lines.push(String::new());
-            for entry in r.entries.iter().take(12) {
+            for entry in r.entries.iter().take(20) {
                 let proc_name = entry.process_name.clone().unwrap_or_else(|| "?".to_string());
                 let pid = entry.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                let mut extra = String::new();
+                if entry.recv_q > 0 || entry.send_q > 0 {
+                    extra.push_str(&format!(" rq={} sq={}", entry.recv_q, entry.send_q));
+                }
+                if let Some(retx) = entry.retransmits {
+                    if retx > 0 {
+                        extra.push_str(&format!(" retx={}", retx));
+                    }
+                }
+                if let (Some(tx), Some(rx)) = (entry.bytes_sent, entry.bytes_received) {
+                    if tx > 0 || rx > 0 {
+                        extra.push_str(&format!(" tx={} rx={}", fmt_bytes_short(tx), fmt_bytes_short(rx)));
+                    }
+                }
                 lines.push(format!(
-                    "{} [{}] pid={} {}:{} -> {}:{} state={}",
-                    proc_name,
-                    entry.protocol,
-                    pid,
-                    entry.local_address,
-                    entry.local_port,
-                    entry.remote_address,
-                    entry.remote_port,
-                    entry.state,
+                    "{} [{}] pid={} {}:{} -> {}:{} state={}{}",
+                    proc_name, entry.protocol, pid,
+                    entry.local_address, entry.local_port,
+                    entry.remote_address, entry.remote_port,
+                    entry.state, extra,
                 ));
+                if !entry.notes.is_empty() {
+                    for note in &entry.notes {
+                        lines.push(format!("    note: {note}"));
+                    }
+                }
             }
-            if r.entries.len() > 12 {
-                lines.push(format!("  ... and {} more entries", r.entries.len() - 12));
+            if r.entries.len() > 20 {
+                lines.push(format!("  ... and {} more entries", r.entries.len() - 20));
             }
             if !r.warnings.is_empty() {
                 for w in &r.warnings {
@@ -5494,72 +5634,84 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(format!("target: {}", r.target));
             lines.push(format!("profile: {:?}", r.profile));
             lines.push(format!("mode: {}", if r.continuous { "continuous" } else { "counted" }));
+            lines.push(String::new());
             lines.push(format!("transmitted: {}", r.transmitted));
             lines.push(format!("received: {}", r.received));
             lines.push(format!("loss: {:.1}%", r.packet_loss_percent));
             lines.push(format!("samples: {}", r.samples_collected));
             lines.push(String::new());
-            lines.push(format!(
-                "min: {} ms", fmt_opt_ms(r.min_latency_ms)));
-            lines.push(format!(
-                "avg: {} ms", fmt_opt_ms(r.avg_latency_ms)));
-            lines.push(format!(
-                "p50: {} ms", fmt_opt_ms(r.p50_latency_ms)));
-            lines.push(format!(
-                "p95: {} ms", fmt_opt_ms(r.p95_latency_ms)));
-            lines.push(format!(
-                "p99: {} ms", fmt_opt_ms(r.p99_latency_ms)));
-            lines.push(format!(
-                "max: {} ms", fmt_opt_ms(r.max_latency_ms)));
-            lines.push(format!(
-                "jitter: {} ms", fmt_opt_ms(r.jitter_ms)));
+            lines.push("Latency distribution:".to_string());
+            lines.push(format!("  min: {:>10} ms", fmt_opt_ms(r.min_latency_ms)));
+            lines.push(format!("  avg: {:>10} ms", fmt_opt_ms(r.avg_latency_ms)));
+            lines.push(format!("  p50: {:>10} ms", fmt_opt_ms(r.p50_latency_ms)));
+            lines.push(format!("  p95: {:>10} ms", fmt_opt_ms(r.p95_latency_ms)));
+            lines.push(format!("  p99: {:>10} ms", fmt_opt_ms(r.p99_latency_ms)));
+            lines.push(format!("  max: {:>10} ms", fmt_opt_ms(r.max_latency_ms)));
+            lines.push(String::new());
+            lines.push(format!("  jitter: {:>7} ms", fmt_opt_ms(r.jitter_ms)));
+            // Latency spread indicator
+            if let (Some(min), Some(max)) = (r.min_latency_ms, r.max_latency_ms) {
+                let spread = max - min;
+                let stability = if spread < 5.0 { "Very stable" }
+                    else if spread < 20.0 { "Stable" }
+                    else if spread < 50.0 { "Moderate variance" }
+                    else { "High variance" };
+                lines.push(format!("  spread: {:.2} ms ({})", spread, stability));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
             lines.push(format!("target: {}", r.target));
             lines.push(format!("protocol requested: {:?}", r.requested_protocol));
             lines.push(format!("protocol used: {:?}", r.used_protocol));
-            lines.push(format!("fallback used: {}", r.fallback_used));
+            if r.fallback_used {
+                lines.push("fallback used: true (original protocol failed)".to_string());
+            }
             lines.push(format!("reached target: {}", r.reached_target));
             lines.push(format!("total hops: {}", r.hops.len()));
-            lines.push(format!("timeout ratio: {:.2}", r.timeout_ratio));
+            lines.push(format!("timeout ratio: {:.1}%", r.timeout_ratio * 100.0));
             lines.push(String::new());
-            for attempt in r.attempts.iter().take(4) {
-                lines.push(format!(
-                    "attempt {:?}: hops={} timeouts={} reached={}{}",
-                    attempt.protocol,
-                    attempt.hops_collected,
-                    attempt.timeout_hops,
-                    attempt.reached_target,
-                    attempt
-                        .warning
-                        .as_ref()
-                        .map(|warning| format!(" warn={warning}"))
-                        .unwrap_or_default()
-                ));
+            // Attempts detail
+            if r.attempts.len() > 1 || r.fallback_used {
+                lines.push("Attempts:".to_string());
+                for attempt in &r.attempts {
+                    lines.push(format!(
+                        "  {:?}: hops={} timeouts={} reached={}{}",
+                        attempt.protocol,
+                        attempt.hops_collected,
+                        attempt.timeout_hops,
+                        attempt.reached_target,
+                        attempt.warning.as_ref().map(|w| format!("  WARN: {w}")).unwrap_or_default()
+                    ));
+                }
+                lines.push(String::new());
             }
-            lines.push(String::new());
-            for hop in r.hops.iter().take(30) {
-                let endpoint = hop
-                    .host
-                    .as_ref()
-                    .or(hop.address.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| "*".to_string());
-                let rtt_str = if hop.rtt_ms.is_empty() {
-                    "*".to_string()
+            // Hop table
+            lines.push(format!(
+                "{:<6} {:<36} {:>10} {:>8} {:>8} {:>8} {}",
+                "Hop", "Endpoint", "Avg RTT", "Min", "Max", "Probes", "Flags"
+            ));
+            lines.push(format!("{}", "\u{2500}".repeat(86)));
+            for hop in &r.hops {
+                let endpoint = hop.host.as_ref().or(hop.address.as_ref()).cloned().unwrap_or_else(|| "*".to_string());
+                let (rtt_avg, rtt_min, rtt_max) = if hop.rtt_ms.is_empty() {
+                    ("*".to_string(), "*".to_string(), "*".to_string())
                 } else {
                     let avg = hop.rtt_ms.iter().sum::<f32>() / hop.rtt_ms.len() as f32;
-                    format!("{:.1}ms", avg)
+                    let min = hop.rtt_ms.iter().cloned().fold(f32::MAX, f32::min);
+                    let max = hop.rtt_ms.iter().cloned().fold(f32::MIN, f32::max);
+                    (format!("{:.1}ms", avg), format!("{:.1}", min), format!("{:.1}", max))
                 };
                 let flags = format!("{}{}",
                     if hop.timed_out { " !T" } else { "" },
                     if hop.blocked_suspected { " !B" } else { "" },
                 );
                 lines.push(format!(
-                    "hop {:02}  {:<36} {:>8}  {}/{} probes{}",
-                    hop.hop,
-                    endpoint,
-                    rtt_str,
+                    "{:<6} {:<36} {:>10} {:>8} {:>8} {:>5}/{:<2} {}",
+                    format!("{:02}", hop.hop),
+                    if endpoint.len() > 35 { format!("{}...", &endpoint[..32]) } else { endpoint },
+                    rtt_avg,
+                    rtt_min,
+                    rtt_max,
                     hop.probes_responded,
                     hop.probes_sent,
                     flags,
@@ -5578,16 +5730,34 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         linux_netdiag::NetworkDiagnosticsResult::MtuProbe(r) => {
             lines.push(format!("target: {}", r.target));
             match r.path_mtu {
-                Some(pmtu) => lines.push(format!("path MTU: {} bytes", pmtu)),
+                Some(pmtu) => {
+                    lines.push(format!("path MTU: {} bytes", pmtu));
+                    let overhead_note = if pmtu == 1500 { " (standard Ethernet)" }
+                        else if pmtu > 1500 { " (jumbo frames)" }
+                        else if pmtu >= 1400 { " (minor overhead, likely VPN/tunnel)" }
+                        else { " (significant overhead)" };
+                    lines.push(format!("  {}", overhead_note.trim()));
+                }
                 None => lines.push("path MTU: could not determine".to_string()),
             }
             if !r.interfaces.is_empty() {
                 lines.push(String::new());
-                lines.push("Interface MTU values:".to_string());
+                lines.push("Interface MTU comparison:".to_string());
                 for iface_mtu in &r.interfaces {
+                    let mtu_note = if let Some(pmtu) = r.path_mtu {
+                        if iface_mtu.mtu < pmtu {
+                            " (BOTTLENECK)"
+                        } else if iface_mtu.mtu == pmtu {
+                            " (matches path)"
+                        } else {
+                            ""
+                        }
+                    } else {
+                        ""
+                    };
                     lines.push(format!(
-                        "  {} ({}) ipv4={} mtu={}",
-                        iface_mtu.interface, iface_mtu.status, iface_mtu.ipv4, iface_mtu.mtu
+                        "  {} ({}) ipv4={} mtu={}{}",
+                        iface_mtu.interface, iface_mtu.status, iface_mtu.ipv4, iface_mtu.mtu, mtu_note,
                     ));
                 }
             }
@@ -5598,31 +5768,58 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         linux_netdiag::NetworkDiagnosticsResult::PortScan(r) => {
             lines.push(format!("target: {}", r.target));
             lines.push(format!("ports scanned: {}", r.scanned_ports.len()));
-            lines.push(format!("duration: {} ms", r.duration_ms));
+            lines.push(format!("duration: {} ms ({:.1}s)", r.duration_ms, r.duration_ms as f64 / 1000.0));
+            lines.push(format!("scan rate: {:.0} ports/sec", r.scanned_ports.len() as f64 / (r.duration_ms as f64 / 1000.0).max(0.001)));
             lines.push(String::new());
             if !r.open_ports.is_empty() {
-                lines.push(format!("open ports: {} found", r.open_ports.len()));
+                lines.push(format!("OPEN: {} ports", r.open_ports.len()));
                 for port in &r.open_ports {
                     let svc = well_known_port_service(*port);
-                    lines.push(format!("  {} {}", port, svc));
+                    if svc.is_empty() {
+                        lines.push(format!("  {:>5}  open", port));
+                    } else {
+                        lines.push(format!("  {:>5}  open  {}", port, svc));
+                    }
                 }
             } else {
-                lines.push("open ports: none".to_string());
+                lines.push("OPEN: none".to_string());
             }
-            let closed: Vec<u16> = r
-                .scanned_ports
-                .iter()
-                .filter(|p| !r.open_ports.contains(p))
-                .copied()
-                .collect();
+            let closed: Vec<u16> = r.scanned_ports.iter().filter(|p| !r.open_ports.contains(p)).copied().collect();
             if !closed.is_empty() {
-                lines.push(format!("closed/filtered: {} ports", closed.len()));
+                lines.push(String::new());
+                lines.push(format!("CLOSED/FILTERED: {} ports", closed.len()));
+                // Show first 10 closed ports
+                for port in closed.iter().take(10) {
+                    let svc = well_known_port_service(*port);
+                    if svc.is_empty() {
+                        lines.push(format!("  {:>5}  closed", port));
+                    } else {
+                        lines.push(format!("  {:>5}  closed  {}", port, svc));
+                    }
+                }
+                if closed.len() > 10 {
+                    lines.push(format!("  ... and {} more closed ports", closed.len() - 10));
+                }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
+            if let Some(ext_ip) = &r.external_ip {
+                lines.push(format!("external IP: {}", ext_ip));
+            }
+            lines.push(String::new());
             lines.push("NAT traversal methods:".to_string());
             for m in &r.methods {
-                lines.push(format!("  {} = {:?}", m.method, m.state));
+                let (state_label, state_icon) = match m.state {
+                    linux_netdiag::CapabilityState::Supported => ("Supported", "+"),
+                    linux_netdiag::CapabilityState::Unavailable => ("Unavailable", "-"),
+                    linux_netdiag::CapabilityState::PermissionDenied => ("PermDenied", "!"),
+                    linux_netdiag::CapabilityState::MissingDependency => ("MissingDep", "?"),
+                    linux_netdiag::CapabilityState::Unknown => ("Unknown", "~"),
+                };
+                lines.push(format!("  [{}] {:<16} {}", state_icon, m.method, state_label));
+                if !m.details.is_empty() {
+                    lines.push(format!("      {}", m.details));
+                }
             }
             if !r.warnings.is_empty() {
                 lines.push(String::new());
@@ -5638,24 +5835,44 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                     linux_netdiag::MappingProtocol::Udp => "UDP",
                 }
             ));
+            if let Some(local) = &r.local_address {
+                lines.push(format!("local address: {}", local));
+            }
             lines.push(format!("external port: {}", r.external_port));
             lines.push(format!("internal port: {}", r.internal_port));
+            lines.push(String::new());
             lines.push(format!("created: {}", r.created));
             lines.push(format!("visible in gw: {}", r.visible_in_gateway_table));
             lines.push(format!("removed: {}", r.removed));
             if !r.details.is_empty() {
                 lines.push(String::new());
+                lines.push("Details:".to_string());
                 for d in &r.details {
                     lines.push(format!("  {d}"));
                 }
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::ExportReport(r) => {
+            lines.push(format!("format: {:?}", r.format));
             lines.push(format!("report entries: {}", r.entries));
             lines.push("Report has been exported successfully.".to_string());
         }
     }
     lines
+}
+
+/// Format bytes in short human-readable form for connection details
+#[cfg(target_os = "linux")]
+fn fmt_bytes_short(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1}G", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1}M", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
 }
 
 /// Map well-known ports to service names

@@ -733,10 +733,23 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
     let is_focused = ui.focus == NetworkFocusZone::Results;
     let bc = zone_border(is_focused, theme);
 
+    let has_filter = !ui.filter_input.is_empty();
+    let title = if has_filter {
+        format!("{} [/{}]", zone_title("RESULTS", is_focused), ui.filter_input)
+    } else {
+        zone_title("RESULTS", is_focused)
+    };
+
+    let border_color = if ui.filter_active {
+        Color::Magenta
+    } else {
+        bc
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(zone_title("RESULTS", is_focused))
-        .border_style(Style::default().fg(bc));
+        .title(title)
+        .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -744,9 +757,14 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
         return;
     }
 
+    let filter_bar_height = if ui.filter_active { 1 } else { 0 };
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(2)])
+        .constraints([
+            Constraint::Length(1),                          // tab header
+            Constraint::Length(filter_bar_height),          // filter input bar
+            Constraint::Min(2),                             // tab content
+        ])
         .split(inner);
 
     // Tab header
@@ -770,8 +788,28 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
         .collect();
     f.render_widget(Paragraph::new(Line::from(tab_spans)), sections[0]);
 
+    // Filter input bar (only when active)
+    if ui.filter_active {
+        let cursor = "\u{2588}";
+        let filter_line = Line::from(vec![
+            Span::styled(
+                " /",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}{}", ui.filter_input, cursor),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (Esc:cancel Enter:apply)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(filter_line), sections[1]);
+    }
+
     // Tab content
-    let lines = match ui.result_tab {
+    let all_lines = match ui.result_tab {
         NetworkResultTab::Summary => result_tab_summary(ui),
         NetworkResultTab::Details => result_tab_details(ui),
         NetworkResultTab::Raw => result_tab_raw(ui),
@@ -779,12 +817,44 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
         NetworkResultTab::History => result_tab_history(ui),
     };
 
-    let max_scroll = lines.len().saturating_sub(sections[1].height as usize);
+    // Apply filter
+    let lines = if has_filter {
+        let filter_lower = ui.filter_input.to_lowercase();
+        let mut filtered = Vec::new();
+        let mut match_count = 0usize;
+        for line in &all_lines {
+            let plain = line_plain_text(line).to_lowercase();
+            if plain.contains(&filter_lower) || plain.trim().is_empty() {
+                if !plain.trim().is_empty() {
+                    match_count += 1;
+                }
+                filtered.push(line.clone());
+            }
+        }
+        // Prepend filter status
+        let mut result = vec![Line::from(vec![
+            Span::styled(
+                format!(" Filter: \"{}\"", ui.filter_input),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::styled(
+                format!("  ({} matches)", match_count),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])];
+        result.extend(filtered);
+        result
+    } else {
+        all_lines
+    };
+
+    let content_area = sections[2];
+    let max_scroll = lines.len().saturating_sub(content_area.height as usize);
     let scroll = ui.detail_scroll.min(max_scroll).min(u16::MAX as usize) as u16;
     let p = Paragraph::new(lines)
         .scroll((scroll, 0))
         .wrap(Wrap { trim: false });
-    f.render_widget(p, sections[1]);
+    f.render_widget(p, content_area);
 }
 
 // ── Summary tab ──
@@ -986,6 +1056,135 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
     )));
 
     for l in &ui.detail_lines {
+        // NAT capability state color-coding: detect [+], [-], [!], [?], [~] markers
+        if l.starts_with("  [") && l.len() > 4 {
+            let marker = &l[3..4];
+            let (icon_color, text_color) = match marker {
+                "+" => (Color::Green, Color::Green),
+                "-" => (Color::Red, Color::Red),
+                "!" => (Color::Yellow, Color::Yellow),
+                "?" => (Color::Magenta, Color::Magenta),
+                "~" => (Color::DarkGray, Color::DarkGray),
+                _ => (Color::White, Color::White),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {}", &l[..5]),
+                    Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    l[5..].to_string(),
+                    Style::default().fg(text_color),
+                ),
+            ]));
+            continue;
+        }
+
+        // Trace hop table formatting: detect lines starting with digits for hop rows
+        if (l.starts_with("0") || l.starts_with("1") || l.starts_with("2") || l.starts_with("3"))
+            && l.len() > 6
+            && l.chars().next().map_or(false, |c| c.is_ascii_digit())
+        {
+            // Check if this is a hop line (starts with 2-digit number)
+            let maybe_hop = l.trim_start();
+            if maybe_hop.len() >= 2 && maybe_hop[..2].chars().all(|c| c.is_ascii_digit()) {
+                // Color based on RTT: find the ms value
+                let hop_color = if l.contains("!T") || l.contains("!B") {
+                    Color::Red
+                } else if l.contains("*") && !l.contains("ms") {
+                    Color::DarkGray
+                } else {
+                    // Try to extract RTT for coloring
+                    if let Some(ms_pos) = l.find("ms") {
+                        let before = &l[..ms_pos];
+                        let rtt_str = before.split_whitespace().last().unwrap_or("0");
+                        let rtt: f32 = rtt_str.parse().unwrap_or(0.0);
+                        if rtt > 200.0 { Color::Red }
+                        else if rtt > 100.0 { Color::Yellow }
+                        else if rtt > 50.0 { Color::White }
+                        else { Color::Green }
+                    } else {
+                        Color::Cyan
+                    }
+                };
+                lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(hop_color))));
+                continue;
+            }
+        }
+
+        // Connection entry color-coding: detect state= suffix
+        if l.contains("state=") {
+            let state_color = if l.contains("state=ESTAB") {
+                Color::Green
+            } else if l.contains("state=LISTEN") {
+                Color::Cyan
+            } else if l.contains("state=TIME-WAIT") {
+                Color::DarkGray
+            } else if l.contains("state=CLOSE-WAIT") || l.contains("state=CLOSE") {
+                Color::Yellow
+            } else if l.contains("state=SYN") {
+                Color::Magenta
+            } else {
+                Color::White
+            };
+            // Highlight retransmits in red
+            if l.contains("retx=") {
+                let parts: Vec<&str> = l.splitn(2, "retx=").collect();
+                if parts.len() == 2 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {}", parts[0]), Style::default().fg(state_color)),
+                        Span::styled(
+                            format!("retx={}", parts[1]),
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    continue;
+                }
+            }
+            lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(state_color))));
+            continue;
+        }
+
+        // Port scan: color open/closed ports
+        if l.trim_start().starts_with(|c: char| c.is_ascii_digit()) && l.contains("  open") {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", l),
+                Style::default().fg(Color::Green),
+            )));
+            continue;
+        }
+        if l.trim_start().starts_with(|c: char| c.is_ascii_digit()) && l.contains("  closed") {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", l),
+                Style::default().fg(Color::Red),
+            )));
+            continue;
+        }
+
+        // Wi-Fi signal quality coloring
+        if l.contains("signal:") {
+            let sig_color = if l.contains("Excellent") {
+                Color::Green
+            } else if l.contains("Good") {
+                Color::Cyan
+            } else if l.contains("Fair") {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(sig_color))));
+            continue;
+        }
+
+        // Error counters coloring
+        if l.contains("errors:") && !l.contains("errors: none") {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", l),
+                Style::default().fg(Color::Red),
+            )));
+            continue;
+        }
+
         // Try to parse "key: value" for structured display, but only for
         // top-level lines (not indented) with a clean key (no paths, URLs, etc.)
         let parsed = if !l.starts_with(' ') && !l.starts_with('\t') {
@@ -1013,11 +1212,17 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
 
         if let Some((key, val)) = parsed {
             // Color the value based on content
-            let val_color = if val.contains("fail") || val.contains("error") || val == "false" {
+            let val_color = if val.contains("fail") || val.contains("error") || val == "false"
+                || val.contains("Unavailable") || val.contains("could not determine")
+            {
                 Color::Red
-            } else if val.contains("warn") || val.contains("PARTIAL") || val.contains("could not") {
+            } else if val.contains("warn") || val.contains("PARTIAL") || val.contains("PermDenied")
+                || val.contains("MissingDep") || val.contains("overhead")
+            {
                 Color::Yellow
-            } else if val.contains("true") || val.contains("OK") || val == "0" {
+            } else if val.contains("true") || val.contains("OK") || val == "0"
+                || val.contains("Supported") || val.contains("standard Ethernet")
+            {
                 Color::Green
             } else {
                 Color::Cyan
@@ -1030,15 +1235,20 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
             // Fallback: color-code known prefixes
             let style = if l.starts_with("warning") || l.starts_with("WARN") {
                 Style::default().fg(Color::Yellow)
-            } else if l.starts_with("error") || l.starts_with("Error") {
+            } else if l.starts_with("error") || l.starts_with("Error") || l.starts_with("CONFLICTS") {
                 Style::default().fg(Color::Red)
-            } else if l.starts_with("hop ") || l.starts_with("attempt ") {
-                Style::default().fg(Color::Cyan)
+            } else if l.starts_with("Hop") || l.starts_with("Latency") || l.starts_with("OPEN") || l.starts_with("CLOSED") {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else if l.starts_with("Attempts:") || l.starts_with("Policy rules:") || l.starts_with("Details:") || l.starts_with("Interface MTU") || l.starts_with("Wi-Fi") {
+                Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED)
             } else if l.starts_with("  ") {
                 // Indented sub-items
                 Style::default().fg(Color::DarkGray)
             } else if l.starts_with("blocked") || l.starts_with("conflicts") {
                 Style::default().fg(Color::Yellow)
+            } else if l.contains('\u{2500}') {
+                // Separator line
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -1320,14 +1530,32 @@ fn render_parameters_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme
                 Span::raw("")
             },
         ]),
-        Line::from(vec![
+    ];
+
+    // Presets line (if tool has presets)
+    let presets = ui.selected_tool.presets();
+    if !presets.is_empty() {
+        let mut preset_spans: Vec<Span> = vec![Span::styled("Preset: ", dim())];
+        for (i, (label, _)) in presets.iter().enumerate() {
+            preset_spans.push(Span::styled(
+                format!("[{}]", i + 1),
+                Style::default().fg(Color::Cyan),
+            ));
+            preset_spans.push(Span::styled(
+                format!("{} ", label),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(preset_spans));
+    } else {
+        lines.push(Line::from(vec![
             Span::styled("Hint:   ", dim()),
             Span::styled(
                 diagnostic_hint(ui.selected_tool).to_string(),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]),
-    ];
+        ]));
+    }
 
     // NAT confirmation
     if let Some(until) = ui.nat_mapping_confirm_until {
@@ -1349,8 +1577,8 @@ fn render_parameters_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme
         Span::styled(" Cancel  ", dim()),
         Span::styled("[i]", Style::default().fg(Color::Cyan)),
         Span::styled(" Edit  ", dim()),
-        Span::styled("[k]", Style::default().fg(Color::DarkGray)),
-        Span::styled(" Clear log", dim()),
+        Span::styled("[/]", Style::default().fg(Color::Magenta)),
+        Span::styled(" Filter", dim()),
     ]));
 
     let p = Paragraph::new(lines);
@@ -1496,20 +1724,20 @@ fn render_help_bar(f: &mut Frame, area: Rect, ui: &NetworkUIState) {
         Span::styled(":panel ", dim()),
         Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
         Span::styled(":nav ", dim()),
-        Span::styled("Tab", Style::default().fg(Color::White)),
-        Span::styled(":tabs ", dim()),
         Span::styled("Enter", Style::default().fg(Color::White)),
         Span::styled(":run ", dim()),
         Span::styled("i", Style::default().fg(Color::White)),
         Span::styled(":edit ", dim()),
+        Span::styled("/", Style::default().fg(Color::Magenta)),
+        Span::styled(":filter ", dim()),
+        Span::styled("1-4", Style::default().fg(Color::Cyan)),
+        Span::styled(":preset ", dim()),
         Span::styled("v", Style::default().fg(Color::White)),
         Span::styled(format!(":{} ", view), dim()),
         Span::styled("0", Style::default().fg(Color::White)),
         Span::styled(":mark ", dim()),
         Span::styled("x", Style::default().fg(Color::White)),
-        Span::styled(":cancel ", dim()),
-        Span::styled("k", Style::default().fg(Color::White)),
-        Span::styled(":clear", dim()),
+        Span::styled(":cancel", dim()),
     ]);
 
     f.render_widget(Paragraph::new(line), area);
