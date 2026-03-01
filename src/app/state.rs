@@ -3706,13 +3706,18 @@ impl AppState {
                 }
 
                 // Left/Right: switch result sub-tabs when Results focused,
-                // cycle focus zones otherwise
+                // exit Results zone at boundaries; cycle focus zones otherwise
                 KeyCode::Left => {
                     if is_initial_press {
                         match self.network_ui_state.focus {
                             NetworkFocusZone::Results => {
-                                self.network_ui_state.result_tab =
-                                    self.network_ui_state.result_tab.prev();
+                                if self.network_ui_state.result_tab == NetworkResultTab::Summary {
+                                    // At left boundary — exit Results to prev zone
+                                    self.network_ui_state.focus = self.network_ui_state.focus.prev();
+                                } else {
+                                    self.network_ui_state.result_tab =
+                                        self.network_ui_state.result_tab.prev();
+                                }
                             }
                             _ => {
                                 self.network_ui_state.focus = self.network_ui_state.focus.prev();
@@ -3725,8 +3730,13 @@ impl AppState {
                     if is_initial_press {
                         match self.network_ui_state.focus {
                             NetworkFocusZone::Results => {
-                                self.network_ui_state.result_tab =
-                                    self.network_ui_state.result_tab.next();
+                                if self.network_ui_state.result_tab == NetworkResultTab::History {
+                                    // At right boundary — exit Results to next zone
+                                    self.network_ui_state.focus = self.network_ui_state.focus.next();
+                                } else {
+                                    self.network_ui_state.result_tab =
+                                        self.network_ui_state.result_tab.next();
+                                }
                             }
                             _ => {
                                 self.network_ui_state.focus = self.network_ui_state.focus.next();
@@ -5483,14 +5493,11 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             if !r.policy_rules.is_empty() {
                 lines.push(String::new());
                 lines.push("Policy rules:".to_string());
-                for rule in r.policy_rules.iter().take(12) {
+                for rule in &r.policy_rules {
                     let prio = rule.priority.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
                     let tbl = rule.table.clone().unwrap_or_else(|| "?".to_string());
                     let act = rule.action.clone().unwrap_or_else(|| "lookup".to_string());
                     lines.push(format!("  prio={} {} table={} action={}", prio, rule.family, tbl, act));
-                }
-                if r.policy_rules.len() > 12 {
-                    lines.push(format!("  ... and {} more rules", r.policy_rules.len() - 12));
                 }
             }
             if !r.warnings.is_empty() {
@@ -5505,22 +5512,16 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(String::new());
             for iface in &r.interfaces {
                 lines.push(format!("{}: {}", iface.interface, iface.status));
-                lines.push(format!(
-                    "  speed={} duplex={} mtu={}",
-                    iface.speed.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.duplex.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.mtu,
-                ));
-                lines.push(format!(
-                    "  driver={} mac={}",
-                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string()),
-                    iface.mac_address,
-                ));
+                lines.push(format!("  speed:   {}", iface.speed.clone().unwrap_or_else(|| "n/a".to_string())));
+                lines.push(format!("  duplex:  {}", iface.duplex.clone().unwrap_or_else(|| "n/a".to_string())));
+                lines.push(format!("  mtu:     {}", iface.mtu));
+                lines.push(format!("  driver:  {}", iface.driver.clone().unwrap_or_else(|| "n/a".to_string())));
+                lines.push(format!("  mac:     {}", iface.mac_address));
                 if let Some(fw) = &iface.firmware {
                     lines.push(format!("  firmware: {fw}"));
                 }
                 if let Some(bus) = &iface.bus_info {
-                    lines.push(format!("  bus: {bus}"));
+                    lines.push(format!("  bus:     {bus}"));
                 }
                 // Error counters
                 let rx_err = iface.rx_errors.unwrap_or(0);
@@ -5528,10 +5529,10 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 let rx_drop = iface.rx_dropped.unwrap_or(0);
                 let tx_drop = iface.tx_dropped.unwrap_or(0);
                 if rx_err > 0 || tx_err > 0 || rx_drop > 0 || tx_drop > 0 {
-                    lines.push(format!(
-                        "  errors: rx_err={} tx_err={} rx_drop={} tx_drop={}",
-                        rx_err, tx_err, rx_drop, tx_drop,
-                    ));
+                    lines.push(format!("  rx errors:  {}", rx_err));
+                    lines.push(format!("  tx errors:  {}", tx_err));
+                    lines.push(format!("  rx dropped: {}", rx_drop));
+                    lines.push(format!("  tx dropped: {}", tx_drop));
                 } else {
                     lines.push("  errors: none".to_string());
                 }
@@ -5587,11 +5588,13 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             let time_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("TIME-WAIT")).count();
             let close_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("CLOSE-WAIT")).count();
             lines.push(format!("total entries: {}", r.entries.len()));
-            lines.push(format!("established: {}  listening: {}", established, listen));
-            lines.push(format!("time-wait: {}  close-wait: {}", time_wait, close_wait));
+            lines.push(format!("established: {}", established));
+            lines.push(format!("listening: {}", listen));
+            lines.push(format!("time-wait: {}", time_wait));
+            lines.push(format!("close-wait: {}", close_wait));
             lines.push(format!("permission limited: {}", r.permission_limited));
             lines.push(String::new());
-            for entry in r.entries.iter().take(20) {
+            for entry in &r.entries {
                 let proc_name = entry.process_name.clone().unwrap_or_else(|| "?".to_string());
                 let pid = entry.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
                 let mut extra = String::new();
@@ -5620,9 +5623,6 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                         lines.push(format!("    note: {note}"));
                     }
                 }
-            }
-            if r.entries.len() > 20 {
-                lines.push(format!("  ... and {} more entries", r.entries.len() - 20));
             }
             if !r.warnings.is_empty() {
                 for w in &r.warnings {
@@ -5788,17 +5788,13 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             if !closed.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("CLOSED/FILTERED: {} ports", closed.len()));
-                // Show first 10 closed ports
-                for port in closed.iter().take(10) {
+                for port in &closed {
                     let svc = well_known_port_service(*port);
                     if svc.is_empty() {
                         lines.push(format!("  {:>5}  closed", port));
                     } else {
                         lines.push(format!("  {:>5}  closed  {}", port, svc));
                     }
-                }
-                if closed.len() > 10 {
-                    lines.push(format!("  ... and {} more closed ports", closed.len() - 10));
                 }
             }
         }
@@ -6080,12 +6076,27 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
-            let any_available = r.methods.iter().any(|m| format!("{:?}", m.state).contains("Available"));
-            if any_available {
+            let any_supported = r.methods.iter().any(|m| m.state == linux_netdiag::CapabilityState::Supported);
+            let any_missing = r.methods.iter().any(|m| m.state == linux_netdiag::CapabilityState::MissingDependency);
+            if any_supported {
                 advice.push("NAT traversal available — port forwarding is possible.".to_string());
             } else {
                 advice.push("No NAT traversal methods available.".to_string());
                 advice.push("Consider manual port forwarding on router.".to_string());
+            }
+            if any_missing {
+                advice.push(String::new());
+                advice.push("Missing dependencies detected:".to_string());
+                for m in &r.methods {
+                    if m.state == linux_netdiag::CapabilityState::MissingDependency {
+                        advice.push(format!("  {} — {}", m.method, m.details));
+                    }
+                }
+                advice.push(String::new());
+                advice.push("Install: sudo apt install miniupnpc".to_string());
+                advice.push("  (provides upnpc and natpmpc commands)".to_string());
+                advice.push("Or: sudo dnf install miniupnpc".to_string());
+                advice.push("Or: sudo pacman -S miniupnpc".to_string());
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::MappingTest(r) => {

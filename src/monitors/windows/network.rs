@@ -171,6 +171,7 @@ impl WindowsNetworkMonitor {
                 upload_speed: 0.0,
                 peak_download: 0.0,
                 peak_upload: 0.0,
+                traffic_history: std::collections::VecDeque::new(),
             })
             .collect())
     }

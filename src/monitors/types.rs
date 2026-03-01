@@ -250,6 +250,9 @@ pub struct NetworkInterface {
     pub upload_speed: f64,   // Mbps
     pub peak_download: f64,
     pub peak_upload: f64,
+
+    // Per-interface traffic history
+    pub traffic_history: VecDeque<TrafficSample>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

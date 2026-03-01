@@ -493,8 +493,9 @@ fn render_center_interface(
         f.render_widget(p, det_inner);
     }
 
-    // ---- Traffic graphs ----
-    render_traffic_graphs(f, chunks[2], data, theme);
+    // ---- Traffic graphs (follow selected interface) ----
+    let graph_iface = data.interfaces.get(iface_idx);
+    render_traffic_graphs(f, chunks[2], data, graph_iface, theme);
 
     // ---- Totals + stats row ----
     if let Some(iface) = data.interfaces.get(iface_idx) {
@@ -656,26 +657,42 @@ fn render_center_connections(
 
 // ═══════════════════════════ TRAFFIC GRAPHS ═══════════════════════════
 
-fn render_traffic_graphs(f: &mut Frame, area: Rect, data: &NetworkData, _theme: &Theme) {
+fn render_traffic_graphs(
+    f: &mut Frame,
+    area: Rect,
+    data: &NetworkData,
+    selected_iface: Option<&NetworkInterface>,
+    _theme: &Theme,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
+    // Use selected interface history if available, otherwise fall back to aggregate
+    let history = selected_iface
+        .filter(|iface| !iface.traffic_history.is_empty())
+        .map(|iface| &iface.traffic_history)
+        .unwrap_or(&data.traffic_history);
+
+    let iface_label = selected_iface
+        .map(|iface| format!(" [{}]", iface.name))
+        .unwrap_or_default();
+
     render_sparkline_graph(
         f,
         chunks[0],
-        &data.traffic_history,
+        history,
         |s| s.download_mbps,
-        "Download",
+        &format!("Download{}", iface_label),
         Color::Green,
     );
     render_sparkline_graph(
         f,
         chunks[1],
-        &data.traffic_history,
+        history,
         |s| s.upload_mbps,
-        "Upload",
+        &format!("Upload{}", iface_label),
         Color::Cyan,
     );
 }

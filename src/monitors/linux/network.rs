@@ -9,6 +9,7 @@ use std::time::Instant;
 pub struct LinuxNetworkMonitor {
     linux_sys: LinuxSysMonitor,
     traffic_history: Mutex<VecDeque<TrafficSample>>,
+    per_iface_history: Mutex<HashMap<String, VecDeque<TrafficSample>>>,
     last_network_stats: Mutex<Option<(Instant, HashMap<String, (u64, u64)>)>>,
     last_process_stats: Mutex<Option<(Instant, HashMap<u32, (u64, u64)>)>>,
     peak_interface_speeds: Mutex<HashMap<String, (f64, f64)>>,
@@ -19,6 +20,7 @@ impl LinuxNetworkMonitor {
         Ok(Self {
             linux_sys: LinuxSysMonitor::new(),
             traffic_history: Mutex::new(VecDeque::with_capacity(60)),
+            per_iface_history: Mutex::new(HashMap::new()),
             last_network_stats: Mutex::new(None),
             last_process_stats: Mutex::new(None),
             peak_interface_speeds: Mutex::new(HashMap::new()),
@@ -125,6 +127,7 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
                 upload_speed: iface.upload_speed,
                 peak_download: entry.0,
                 peak_upload: entry.1,
+                traffic_history: VecDeque::new(),
             });
         }
         interfaces.sort_by(|a, b| {
@@ -215,6 +218,24 @@ impl NetworkMonitorTrait for LinuxNetworkMonitor {
             download_mbps,
             upload_mbps,
         });
+
+        // Update per-interface traffic history
+        let mut per_iface = self.per_iface_history.lock();
+        for iface in &mut interfaces {
+            let iface_hist = per_iface
+                .entry(iface.name.clone())
+                .or_insert_with(|| VecDeque::with_capacity(60));
+            if iface_hist.len() >= 60 {
+                iface_hist.pop_front();
+            }
+            iface_hist.push_back(TrafficSample {
+                timestamp: current_time,
+                download_mbps: iface.download_speed,
+                upload_mbps: iface.upload_speed,
+            });
+            iface.traffic_history = iface_hist.clone();
+        }
+        drop(per_iface);
 
         Ok(NetworkData {
             interfaces,
