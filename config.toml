@@ -5,14 +5,16 @@ max_fps = 10
 jpeg_quality = 70
 
 [security]
-discovery_cookie = "00000000000000000000000000000000"
-private_key = "0000000000000000000000000000000000000000000000000000000000000000"
-cardputer_public_key = "020000000000000000000000000000000000000000000000000000000000000000"
+# This repository file is a template only. Generate real values with:
+#   cargo run --bin keygen
+discovery_cookie = "CHANGE_ME_32_HEX_CHARS_FROM_KEYGEN"
+private_key = "CHANGE_ME_64_HEX_CHARS_FROM_KEYGEN"
+cardputer_public_key = "CHANGE_ME_66_HEX_CHARS_FROM_KEYGEN"
 
 [network]
 mdns_service_name = "CardputerRemote"
 device_name = "PC"
-bind_address = "0.0.0.0"
+bind_address = "127.0.0.1"
 
 [display]
 target_width = 240

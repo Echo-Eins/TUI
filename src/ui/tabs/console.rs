@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block as UiBlock, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn render(f: &mut Frame, state: &mut AppState, area: Rect) {
     let chunks = Layout::default()
@@ -61,9 +61,9 @@ fn render_header(f: &mut Frame, state: &AppState, area: Rect) {
 
     let header = Line::from(vec![
         Span::styled(format!(" {} ", cwd), Style::default().fg(Color::Cyan)),
-        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} ", shell), Style::default().fg(Color::Yellow)),
-        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} ", user_host), Style::default().fg(Color::Green)),
     ]);
 
@@ -83,29 +83,24 @@ fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "╭─ Console Session ──────────────────────────────────────╮",
-            Style::default().fg(Color::Cyan),
+            "Console Session",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::styled("│  ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!(
-                    "Shell: {}     User: {}",
-                    state.console_state.shell_name, user_host
-                ),
-                Style::default().fg(Color::White),
+        Line::from(Span::styled(
+            format!(
+                "Shell: {} | User: {}",
+                state.console_state.shell_name, user_host
             ),
-        ]),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("CWD: {}", state.console_state.cwd),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
         Line::from(vec![
-            Span::styled("│  ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("CWD: {}", state.console_state.cwd),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![Span::styled("│  ", Style::default().fg(Color::Cyan))]),
-        Line::from(vec![
-            Span::styled("│  ", Style::default().fg(Color::Cyan)),
             Span::styled(
                 "[i]",
                 Style::default()
@@ -128,17 +123,13 @@ fn render_session_dashboard(f: &mut Frame, state: &AppState, area: Rect) {
             ),
             Span::raw(" History   "),
             Span::styled(
-                "[Tab/→]",
+                "[Tab/Right]",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" Accept"),
         ]),
-        Line::from(Span::styled(
-            "╰──────────────────────────────────────────────────────╯",
-            Style::default().fg(Color::Cyan),
-        )),
     ];
 
     let dashboard = Paragraph::new(lines)
@@ -162,7 +153,7 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
     for block in &state.console_state.blocks {
         // Block header: command + status badge
         let mut header_spans = vec![
-            Span::styled("┌─ $ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("$ ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 &block.input,
                 Style::default()
@@ -183,7 +174,7 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         // Output lines
         for output_line in &block.output_lines {
             all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("| ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     output_line.text.clone(),
                     Style::default().fg(output_line.stream.color()),
@@ -196,14 +187,14 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
             || (block.explain_hint && !block.is_explaining && block.explanation.is_none())
         {
             all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("| ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    "──────────────────────────────────────",
+                    "--------------------------------------",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
 
-            let mut hint_spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
+            let mut hint_spans = vec![Span::styled("| ", Style::default().fg(Color::DarkGray))];
 
             if block.sudo_hint {
                 hint_spans.push(Span::styled(
@@ -228,13 +219,13 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         // Ollama Explanation Rendering
         if block.is_explaining {
             all_lines.push(Line::from(vec![Span::styled(
-                "│ ",
+                "| ",
                 Style::default().fg(Color::DarkGray),
             )]));
             all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("| ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    " │ 🤖 Ollama is analyzing the error...",
+                    "AI is analyzing the error...",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::RAPID_BLINK),
@@ -242,30 +233,27 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
             ]));
         } else if let Some(explanation) = &block.explanation {
             all_lines.push(Line::from(vec![Span::styled(
-                "│ ",
+                "| ",
                 Style::default().fg(Color::DarkGray),
             )]));
             // Add a small header
             all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    " ╭─ 🤖 AI Explanation ───────────────",
-                    Style::default().fg(Color::Magenta),
-                ),
+                Span::styled("| ", Style::default().fg(Color::DarkGray)),
+                Span::styled("AI Explanation", Style::default().fg(Color::Magenta)),
             ]));
 
             // Handle output text
             for line in explanation.lines() {
                 all_lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(" │ ", Style::default().fg(Color::Magenta)),
+                    Span::styled("| ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("> ", Style::default().fg(Color::Magenta)),
                     Span::raw(line),
                 ]));
             }
             all_lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("| ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    " ╰───────────────────────────────────",
+                    "-----------------------------------",
                     Style::default().fg(Color::Magenta),
                 ),
             ]));
@@ -273,7 +261,7 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
 
         // Block footer
         all_lines.push(Line::from(Span::styled(
-            "└──────────────────────────────────────",
+            "",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -308,7 +296,7 @@ fn get_block_badge(
             // Running — live stopwatch
             let elapsed = block.elapsed_ms();
             let secs = elapsed / 1000;
-            let badge = format!("[⟳ {}s]", secs);
+            let badge = format!("[run {}s]", secs);
             Some((badge, Color::Yellow))
         }
         Some(task_state) => Some((task_state.badge(), task_state.badge_color())),
@@ -362,13 +350,13 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
             &state.console_state.history_search_query,
             Style::default().fg(Color::White),
         ),
-        Span::styled("█", Style::default().fg(Color::DarkGray)), // cursor
+        Span::styled("_", Style::default().fg(Color::DarkGray)), // cursor
     ]);
 
     f.render_widget(Paragraph::new(query_line), search_chunks[0]);
 
     // Separator
-    let sep = "─".repeat(search_chunks[1].width as usize);
+    let sep = "-".repeat(search_chunks[1].width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             sep,
@@ -388,7 +376,7 @@ fn render_history_search(f: &mut Frame, state: &AppState, area: Rect) {
         .enumerate()
         .map(|(i, cmd)| {
             let is_selected = i == selected;
-            let indicator = if is_selected { " ▸ " } else { "   " };
+            let indicator = if is_selected { " > " } else { "   " };
             let style = if is_selected {
                 Style::default()
                     .fg(Color::White)
@@ -454,7 +442,7 @@ fn render_confirm_panel(f: &mut Frame, state: &AppState, area: Rect) {
     let panel_block = UiBlock::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(format!(" 🔐 {} ", action))
+        .title(format!(" {} ", action))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(Color::Rgb(25, 25, 35)));
 
@@ -531,17 +519,17 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     // Show scroll indicator
     if state.console_state.scroll_offset > 0 {
         status_spans.push(Span::styled(
-            format!(" [SCROLL ↑{}] ", state.console_state.scroll_offset),
+            format!(" [SCROLL +{}] ", state.console_state.scroll_offset),
             Style::default().fg(Color::Cyan),
         ));
     }
 
     // Help text
     let help = match state.console_state.mode {
-        ConsoleMode::Normal => " │ 'i' insert  '↑↓' scroll  Ctrl+S sudo",
-        ConsoleMode::Insert => " │ Esc normal  Ctrl+R history  Tab/→ accept  ↑↓ prev/next",
-        ConsoleMode::HistorySearch => " │ Esc cancel  Enter accept  ↑↓ navigate",
-        ConsoleMode::Confirm => " │ Enter confirm  Esc cancel",
+        ConsoleMode::Normal => " | 'i' insert  Up/Down scroll  Ctrl+S sudo",
+        ConsoleMode::Insert => " | Esc normal  Ctrl+R history  Tab/Right accept  Up/Down prev/next",
+        ConsoleMode::HistorySearch => " | Esc cancel  Enter accept  Up/Down navigate",
+        ConsoleMode::Confirm => " | Enter confirm  Esc cancel",
     };
 
     status_spans.push(Span::styled(help, Style::default().fg(Color::DarkGray)));
@@ -571,32 +559,66 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
     // Build input line with syntax highlighting + ghost text
     let prompt = "> ";
     let input = &state.console_state.input_buffer;
+    let prompt_width = UnicodeWidthStr::width(prompt);
+    let ghost_remainder = state.console_state.ghost_text.as_ref().and_then(|ghost| {
+        let input_char_count = input.chars().count();
+        let ghost_char_count = ghost.chars().count();
+        if ghost_char_count > input_char_count && ghost.starts_with(input.as_str()) {
+            Some(ghost.chars().skip(input_char_count).collect::<String>())
+        } else {
+            None
+        }
+    });
+    let total_input_width = prompt_width
+        + UnicodeWidthStr::width(input.as_str())
+        + ghost_remainder
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
+    let should_clip = inner.width > 0 && total_input_width > inner.width as usize;
 
     let mut spans = vec![Span::styled(prompt, Style::default().fg(Color::Cyan))];
 
-    // Use syntax-highlighted tokens if available, otherwise plain white
-    if !state.console_state.highlighted_input.is_empty() {
+    let cursor_visual_width;
+    if should_clip {
+        let available_width = (inner.width as usize).saturating_sub(prompt_width).max(1);
+        let (visible_input, visible_cursor_width) =
+            visible_input_window(input, state.console_state.cursor_position, available_width);
+        spans.push(Span::styled(
+            visible_input,
+            Style::default().fg(Color::White),
+        ));
+        cursor_visual_width = visible_cursor_width;
+    } else if !state.console_state.highlighted_input.is_empty() {
+        // Use syntax-highlighted tokens if available, otherwise plain white
         for (text, color) in &state.console_state.highlighted_input {
             spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
         }
+        let text_before_cursor: String = input
+            .chars()
+            .take(state.console_state.cursor_position)
+            .collect();
+        cursor_visual_width = UnicodeWidthStr::width(text_before_cursor.as_str());
     } else {
         spans.push(Span::styled(
             input.as_str(),
             Style::default().fg(Color::White),
         ));
+        let text_before_cursor: String = input
+            .chars()
+            .take(state.console_state.cursor_position)
+            .collect();
+        cursor_visual_width = UnicodeWidthStr::width(text_before_cursor.as_str());
     }
 
     // Ghost text: show the remainder of the suggestion in dark gray
-    if let Some(ghost) = &state.console_state.ghost_text {
-        let input_char_count = input.chars().count();
-        let ghost_char_count = ghost.chars().count();
-        if ghost_char_count > input_char_count && ghost.starts_with(input.as_str()) {
-            let remainder: String = ghost.chars().skip(input_char_count).collect();
+    if !should_clip {
+        if let Some(remainder) = ghost_remainder {
             spans.push(Span::styled(
                 remainder,
                 Style::default().fg(Color::Rgb(80, 80, 100)),
             ));
-        }
+        };
     }
 
     let input_paragraph = Paragraph::new(Line::from(spans)).block(input_block);
@@ -604,18 +626,62 @@ fn render_input(f: &mut Frame, state: &mut AppState, area: Rect) {
 
     // Render cursor if in insert mode
     if state.console_state.mode == ConsoleMode::Insert {
-        // Compute visual cursor position using unicode display width
-        let text_before_cursor: String = input
-            .chars()
-            .take(state.console_state.cursor_position)
-            .collect();
-        let cursor_x = inner.x
-            + UnicodeWidthStr::width(prompt) as u16
-            + UnicodeWidthStr::width(text_before_cursor.as_str()) as u16;
+        let cursor_x =
+            inner.x + prompt_width as u16 + cursor_visual_width.min(inner.width as usize) as u16;
         let cursor_y = inner.y;
 
         if cursor_x < inner.x + inner.width {
             f.set_cursor_position((cursor_x, cursor_y));
         }
+    }
+}
+
+fn visible_input_window(input: &str, cursor_position: usize, max_width: usize) -> (String, usize) {
+    let max_width = max_width.max(1);
+    let chars: Vec<char> = input.chars().collect();
+    let cursor = cursor_position.min(chars.len());
+
+    let mut start = 0;
+    while start < cursor {
+        let before_cursor: String = chars[start..cursor].iter().collect();
+        if UnicodeWidthStr::width(before_cursor.as_str()) < max_width {
+            break;
+        }
+        start += 1;
+    }
+
+    let before_cursor: String = chars[start..cursor].iter().collect();
+    let cursor_width = UnicodeWidthStr::width(before_cursor.as_str());
+
+    let mut visible = String::new();
+    let mut visible_width = 0usize;
+    for ch in chars.iter().skip(start).copied() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible_width + ch_width > max_width {
+            break;
+        }
+        visible.push(ch);
+        visible_width += ch_width;
+    }
+
+    (visible, cursor_width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_input_window_keeps_cursor_visible_for_long_ascii() {
+        let (visible, cursor_width) = visible_input_window("abcdef", 6, 3);
+        assert_eq!(visible, "ef");
+        assert_eq!(cursor_width, 2);
+    }
+
+    #[test]
+    fn visible_input_window_counts_wide_characters() {
+        let (visible, cursor_width) = visible_input_window("ab界cd", 4, 4);
+        assert_eq!(visible, "界cd");
+        assert_eq!(cursor_width, 3);
     }
 }

@@ -29,6 +29,7 @@ enum AsyncUpdate {
     ConsoleStdout { block_id: u64, line: String },
     ConsoleStderr { block_id: u64, line: String },
     ConsoleCompleted { block_id: u64, exit_code: i32 },
+    ConsoleInterrupted { block_id: u64 },
     ConsoleFailed { block_id: u64, error: String },
     OllamaCommandCompleted { title: String, lines: Vec<String> },
     OllamaChatCompleted { response: String },
@@ -406,9 +407,7 @@ impl NetworkDiagnosticTool {
                 ("Google", "8.8.8.8"),
                 ("Cloudflare", "1.1.1.1"),
             ],
-            Self::NicDeepInfo => vec![
-                ("All", ""),
-            ],
+            Self::NicDeepInfo => vec![("All", "")],
             Self::ConnectionLab => vec![
                 ("TCP Established", "proto=tcp state=estab"),
                 ("TCP Listen", "proto=tcp state=listen"),
@@ -427,14 +426,14 @@ impl NetworkDiagnosticTool {
                 ("UDP", "8.8.8.8 proto=udp"),
                 ("Cloudflare TCP", "1.1.1.1 proto=tcp port=443"),
             ],
-            Self::MtuProbe => vec![
-                ("Google", "8.8.8.8"),
-                ("Cloudflare", "1.1.1.1"),
-            ],
+            Self::MtuProbe => vec![("Google", "8.8.8.8"), ("Cloudflare", "1.1.1.1")],
             Self::PortScan => vec![
                 ("Common Web", "localhost:22,80,443,8080,8443"),
                 ("Databases", "localhost:3306,5432,6379,27017"),
-                ("Full Scan", "localhost:21,22,25,53,80,110,143,443,993,3306,5432,8080"),
+                (
+                    "Full Scan",
+                    "localhost:21,22,25,53,80,110,143,443,993,3306,5432,8080",
+                ),
             ],
             Self::NatCapability => vec![],
             Self::NatMappingTest => vec![
@@ -712,7 +711,7 @@ impl AppState {
                             &hostname,
                         );
                     }
-                    self.console_state.complete_active(exit_code);
+                    self.console_state.complete_block(block_id, exit_code);
 
                     // Detect permission failure and set sudo hint
                     if exit_code != 0 {
@@ -736,6 +735,18 @@ impl AppState {
                             }
                         }
                     }
+                }
+                AsyncUpdate::ConsoleInterrupted { block_id } => {
+                    if let Some(block) = self.console_state.get_block(block_id) {
+                        let cmd = block.input.clone();
+                        let cwd = block.cwd.clone();
+                        let elapsed = block.elapsed_ms() as i64;
+                        let hostname = self.console_state.hostname.clone();
+                        let _ =
+                            self.history
+                                .record(&cmd, &cwd, Some(130), Some(elapsed), &hostname);
+                    }
+                    self.console_state.interrupt_block(block_id);
                 }
                 AsyncUpdate::ConsoleFailed { block_id, error } => {
                     // Record failed command to history
@@ -2020,15 +2031,79 @@ impl AppState {
 
     // ── Shell builtin interception ──────────────────────────────────────
 
+    fn finish_console_block(
+        &mut self,
+        input: String,
+        lines: Vec<crate::app::console_state::OutputLine>,
+        exit_code: i32,
+    ) -> u64 {
+        let max_lines = self.config.read().console.max_output_lines;
+        let block_id = self.console_state.start_command(input);
+        if let Some(block) = self.console_state.get_block_mut(block_id) {
+            for line in lines {
+                block.push_line(line, max_lines);
+            }
+            block.complete(exit_code);
+            if exit_code != 0
+                && block
+                    .output_lines
+                    .iter()
+                    .any(|line| line.stream == crate::app::console_state::OutputStream::Stderr)
+            {
+                block.explain_hint = true;
+            }
+        }
+        self.console_state.active_block_id = None;
+
+        if let Some(block) = self.console_state.get_block(block_id) {
+            let _ = self.history.record(
+                &block.input,
+                &block.cwd,
+                Some(exit_code),
+                Some(block.elapsed_ms() as i64),
+                &self.console_state.hostname,
+            );
+        }
+
+        block_id
+    }
+
     /// Try to intercept a shell builtin command. Returns `Some(true)` if handled,
     /// `Some(false)` should never happen (reserved), `None` if not a builtin.
     fn try_intercept_builtin(&mut self, cmd: &str) -> Option<bool> {
         let trimmed = cmd.trim();
-        let max_lines = self.config.read().console.max_output_lines;
+        let words = match crate::app::console_state::split_shell_words(trimmed) {
+            Ok(words) => words,
+            Err(error) => {
+                self.finish_console_block(
+                    trimmed.to_string(),
+                    vec![crate::app::console_state::OutputLine::stderr(format!(
+                        "parse error: {}",
+                        error
+                    ))],
+                    2,
+                );
+                return Some(true);
+            }
+        };
+        let Some(first_word) = words.first().map(|word| word.as_str()) else {
+            return None;
+        };
 
         // ── cd ─────────────────────────────────────────────────────────
-        if trimmed == "cd" || trimmed.starts_with("cd ") {
-            let arg = trimmed.strip_prefix("cd").unwrap_or("").trim();
+        if first_word == "cd" {
+            if words.len() > 2 {
+                self.finish_console_block(
+                    trimmed.to_string(),
+                    vec![crate::app::console_state::OutputLine::stderr(
+                        "cd: too many arguments",
+                    )],
+                    1,
+                );
+                return Some(true);
+            }
+
+            let arg = words.get(1).map(String::as_str).unwrap_or("");
             let target = if arg.is_empty() {
                 // cd with no args → home directory
                 dirs::home_dir()
@@ -2039,15 +2114,13 @@ impl AppState {
                 match &self.console_state.prev_cwd {
                     Some(prev) => prev.clone(),
                     None => {
-                        let block_id = self.console_state.start_command(trimmed.to_string());
-                        if let Some(block) = self.console_state.get_block_mut(block_id) {
-                            block.push_line(
-                                crate::app::console_state::OutputLine::stderr("cd: OLDPWD not set"),
-                                max_lines,
-                            );
-                            block.complete(1);
-                        }
-                        self.console_state.active_block_id = None;
+                        self.finish_console_block(
+                            trimmed.to_string(),
+                            vec![crate::app::console_state::OutputLine::stderr(
+                                "cd: OLDPWD not set",
+                            )],
+                            1,
+                        );
                         return Some(true);
                     }
                 }
@@ -2058,7 +2131,7 @@ impl AppState {
                     .unwrap_or_else(|| "~".to_string());
                 let rest = arg.strip_prefix('~').unwrap_or("");
                 format!("{}{}", home, rest)
-            } else if arg.starts_with('/') || arg.starts_with('\\') {
+            } else if std::path::Path::new(arg).is_absolute() {
                 // Absolute path
                 arg.to_string()
             } else {
@@ -2071,90 +2144,139 @@ impl AppState {
             let resolved = std::path::Path::new(&target);
             match std::fs::canonicalize(resolved) {
                 Ok(canonical) => {
+                    if !canonical.is_dir() {
+                        self.finish_console_block(
+                            trimmed.to_string(),
+                            vec![crate::app::console_state::OutputLine::stderr(format!(
+                                "cd: {}: not a directory",
+                                target
+                            ))],
+                            1,
+                        );
+                        return Some(true);
+                    }
+
                     let new_cwd = canonical.display().to_string();
                     let old_cwd = self.console_state.cwd.clone();
                     self.console_state.prev_cwd = Some(old_cwd);
                     self.console_state.cwd = new_cwd.clone();
 
-                    let block_id = self.console_state.start_command(trimmed.to_string());
-                    if let Some(block) = self.console_state.get_block_mut(block_id) {
-                        block.push_line(
-                            crate::app::console_state::OutputLine::stdout(new_cwd),
-                            max_lines,
-                        );
-                        block.complete(0);
-                    }
-                    self.console_state.active_block_id = None;
+                    self.finish_console_block(
+                        trimmed.to_string(),
+                        vec![crate::app::console_state::OutputLine::stdout(new_cwd)],
+                        0,
+                    );
                 }
                 Err(e) => {
-                    let block_id = self.console_state.start_command(trimmed.to_string());
-                    if let Some(block) = self.console_state.get_block_mut(block_id) {
-                        block.push_line(
-                            crate::app::console_state::OutputLine::stderr(format!(
-                                "cd: {}: {}",
-                                target, e
-                            )),
-                            max_lines,
-                        );
-                        block.complete(1);
-                    }
-                    self.console_state.active_block_id = None;
+                    self.finish_console_block(
+                        trimmed.to_string(),
+                        vec![crate::app::console_state::OutputLine::stderr(format!(
+                            "cd: {}: {}",
+                            target, e
+                        ))],
+                        1,
+                    );
                 }
             }
             return Some(true);
         }
 
         // ── export ─────────────────────────────────────────────────────
-        if trimmed.starts_with("export ") {
-            let assignment = trimmed.strip_prefix("export ").unwrap_or("").trim();
-            let block_id = self.console_state.start_command(trimmed.to_string());
+        if first_word == "export" {
+            let mut output = Vec::new();
+            let mut exit_code = 0;
 
-            if let Some((key, value)) = assignment.split_once('=') {
-                let key = key.trim().to_string();
-                let value = value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string();
-                self.console_state
-                    .env_vars
-                    .insert(key.clone(), value.clone());
-                if let Some(block) = self.console_state.get_block_mut(block_id) {
-                    block.push_line(
-                        crate::app::console_state::OutputLine::stdout(format!("{}={}", key, value)),
-                        max_lines,
-                    );
-                    block.complete(0);
+            if words.len() == 1 {
+                let mut env_pairs: Vec<_> = self.console_state.env_vars.iter().collect();
+                env_pairs.sort_by(|a, b| a.0.cmp(b.0));
+                if env_pairs.is_empty() {
+                    output.push(crate::app::console_state::OutputLine::stdout(
+                        "No session environment overrides set.",
+                    ));
+                } else {
+                    for (key, value) in env_pairs {
+                        output.push(crate::app::console_state::OutputLine::stdout(format!(
+                            "{}={}",
+                            key, value
+                        )));
+                    }
                 }
             } else {
-                if let Some(block) = self.console_state.get_block_mut(block_id) {
-                    block.push_line(
-                        crate::app::console_state::OutputLine::stderr(
-                            "export: usage: export VAR=value",
-                        ),
-                        max_lines,
-                    );
-                    block.complete(1);
+                for assignment in words.iter().skip(1) {
+                    if let Some((key, value)) = assignment.split_once('=') {
+                        let key = key.trim();
+                        if !is_valid_shell_identifier(key) {
+                            output.push(crate::app::console_state::OutputLine::stderr(format!(
+                                "export: `{}`: not a valid identifier",
+                                key
+                            )));
+                            exit_code = 1;
+                            continue;
+                        }
+                        self.console_state
+                            .env_vars
+                            .insert(key.to_string(), value.to_string());
+                        output.push(crate::app::console_state::OutputLine::stdout(format!(
+                            "{}={}",
+                            key, value
+                        )));
+                    } else if is_valid_shell_identifier(assignment) {
+                        let value = self
+                            .console_state
+                            .env_vars
+                            .get(assignment)
+                            .cloned()
+                            .or_else(|| std::env::var(assignment).ok())
+                            .unwrap_or_default();
+                        self.console_state
+                            .env_vars
+                            .insert(assignment.clone(), value.clone());
+                        output.push(crate::app::console_state::OutputLine::stdout(format!(
+                            "{}={}",
+                            assignment, value
+                        )));
+                    } else {
+                        output.push(crate::app::console_state::OutputLine::stderr(format!(
+                            "export: `{}`: not a valid identifier",
+                            assignment
+                        )));
+                        exit_code = 1;
+                    }
                 }
             }
-            self.console_state.active_block_id = None;
+
+            self.finish_console_block(trimmed.to_string(), output, exit_code);
             return Some(true);
         }
 
         // ── unset ──────────────────────────────────────────────────────
-        if trimmed.starts_with("unset ") {
-            let var_name = trimmed.strip_prefix("unset ").unwrap_or("").trim();
-            let block_id = self.console_state.start_command(trimmed.to_string());
-            self.console_state.env_vars.remove(var_name);
-            if let Some(block) = self.console_state.get_block_mut(block_id) {
-                block.complete(0);
+        if first_word == "unset" {
+            let mut output = Vec::new();
+            let mut exit_code = 0;
+            if words.len() == 1 {
+                output.push(crate::app::console_state::OutputLine::stderr(
+                    "unset: usage: unset VAR [VAR ...]",
+                ));
+                exit_code = 1;
+            } else {
+                for var_name in words.iter().skip(1) {
+                    if is_valid_shell_identifier(var_name) {
+                        self.console_state.env_vars.remove(var_name);
+                    } else {
+                        output.push(crate::app::console_state::OutputLine::stderr(format!(
+                            "unset: `{}`: not a valid identifier",
+                            var_name
+                        )));
+                        exit_code = 1;
+                    }
+                }
             }
-            self.console_state.active_block_id = None;
+            self.finish_console_block(trimmed.to_string(), output, exit_code);
             return Some(true);
         }
 
         // ── clear ──────────────────────────────────────────────────────
-        if trimmed == "clear" {
+        if first_word == "clear" && words.len() == 1 {
             self.console_state.blocks.clear();
             self.console_state.scroll_offset = 0;
             self.console_state.selected_block = None;
@@ -2162,45 +2284,31 @@ impl AppState {
         }
 
         // ── exit ───────────────────────────────────────────────────────
-        if trimmed == "exit" || trimmed.starts_with("exit ") {
-            let block_id = self.console_state.start_command(trimmed.to_string());
-            if let Some(block) = self.console_state.get_block_mut(block_id) {
-                block.push_line(
-                    crate::app::console_state::OutputLine::stderr(
-                        "exit: not supported in embedded console (use Ctrl+Q to quit the application)",
-                    ),
-                    max_lines,
-                );
-                block.complete(1);
-            }
-            self.console_state.active_block_id = None;
+        if first_word == "exit" {
+            self.finish_console_block(
+                trimmed.to_string(),
+                vec![crate::app::console_state::OutputLine::stderr(
+                    "exit: not supported in embedded console (use Ctrl+Q to quit the application)",
+                )],
+                1,
+            );
             return Some(true);
         }
 
         // ── source / . / alias ─────────────────────────────────────────
-        if trimmed == "source"
-            || trimmed.starts_with("source ")
-            || (trimmed.starts_with(". ") && trimmed.len() > 2)
-            || trimmed.starts_with("alias ")
-            || trimmed == "alias"
-        {
-            let block_id = self.console_state.start_command(trimmed.to_string());
-            if let Some(block) = self.console_state.get_block_mut(block_id) {
-                block.push_line(
+        if first_word == "source" || first_word == "." || first_word == "alias" {
+            self.finish_console_block(
+                trimmed.to_string(),
+                vec![
                     crate::app::console_state::OutputLine::stderr(
-                        "Shell builtins like source/alias only persist per-command in the embedded console.",
+                        "Shell builtins like source/alias only persist per command in the embedded console.",
                     ),
-                    max_lines,
-                );
-                block.push_line(
                     crate::app::console_state::OutputLine::stderr(
                         "Use 'export VAR=val' to set session environment variables.",
                     ),
-                    max_lines,
-                );
-                block.complete(1);
-            }
-            self.console_state.active_block_id = None;
+                ],
+                1,
+            );
             return Some(true);
         }
 
@@ -2213,95 +2321,14 @@ impl AppState {
     /// work without a proper PTY (pseudo-terminal).
     fn is_interactive_command(cmd: &str) -> bool {
         let trimmed = cmd.trim();
-        let first_word = trimmed.split_whitespace().next().unwrap_or("");
-
-        // Exact matches for known interactive programs
-        const INTERACTIVE_PROGRAMS: &[&str] = &[
-            "vim",
-            "nvim",
-            "vi",
-            "nano",
-            "emacs",
-            "micro",
-            "joe",
-            "pico",
-            "less",
-            "more",
-            "most",
-            "top",
-            "htop",
-            "btop",
-            "atop",
-            "glances",
-            "nmon",
-            "python",
-            "python3",
-            "ipython",
-            "node",
-            "irb",
-            "ghci",
-            "lua",
-            "bash",
-            "zsh",
-            "fish",
-            "sh",
-            "csh",
-            "tcsh",
-            "ksh",
-            "ssh",
-            "telnet",
-            "ftp",
-            "sftp",
-            "mysql",
-            "psql",
-            "sqlite3",
-            "mongo",
-            "redis-cli",
-            "tmux",
-            "screen",
-            "byobu",
-            "mc",
-            "ranger",
-            "nnn",
-            "lf",
-            "vifm",
-            "gdb",
-            "lldb",
-        ];
-
-        if INTERACTIVE_PROGRAMS.contains(&first_word) {
-            return true;
-        }
-
-        // Pattern matches for specific argument combinations
-        if first_word == "sudo" {
-            let args: Vec<&str> = trimmed.split_whitespace().collect();
-            // sudo -i, sudo -s, sudo su, sudo bash, etc.
-            if args.len() >= 2 {
-                let second = args[1];
-                if second == "-i" || second == "-s" || second == "su" {
-                    return true;
-                }
-                // sudo <interactive_program>
-                if INTERACTIVE_PROGRAMS.contains(&second) {
-                    return true;
-                }
-            }
-            // bare "sudo" with no args
-            if args.len() == 1 {
-                return true;
-            }
-        }
-
-        if first_word == "su" {
-            let args: Vec<&str> = trimmed.split_whitespace().collect();
-            // bare "su" or "su -" starts interactive shell
-            if args.len() <= 2 {
-                return true;
-            }
-        }
-
-        false
+        let words = match crate::app::console_state::split_shell_words(trimmed) {
+            Ok(words) => words,
+            Err(_) => trimmed
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+        };
+        command_invocation_is_interactive(&words)
     }
 
     fn spawn_console_command(&mut self, command: String) {
@@ -2335,6 +2362,9 @@ impl AppState {
                             }
                             StreamMessage::Stderr(line) => {
                                 let _ = tx.send(AsyncUpdate::ConsoleStderr { block_id, line });
+                            }
+                            StreamMessage::Interrupted => {
+                                let _ = tx.send(AsyncUpdate::ConsoleInterrupted { block_id });
                             }
                             StreamMessage::Exit(code) => {
                                 let _ = tx.send(AsyncUpdate::ConsoleCompleted {
@@ -2414,31 +2444,40 @@ impl AppState {
     }
 
     /// Expand command macros (!! / !$ / sudo !!) and return the expanded command.
-    fn expand_macros(&self, cmd: &str) -> String {
+    fn expand_macros(&self, cmd: &str) -> std::result::Result<String, String> {
         let mut expanded = cmd.to_string();
 
         // sudo !! → sudo <last_command>
         if expanded.trim() == "sudo !!" {
-            if let Some(last) = &self.console_state.last_command {
-                return format!("sudo {}", last);
-            }
+            let last = self
+                .console_state
+                .last_command
+                .as_deref()
+                .ok_or_else(|| "!!: event not found".to_string())?;
+            return Ok(crate::app::sudo::sudo_command(last));
         }
 
         // !! → <last_command>
         if expanded.contains("!!") {
-            if let Some(last) = &self.console_state.last_command {
-                expanded = expanded.replace("!!", last);
-            }
+            let last = self
+                .console_state
+                .last_command
+                .as_deref()
+                .ok_or_else(|| "!!: event not found".to_string())?;
+            expanded = expanded.replace("!!", last);
         }
 
         // !$ → <last_args>
         if expanded.contains("!$") {
-            if let Some(last_args) = &self.console_state.last_args {
-                expanded = expanded.replace("!$", last_args);
-            }
+            let last_args = self
+                .console_state
+                .last_args
+                .as_deref()
+                .ok_or_else(|| "!$: event not found".to_string())?;
+            expanded = expanded.replace("!$", last_args);
         }
 
-        expanded
+        Ok(expanded)
     }
 
     /// Update history search results based on the current query.
@@ -2906,7 +2945,7 @@ impl AppState {
                             if is_initial_press
                                 && self.allow_text_input()
                                 && self.console_state.cursor_position
-                                    < self.console_state.input_buffer.len()
+                                    < self.console_state.input_char_count()
                             {
                                 self.console_state.delete_char();
                                 self.refresh_ghost_text();
@@ -2926,7 +2965,7 @@ impl AppState {
                                     self.console_state.accept_ghost_word();
                                     self.refresh_ghost_text();
                                 } else if self.console_state.cursor_position
-                                    >= self.console_state.input_buffer.len()
+                                    >= self.console_state.input_char_count()
                                     && self.console_state.ghost_text.is_some()
                                 {
                                     // Right at end of buffer: accept full ghost text
@@ -2972,7 +3011,20 @@ impl AppState {
                                 self.console_state.scroll_offset = 0;
 
                                 if !raw_cmd.trim().is_empty() {
-                                    let cmd = self.expand_macros(&raw_cmd);
+                                    let cmd =
+                                        match self.expand_macros(&raw_cmd) {
+                                            Ok(cmd) => cmd,
+                                            Err(error) => {
+                                                self.finish_console_block(
+                                                raw_cmd.trim().to_string(),
+                                                vec![crate::app::console_state::OutputLine::stderr(
+                                                    error,
+                                                )],
+                                                1,
+                                            );
+                                                return Ok(true);
+                                            }
+                                        };
 
                                     // Intercept 'explain' meta-command
                                     if cmd.trim() == "explain" {
@@ -3025,7 +3077,7 @@ impl AppState {
                                                 self.config.read().console.max_output_lines;
                                             block.push_line(
                                                 crate::app::console_state::OutputLine::stderr(
-                                                    "⚠ Interactive commands are not supported in the embedded console."
+                                                    "Interactive commands are not supported in the embedded console."
                                                 ),
                                                 max_lines,
                                             );
@@ -3098,25 +3150,22 @@ impl AppState {
                                                 .trim()
                                                 .to_string();
                                         }
-                                    } else if trimmed_cmd.starts_with("find ") {
-                                        let args =
-                                            trimmed_cmd.strip_prefix("find ").unwrap_or("").trim();
-                                        if has_cmd("fd") {
-                                            // fd-find
-                                            final_cmd =
-                                                format!("fd -c always {}", args).trim().to_string();
-                                        } else {
-                                            final_cmd =
-                                                format!("find . -name {}", args).trim().to_string();
-                                        }
                                     }
 
                                     // Save for future macro use
-                                    let parts: Vec<&str> = final_cmd.split_whitespace().collect();
+                                    let parts =
+                                        crate::app::console_state::split_shell_words(&final_cmd)
+                                            .unwrap_or_else(|_| {
+                                                final_cmd
+                                                    .split_whitespace()
+                                                    .map(ToOwned::to_owned)
+                                                    .collect()
+                                            });
                                     self.console_state.last_command = Some(final_cmd.clone());
                                     if parts.len() > 1 {
-                                        self.console_state.last_args =
-                                            Some(parts.last().unwrap().to_string());
+                                        self.console_state.last_args = parts.last().cloned();
+                                    } else {
+                                        self.console_state.last_args = None;
                                     }
 
                                     self.spawn_console_command(final_cmd);
@@ -3713,7 +3762,8 @@ impl AppState {
                             NetworkFocusZone::Results => {
                                 if self.network_ui_state.result_tab == NetworkResultTab::Summary {
                                     // At left boundary — exit Results to prev zone
-                                    self.network_ui_state.focus = self.network_ui_state.focus.prev();
+                                    self.network_ui_state.focus =
+                                        self.network_ui_state.focus.prev();
                                 } else {
                                     self.network_ui_state.result_tab =
                                         self.network_ui_state.result_tab.prev();
@@ -3732,7 +3782,8 @@ impl AppState {
                             NetworkFocusZone::Results => {
                                 if self.network_ui_state.result_tab == NetworkResultTab::History {
                                     // At right boundary — exit Results to next zone
-                                    self.network_ui_state.focus = self.network_ui_state.focus.next();
+                                    self.network_ui_state.focus =
+                                        self.network_ui_state.focus.next();
                                 } else {
                                     self.network_ui_state.result_tab =
                                         self.network_ui_state.result_tab.next();
@@ -3766,18 +3817,18 @@ impl AppState {
                             self.network_ui_state.activity_scroll =
                                 self.network_ui_state.activity_scroll.saturating_sub(1);
                         }
-                        NetworkFocusZone::Interface => {
-                            match self.network_ui_state.center_view {
-                                NetworkCenterView::Connections => {
-                                    self.network_ui_state.connections_scroll =
-                                        self.network_ui_state.connections_scroll.saturating_sub(1);
-                                }
-                                NetworkCenterView::Interface => {
-                                    self.network_ui_state.selected_interface_idx =
-                                        self.network_ui_state.selected_interface_idx.saturating_sub(1);
-                                }
+                        NetworkFocusZone::Interface => match self.network_ui_state.center_view {
+                            NetworkCenterView::Connections => {
+                                self.network_ui_state.connections_scroll =
+                                    self.network_ui_state.connections_scroll.saturating_sub(1);
                             }
-                        }
+                            NetworkCenterView::Interface => {
+                                self.network_ui_state.selected_interface_idx = self
+                                    .network_ui_state
+                                    .selected_interface_idx
+                                    .saturating_sub(1);
+                            }
+                        },
                     }
                     return Ok(true);
                 }
@@ -3800,18 +3851,18 @@ impl AppState {
                             self.network_ui_state.activity_scroll =
                                 self.network_ui_state.activity_scroll.saturating_add(1);
                         }
-                        NetworkFocusZone::Interface => {
-                            match self.network_ui_state.center_view {
-                                NetworkCenterView::Connections => {
-                                    self.network_ui_state.connections_scroll =
-                                        self.network_ui_state.connections_scroll.saturating_add(1);
-                                }
-                                NetworkCenterView::Interface => {
-                                    self.network_ui_state.selected_interface_idx =
-                                        self.network_ui_state.selected_interface_idx.saturating_add(1);
-                                }
+                        NetworkFocusZone::Interface => match self.network_ui_state.center_view {
+                            NetworkCenterView::Connections => {
+                                self.network_ui_state.connections_scroll =
+                                    self.network_ui_state.connections_scroll.saturating_add(1);
                             }
-                        }
+                            NetworkCenterView::Interface => {
+                                self.network_ui_state.selected_interface_idx = self
+                                    .network_ui_state
+                                    .selected_interface_idx
+                                    .saturating_add(1);
+                            }
+                        },
                     }
                     return Ok(true);
                 }
@@ -3913,7 +3964,8 @@ impl AppState {
                 // v: toggle center view (Interface <-> Connections)
                 KeyCode::Char('v') => {
                     if is_initial_press {
-                        self.network_ui_state.center_view = match self.network_ui_state.center_view {
+                        self.network_ui_state.center_view = match self.network_ui_state.center_view
+                        {
                             NetworkCenterView::Interface => NetworkCenterView::Connections,
                             NetworkCenterView::Connections => NetworkCenterView::Interface,
                         };
@@ -4931,6 +4983,273 @@ impl AppState {
     }
 }
 
+fn is_valid_shell_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn shell_command_basename(command: &str) -> &str {
+    command
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(command)
+}
+
+fn command_invocation_is_interactive(words: &[String]) -> bool {
+    let Some(command) = words.first().map(|word| shell_command_basename(word)) else {
+        return false;
+    };
+
+    const ALWAYS_INTERACTIVE: &[&str] = &[
+        "vim", "nvim", "vi", "nano", "emacs", "micro", "joe", "pico", "less", "more", "most",
+        "top", "htop", "btop", "atop", "glances", "nmon", "telnet", "ftp", "sftp", "tmux",
+        "screen", "byobu", "mc", "ranger", "nnn", "lf", "vifm",
+    ];
+
+    if ALWAYS_INTERACTIVE.contains(&command) {
+        return true;
+    }
+
+    match command {
+        "sudo" => sudo_invocation_is_interactive(words),
+        "su" => !words
+            .iter()
+            .skip(1)
+            .any(|arg| arg == "-c" || arg == "--command"),
+        "ssh" => ssh_invocation_is_interactive(words),
+        "bash" | "zsh" | "fish" | "sh" | "csh" | "tcsh" | "ksh" => {
+            shell_invocation_is_interactive(words)
+        }
+        "python" | "python3" | "ipython" | "node" | "irb" | "ghci" | "lua" => {
+            repl_invocation_is_interactive(words)
+        }
+        "mysql" | "psql" | "sqlite3" | "mongo" | "redis-cli" => {
+            database_cli_invocation_is_interactive(words)
+        }
+        "gdb" | "lldb" => !words.iter().skip(1).any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--batch" | "-batch" | "-ex" | "--eval-command"
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn sudo_invocation_is_interactive(words: &[String]) -> bool {
+    if words.len() == 1 {
+        return true;
+    }
+
+    let mut command_index = 1;
+    while command_index < words.len() {
+        let arg = words[command_index].as_str();
+        if matches!(arg, "-i" | "-s" | "-") {
+            return true;
+        }
+        if arg == "--" {
+            command_index += 1;
+            break;
+        }
+        if matches!(arg, "-u" | "-g" | "-h" | "-p" | "-C" | "-T" | "-t") {
+            command_index += 2;
+            continue;
+        }
+        if arg.starts_with('-') || arg.contains('=') {
+            command_index += 1;
+            continue;
+        }
+        break;
+    }
+
+    if command_index >= words.len() {
+        true
+    } else {
+        command_invocation_is_interactive(&words[command_index..])
+    }
+}
+
+fn ssh_invocation_is_interactive(words: &[String]) -> bool {
+    let mut seen_host = false;
+    let mut index = 1;
+    while index < words.len() {
+        let arg = words[index].as_str();
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(
+            arg,
+            "-b" | "-c"
+                | "-D"
+                | "-E"
+                | "-e"
+                | "-F"
+                | "-I"
+                | "-i"
+                | "-J"
+                | "-L"
+                | "-l"
+                | "-m"
+                | "-O"
+                | "-o"
+                | "-p"
+                | "-Q"
+                | "-R"
+                | "-S"
+                | "-W"
+                | "-w"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if seen_host {
+            return false;
+        }
+        seen_host = true;
+        index += 1;
+    }
+
+    if index < words.len() {
+        return false;
+    }
+    seen_host
+}
+
+fn shell_invocation_is_interactive(words: &[String]) -> bool {
+    if words.len() == 1 {
+        return true;
+    }
+    if has_help_or_version_flag(words) {
+        return false;
+    }
+    if words
+        .iter()
+        .skip(1)
+        .any(|arg| arg.starts_with('-') && arg.contains('i'))
+    {
+        return true;
+    }
+    if words
+        .iter()
+        .skip(1)
+        .any(|arg| arg.starts_with('-') && arg.contains('c'))
+    {
+        return false;
+    }
+    !words.iter().skip(1).any(|arg| !arg.starts_with('-'))
+}
+
+fn repl_invocation_is_interactive(words: &[String]) -> bool {
+    if words.len() == 1 {
+        return true;
+    }
+    if has_help_or_version_flag(words) {
+        return false;
+    }
+    if words
+        .iter()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "-i" | "--interactive"))
+    {
+        return true;
+    }
+    if words
+        .iter()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "-c" | "-e" | "--eval" | "-m"))
+    {
+        return false;
+    }
+    !words.iter().skip(1).any(|arg| !arg.starts_with('-'))
+}
+
+fn database_cli_invocation_is_interactive(words: &[String]) -> bool {
+    if has_help_or_version_flag(words) {
+        return false;
+    }
+    !words.iter().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-e" | "--execute" | "-c" | "--command" | "-f" | "--file"
+        ) || arg.starts_with("-e")
+            || arg.starts_with("--execute=")
+            || arg.starts_with("--command=")
+            || arg.starts_with("--file=")
+    })
+}
+
+fn has_help_or_version_flag(words: &[String]) -> bool {
+    words.iter().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-h" | "--help" | "-V" | "--version" | "-v" | "-?"
+        )
+    })
+}
+
+#[cfg(test)]
+mod console_command_tests {
+    use super::*;
+
+    fn words(input: &str) -> Vec<String> {
+        crate::app::console_state::split_shell_words(input).unwrap()
+    }
+
+    #[test]
+    fn shell_identifier_validation_matches_posix_names() {
+        assert!(is_valid_shell_identifier("_PATH"));
+        assert!(is_valid_shell_identifier("PATH_1"));
+        assert!(!is_valid_shell_identifier("1PATH"));
+        assert!(!is_valid_shell_identifier("BAD-NAME"));
+    }
+
+    #[test]
+    fn interactive_detection_allows_non_interactive_interpreters() {
+        assert!(!command_invocation_is_interactive(&words(
+            "python -c 'print(1)'"
+        )));
+        assert!(!command_invocation_is_interactive(&words(
+            "python script.py"
+        )));
+        assert!(!command_invocation_is_interactive(&words("bash script.sh")));
+        assert!(!command_invocation_is_interactive(&words(
+            "bash -lc 'echo ok'"
+        )));
+        assert!(!command_invocation_is_interactive(&words(
+            "node -e 'console.log(1)'"
+        )));
+    }
+
+    #[test]
+    fn interactive_detection_blocks_real_pty_workloads() {
+        assert!(command_invocation_is_interactive(&words("vim file.txt")));
+        assert!(command_invocation_is_interactive(&words("python")));
+        assert!(command_invocation_is_interactive(&words("bash -i")));
+        assert!(command_invocation_is_interactive(&words("sudo -i")));
+        assert!(command_invocation_is_interactive(&words(
+            "sudo vim /etc/hosts"
+        )));
+    }
+
+    #[test]
+    fn interactive_detection_allows_sudo_non_interactive_commands() {
+        assert!(!command_invocation_is_interactive(&words("sudo ls /root")));
+        assert!(!command_invocation_is_interactive(&words(
+            "sudo python -c 'print(1)'"
+        )));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn parse_network_scan_input(input: &str) -> (String, Vec<u16>) {
     let trimmed = input.trim();
@@ -5412,7 +5731,12 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             } else {
                 let ipv4: Vec<_> = r.addresses.iter().filter(|a| !a.contains(':')).collect();
                 let ipv6: Vec<_> = r.addresses.iter().filter(|a| a.contains(':')).collect();
-                lines.push(format!("total: {} addresses ({} IPv4, {} IPv6)", r.addresses.len(), ipv4.len(), ipv6.len()));
+                lines.push(format!(
+                    "total: {} addresses ({} IPv4, {} IPv6)",
+                    r.addresses.len(),
+                    ipv4.len(),
+                    ipv6.len()
+                ));
                 if !ipv4.is_empty() {
                     lines.push("IPv4:".to_string());
                     for (i, addr) in ipv4.iter().enumerate() {
@@ -5455,8 +5779,14 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 lines.push(format!("gateways: {} found", r.default_gateways.len()));
                 for gw in &r.default_gateways {
                     let port_str = gw.port.map(|p| format!(":{p}")).unwrap_or_default();
-                    let metric_str = gw.metric.map(|m| format!(" metric={m}")).unwrap_or_default();
-                    lines.push(format!("  {} {}{}{}", gw.interface, gw.address, port_str, metric_str));
+                    let metric_str = gw
+                        .metric
+                        .map(|m| format!(" metric={m}"))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "  {} {}{}{}",
+                        gw.interface, gw.address, port_str, metric_str
+                    ));
                 }
             }
             if !r.conflicts.is_empty() {
@@ -5480,9 +5810,15 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(format!("policy rules: {}", r.policy_rules.len()));
             lines.push(String::new());
             for (i, route) in r.default_routes.iter().enumerate() {
-                let gw = route.gateway.clone().unwrap_or_else(|| "direct".to_string());
+                let gw = route
+                    .gateway
+                    .clone()
+                    .unwrap_or_else(|| "direct".to_string());
                 let dev = route.interface.clone().unwrap_or_else(|| "n/a".to_string());
-                let metric = route.metric.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string());
+                let metric = route
+                    .metric
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string());
                 let proto = route.protocol.clone().unwrap_or_else(|| "-".to_string());
                 let scope = route.scope.clone().unwrap_or_else(|| "-".to_string());
                 lines.push(format!(
@@ -5494,10 +5830,16 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 lines.push(String::new());
                 lines.push("Policy rules:".to_string());
                 for rule in &r.policy_rules {
-                    let prio = rule.priority.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+                    let prio = rule
+                        .priority
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".to_string());
                     let tbl = rule.table.clone().unwrap_or_else(|| "?".to_string());
                     let act = rule.action.clone().unwrap_or_else(|| "lookup".to_string());
-                    lines.push(format!("  prio={} {} table={} action={}", prio, rule.family, tbl, act));
+                    lines.push(format!(
+                        "  prio={} {} table={} action={}",
+                        prio, rule.family, tbl, act
+                    ));
                 }
             }
             if !r.warnings.is_empty() {
@@ -5512,10 +5854,19 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(String::new());
             for iface in &r.interfaces {
                 lines.push(format!("{}: {}", iface.interface, iface.status));
-                lines.push(format!("  speed:   {}", iface.speed.clone().unwrap_or_else(|| "n/a".to_string())));
-                lines.push(format!("  duplex:  {}", iface.duplex.clone().unwrap_or_else(|| "n/a".to_string())));
+                lines.push(format!(
+                    "  speed:   {}",
+                    iface.speed.clone().unwrap_or_else(|| "n/a".to_string())
+                ));
+                lines.push(format!(
+                    "  duplex:  {}",
+                    iface.duplex.clone().unwrap_or_else(|| "n/a".to_string())
+                ));
                 lines.push(format!("  mtu:     {}", iface.mtu));
-                lines.push(format!("  driver:  {}", iface.driver.clone().unwrap_or_else(|| "n/a".to_string())));
+                lines.push(format!(
+                    "  driver:  {}",
+                    iface.driver.clone().unwrap_or_else(|| "n/a".to_string())
+                ));
                 lines.push(format!("  mac:     {}", iface.mac_address));
                 if let Some(fw) = &iface.firmware {
                     lines.push(format!("  firmware: {fw}"));
@@ -5538,8 +5889,18 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 }
                 // Offloads
                 if !iface.offloads.is_empty() {
-                    let on: Vec<_> = iface.offloads.iter().filter(|o| o.enabled).map(|o| o.name.as_str()).collect();
-                    let off: Vec<_> = iface.offloads.iter().filter(|o| !o.enabled).map(|o| o.name.as_str()).collect();
+                    let on: Vec<_> = iface
+                        .offloads
+                        .iter()
+                        .filter(|o| o.enabled)
+                        .map(|o| o.name.as_str())
+                        .collect();
+                    let off: Vec<_> = iface
+                        .offloads
+                        .iter()
+                        .filter(|o| !o.enabled)
+                        .map(|o| o.name.as_str())
+                        .collect();
                     if !on.is_empty() {
                         lines.push(format!("  offload ON: {}", on.join(", ")));
                     }
@@ -5554,14 +5915,25 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                         lines.push(format!("    SSID: {ssid}"));
                     }
                     if let Some(freq) = wifi.frequency_mhz {
-                        let band = if freq < 3000 { "2.4GHz" } else if freq < 6000 { "5GHz" } else { "6GHz" };
+                        let band = if freq < 3000 {
+                            "2.4GHz"
+                        } else if freq < 6000 {
+                            "5GHz"
+                        } else {
+                            "6GHz"
+                        };
                         lines.push(format!("    freq: {} MHz ({})", freq, band));
                     }
                     if let Some(signal) = wifi.signal_dbm {
-                        let quality = if signal > -50.0 { "Excellent" }
-                            else if signal > -60.0 { "Good" }
-                            else if signal > -70.0 { "Fair" }
-                            else { "Weak" };
+                        let quality = if signal > -50.0 {
+                            "Excellent"
+                        } else if signal > -60.0 {
+                            "Good"
+                        } else if signal > -70.0 {
+                            "Fair"
+                        } else {
+                            "Weak"
+                        };
                         lines.push(format!("    signal: {:.0} dBm ({})", signal, quality));
                     }
                     if let Some(tx_rate) = &wifi.tx_bitrate {
@@ -5583,10 +5955,26 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
-            let established = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("ESTAB")).count();
-            let listen = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("LISTEN")).count();
-            let time_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("TIME-WAIT")).count();
-            let close_wait = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("CLOSE-WAIT")).count();
+            let established = r
+                .entries
+                .iter()
+                .filter(|e| e.state.eq_ignore_ascii_case("ESTAB"))
+                .count();
+            let listen = r
+                .entries
+                .iter()
+                .filter(|e| e.state.eq_ignore_ascii_case("LISTEN"))
+                .count();
+            let time_wait = r
+                .entries
+                .iter()
+                .filter(|e| e.state.eq_ignore_ascii_case("TIME-WAIT"))
+                .count();
+            let close_wait = r
+                .entries
+                .iter()
+                .filter(|e| e.state.eq_ignore_ascii_case("CLOSE-WAIT"))
+                .count();
             lines.push(format!("total entries: {}", r.entries.len()));
             lines.push(format!("established: {}", established));
             lines.push(format!("listening: {}", listen));
@@ -5595,8 +5983,14 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             lines.push(format!("permission limited: {}", r.permission_limited));
             lines.push(String::new());
             for entry in &r.entries {
-                let proc_name = entry.process_name.clone().unwrap_or_else(|| "?".to_string());
-                let pid = entry.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                let proc_name = entry
+                    .process_name
+                    .clone()
+                    .unwrap_or_else(|| "?".to_string());
+                let pid = entry
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
                 let mut extra = String::new();
                 if entry.recv_q > 0 || entry.send_q > 0 {
                     extra.push_str(&format!(" rq={} sq={}", entry.recv_q, entry.send_q));
@@ -5608,15 +6002,24 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 }
                 if let (Some(tx), Some(rx)) = (entry.bytes_sent, entry.bytes_received) {
                     if tx > 0 || rx > 0 {
-                        extra.push_str(&format!(" tx={} rx={}", fmt_bytes_short(tx), fmt_bytes_short(rx)));
+                        extra.push_str(&format!(
+                            " tx={} rx={}",
+                            fmt_bytes_short(tx),
+                            fmt_bytes_short(rx)
+                        ));
                     }
                 }
                 lines.push(format!(
                     "{} [{}] pid={} {}:{} -> {}:{} state={}{}",
-                    proc_name, entry.protocol, pid,
-                    entry.local_address, entry.local_port,
-                    entry.remote_address, entry.remote_port,
-                    entry.state, extra,
+                    proc_name,
+                    entry.protocol,
+                    pid,
+                    entry.local_address,
+                    entry.local_port,
+                    entry.remote_address,
+                    entry.remote_port,
+                    entry.state,
+                    extra,
                 ));
                 if !entry.notes.is_empty() {
                     for note in &entry.notes {
@@ -5633,7 +6036,14 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         linux_netdiag::NetworkDiagnosticsResult::Ping(r) => {
             lines.push(format!("target: {}", r.target));
             lines.push(format!("profile: {:?}", r.profile));
-            lines.push(format!("mode: {}", if r.continuous { "continuous" } else { "counted" }));
+            lines.push(format!(
+                "mode: {}",
+                if r.continuous {
+                    "continuous"
+                } else {
+                    "counted"
+                }
+            ));
             lines.push(String::new());
             lines.push(format!("transmitted: {}", r.transmitted));
             lines.push(format!("received: {}", r.received));
@@ -5652,10 +6062,15 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             // Latency spread indicator
             if let (Some(min), Some(max)) = (r.min_latency_ms, r.max_latency_ms) {
                 let spread = max - min;
-                let stability = if spread < 5.0 { "Very stable" }
-                    else if spread < 20.0 { "Stable" }
-                    else if spread < 50.0 { "Moderate variance" }
-                    else { "High variance" };
+                let stability = if spread < 5.0 {
+                    "Very stable"
+                } else if spread < 20.0 {
+                    "Stable"
+                } else if spread < 50.0 {
+                    "Moderate variance"
+                } else {
+                    "High variance"
+                };
                 lines.push(format!("  spread: {:.2} ms ({})", spread, stability));
             }
         }
@@ -5680,7 +6095,11 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                         attempt.hops_collected,
                         attempt.timeout_hops,
                         attempt.reached_target,
-                        attempt.warning.as_ref().map(|w| format!("  WARN: {w}")).unwrap_or_default()
+                        attempt
+                            .warning
+                            .as_ref()
+                            .map(|w| format!("  WARN: {w}"))
+                            .unwrap_or_default()
                     ));
                 }
                 lines.push(String::new());
@@ -5692,23 +6111,37 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             ));
             lines.push(format!("{}", "\u{2500}".repeat(86)));
             for hop in &r.hops {
-                let endpoint = hop.host.as_ref().or(hop.address.as_ref()).cloned().unwrap_or_else(|| "*".to_string());
+                let endpoint = hop
+                    .host
+                    .as_ref()
+                    .or(hop.address.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| "*".to_string());
                 let (rtt_avg, rtt_min, rtt_max) = if hop.rtt_ms.is_empty() {
                     ("*".to_string(), "*".to_string(), "*".to_string())
                 } else {
                     let avg = hop.rtt_ms.iter().sum::<f32>() / hop.rtt_ms.len() as f32;
                     let min = hop.rtt_ms.iter().cloned().fold(f32::MAX, f32::min);
                     let max = hop.rtt_ms.iter().cloned().fold(f32::MIN, f32::max);
-                    (format!("{:.1}ms", avg), format!("{:.1}", min), format!("{:.1}", max))
+                    (
+                        format!("{:.1}ms", avg),
+                        format!("{:.1}", min),
+                        format!("{:.1}", max),
+                    )
                 };
-                let flags = format!("{}{}",
+                let flags = format!(
+                    "{}{}",
                     if hop.timed_out { " !T" } else { "" },
                     if hop.blocked_suspected { " !B" } else { "" },
                 );
                 lines.push(format!(
                     "{:<6} {:<36} {:>10} {:>8} {:>8} {:>5}/{:<2} {}",
                     format!("{:02}", hop.hop),
-                    if endpoint.len() > 35 { format!("{}...", &endpoint[..32]) } else { endpoint },
+                    if endpoint.len() > 35 {
+                        format!("{}...", &endpoint[..32])
+                    } else {
+                        endpoint
+                    },
                     rtt_avg,
                     rtt_min,
                     rtt_max,
@@ -5719,7 +6152,10 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
             if !r.blocked_indicators.is_empty() {
                 lines.push(String::new());
-                lines.push(format!("blocked indicators: {}", r.blocked_indicators.join(" | ")));
+                lines.push(format!(
+                    "blocked indicators: {}",
+                    r.blocked_indicators.join(" | ")
+                ));
             }
             if !r.warnings.is_empty() {
                 for w in &r.warnings {
@@ -5732,10 +6168,15 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             match r.path_mtu {
                 Some(pmtu) => {
                     lines.push(format!("path MTU: {} bytes", pmtu));
-                    let overhead_note = if pmtu == 1500 { " (standard Ethernet)" }
-                        else if pmtu > 1500 { " (jumbo frames)" }
-                        else if pmtu >= 1400 { " (minor overhead, likely VPN/tunnel)" }
-                        else { " (significant overhead)" };
+                    let overhead_note = if pmtu == 1500 {
+                        " (standard Ethernet)"
+                    } else if pmtu > 1500 {
+                        " (jumbo frames)"
+                    } else if pmtu >= 1400 {
+                        " (minor overhead, likely VPN/tunnel)"
+                    } else {
+                        " (significant overhead)"
+                    };
                     lines.push(format!("  {}", overhead_note.trim()));
                 }
                 None => lines.push("path MTU: could not determine".to_string()),
@@ -5757,7 +6198,11 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                     };
                     lines.push(format!(
                         "  {} ({}) ipv4={} mtu={}{}",
-                        iface_mtu.interface, iface_mtu.status, iface_mtu.ipv4, iface_mtu.mtu, mtu_note,
+                        iface_mtu.interface,
+                        iface_mtu.status,
+                        iface_mtu.ipv4,
+                        iface_mtu.mtu,
+                        mtu_note,
                     ));
                 }
             }
@@ -5768,8 +6213,15 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         linux_netdiag::NetworkDiagnosticsResult::PortScan(r) => {
             lines.push(format!("target: {}", r.target));
             lines.push(format!("ports scanned: {}", r.scanned_ports.len()));
-            lines.push(format!("duration: {} ms ({:.1}s)", r.duration_ms, r.duration_ms as f64 / 1000.0));
-            lines.push(format!("scan rate: {:.0} ports/sec", r.scanned_ports.len() as f64 / (r.duration_ms as f64 / 1000.0).max(0.001)));
+            lines.push(format!(
+                "duration: {} ms ({:.1}s)",
+                r.duration_ms,
+                r.duration_ms as f64 / 1000.0
+            ));
+            lines.push(format!(
+                "scan rate: {:.0} ports/sec",
+                r.scanned_ports.len() as f64 / (r.duration_ms as f64 / 1000.0).max(0.001)
+            ));
             lines.push(String::new());
             if !r.open_ports.is_empty() {
                 lines.push(format!("OPEN: {} ports", r.open_ports.len()));
@@ -5784,7 +6236,12 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             } else {
                 lines.push("OPEN: none".to_string());
             }
-            let closed: Vec<u16> = r.scanned_ports.iter().filter(|p| !r.open_ports.contains(p)).copied().collect();
+            let closed: Vec<u16> = r
+                .scanned_ports
+                .iter()
+                .filter(|p| !r.open_ports.contains(p))
+                .copied()
+                .collect();
             if !closed.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("CLOSED/FILTERED: {} ports", closed.len()));
@@ -5812,7 +6269,10 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                     linux_netdiag::CapabilityState::MissingDependency => ("MissingDep", "?"),
                     linux_netdiag::CapabilityState::Unknown => ("Unknown", "~"),
                 };
-                lines.push(format!("  [{}] {:<16} {}", state_icon, m.method, state_label));
+                lines.push(format!(
+                    "  [{}] {:<16} {}",
+                    state_icon, m.method, state_label
+                ));
                 if !m.details.is_empty() {
                     lines.push(format!("      {}", m.details));
                 }
@@ -5825,7 +6285,8 @@ fn network_result_detail_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::MappingTest(r) => {
-            lines.push(format!("protocol: {}",
+            lines.push(format!(
+                "protocol: {}",
                 match r.protocol {
                     linux_netdiag::MappingProtocol::Tcp => "TCP",
                     linux_netdiag::MappingProtocol::Udp => "UDP",
@@ -5917,35 +6378,59 @@ fn network_result_raw_lines(
     let mut stderr: Vec<String> = Vec::new();
     match result {
         linux_netdiag::NetworkDiagnosticsResult::DnsExplain(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
-            for c in &r.conflicts { stderr.push(format!("CONFLICT: {c}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
+            for c in &r.conflicts {
+                stderr.push(format!("CONFLICT: {c}"));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::ConnectionLab(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
             if r.permission_limited {
-                stderr.push("NOTE: Results limited by permissions — run with sudo for full info".to_string());
+                stderr.push(
+                    "NOTE: Results limited by permissions — run with sudo for full info"
+                        .to_string(),
+                );
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::Trace(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
-            for b in &r.blocked_indicators { stderr.push(format!("BLOCKED: {b}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
+            for b in &r.blocked_indicators {
+                stderr.push(format!("BLOCKED: {b}"));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::Ping(r) => {
             if r.packet_loss_percent > 0.0 {
-                stderr.push(format!("LOSS: {:.1}% packet loss detected", r.packet_loss_percent));
+                stderr.push(format!(
+                    "LOSS: {:.1}% packet loss detected",
+                    r.packet_loss_percent
+                ));
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::MtuProbe(r) => {
-            if let Some(w) = &r.warning { stderr.push(format!("WARN: {w}")); }
+            if let Some(w) = &r.warning {
+                stderr.push(format!("WARN: {w}"));
+            }
         }
         linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
-            for w in &r.warnings { stderr.push(format!("WARN: {w}")); }
+            for w in &r.warnings {
+                stderr.push(format!("WARN: {w}"));
+            }
         }
         _ => {}
     }
@@ -5997,9 +6482,7 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             if let Some(pmtu) = r.path_mtu {
                 advice.push(format!("Path MTU: {} bytes", pmtu));
                 if pmtu < 1472 {
-                    advice.push(
-                        "Low PMTU detected — possible tunnel or VPN overhead.".to_string(),
-                    );
+                    advice.push("Low PMTU detected — possible tunnel or VPN overhead.".to_string());
                     advice.push(format!(
                         "Consider: MSS clamp to {} if using VPN",
                         pmtu.saturating_sub(40)
@@ -6041,7 +6524,11 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 advice.push("Results are permission-limited.".to_string());
                 advice.push("Run TUI+ with sudo for full socket details.".to_string());
             }
-            let estab = r.entries.iter().filter(|e| e.state.eq_ignore_ascii_case("ESTAB")).count();
+            let estab = r
+                .entries
+                .iter()
+                .filter(|e| e.state.eq_ignore_ascii_case("ESTAB"))
+                .count();
             if estab > 50 {
                 advice.push(format!("High connection count ({estab} established)."));
                 advice.push("Check for connection leaks or misbehaving processes.".to_string());
@@ -6052,7 +6539,10 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
                 advice.push("No addresses resolved — check DNS config.".to_string());
                 advice.push("Run DNS Explain to inspect resolver chain.".to_string());
             } else if r.addresses.len() > 1 {
-                advice.push(format!("Multiple addresses ({}) — load-balanced or CDN.", r.addresses.len()));
+                advice.push(format!(
+                    "Multiple addresses ({}) — load-balanced or CDN.",
+                    r.addresses.len()
+                ));
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::RouteInspect(r) => {
@@ -6066,7 +6556,10 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
         linux_netdiag::NetworkDiagnosticsResult::NicDeepInfo(r) => {
             for iface in &r.interfaces {
                 if iface.mtu < 1500 && !iface.interface.starts_with("lo") {
-                    advice.push(format!("{}: Low MTU ({}) — may cause fragmentation.", iface.interface, iface.mtu));
+                    advice.push(format!(
+                        "{}: Low MTU ({}) — may cause fragmentation.",
+                        iface.interface, iface.mtu
+                    ));
                 }
             }
             if !r.warnings.is_empty() {
@@ -6076,8 +6569,14 @@ fn network_result_advice_lines(result: &linux_netdiag::NetworkDiagnosticsResult)
             }
         }
         linux_netdiag::NetworkDiagnosticsResult::NatCapabilityCheck(r) => {
-            let any_supported = r.methods.iter().any(|m| m.state == linux_netdiag::CapabilityState::Supported);
-            let any_missing = r.methods.iter().any(|m| m.state == linux_netdiag::CapabilityState::MissingDependency);
+            let any_supported = r
+                .methods
+                .iter()
+                .any(|m| m.state == linux_netdiag::CapabilityState::Supported);
+            let any_missing = r
+                .methods
+                .iter()
+                .any(|m| m.state == linux_netdiag::CapabilityState::MissingDependency);
             if any_supported {
                 advice.push("NAT traversal available — port forwarding is possible.".to_string());
             } else {

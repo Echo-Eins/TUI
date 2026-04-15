@@ -2,7 +2,7 @@
 //!
 //! Maps Cardputer input commands to host input events.
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use crate::protocol::{ClickAction, MouseButton};
 use crate::protocol::{InputMode, KeyEvent, MouseClick, MouseMove};
 use thiserror::Error;
@@ -19,17 +19,25 @@ pub enum InputError {
     SimulationFailed,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod imp {
     use super::*;
     use enigo::{
         Button as EnigoButton, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
     };
     use std::collections::HashMap;
+    #[cfg(target_os = "linux")]
+    use std::process::Command;
+
+    enum InputBackend {
+        Enigo(Enigo),
+        #[cfg(target_os = "linux")]
+        XDoTool,
+    }
 
     /// Input controller for mouse and keyboard
     pub struct InputController {
-        enigo: Enigo,
+        backend: InputBackend,
         current_mode: InputMode,
         /// Mouse movement speed (pixels per command)
         mouse_speed: i32,
@@ -41,11 +49,30 @@ mod imp {
         /// Create a new input controller
         pub fn new() -> Result<Self, InputError> {
             let settings = Settings::default();
-            let enigo = Enigo::new(&settings).map_err(|e| InputError::InitError(e.to_string()))?;
+            let backend = match Enigo::new(&settings) {
+                Ok(enigo) => InputBackend::Enigo(enigo),
+                Err(e) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        if command_exists("xdotool") {
+                            InputBackend::XDoTool
+                        } else {
+                            return Err(InputError::InitError(format!(
+                                "{e}; xdotool fallback not found"
+                            )));
+                        }
+                    }
+
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        return Err(InputError::InitError(e.to_string()));
+                    }
+                }
+            };
             let keymap = Self::build_keymap();
 
             Ok(Self {
-                enigo,
+                backend,
                 current_mode: InputMode::Mouse,
                 mouse_speed: 5,
                 keymap,
@@ -145,7 +172,20 @@ mod imp {
         pub fn mouse_move(&mut self, movement: MouseMove) {
             let dx = movement.dx as i32 * self.mouse_speed;
             let dy = movement.dy as i32 * self.mouse_speed;
-            let _ = self.enigo.move_mouse(dx, dy, Coordinate::Rel);
+            match &mut self.backend {
+                InputBackend::Enigo(enigo) => {
+                    let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
+                }
+                #[cfg(target_os = "linux")]
+                InputBackend::XDoTool => {
+                    run_xdotool(&[
+                        "mousemove_relative".to_string(),
+                        "--".to_string(),
+                        dx.to_string(),
+                        dy.to_string(),
+                    ]);
+                }
+            }
         }
 
         /// Handle mouse click
@@ -158,69 +198,110 @@ mod imp {
 
             match click.action {
                 ClickAction::Press => {
-                    let _ = self.enigo.button(button, Direction::Press);
+                    self.button(button, Direction::Press);
                 }
                 ClickAction::Release => {
-                    let _ = self.enigo.button(button, Direction::Release);
+                    self.button(button, Direction::Release);
                 }
                 ClickAction::Click => {
-                    let _ = self.enigo.button(button, Direction::Click);
+                    self.button(button, Direction::Click);
                 }
                 ClickAction::DoubleClick => {
-                    let _ = self.enigo.button(button, Direction::Click);
+                    self.button(button, Direction::Click);
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    let _ = self.enigo.button(button, Direction::Click);
+                    self.button(button, Direction::Click);
+                }
+            }
+        }
+
+        fn button(&mut self, button: EnigoButton, direction: Direction) {
+            match &mut self.backend {
+                InputBackend::Enigo(enigo) => {
+                    let _ = enigo.button(button, direction);
+                }
+                #[cfg(target_os = "linux")]
+                InputBackend::XDoTool => {
+                    let button = xdotool_mouse_button(button);
+                    let action = match direction {
+                        Direction::Press => "mousedown",
+                        Direction::Release => "mouseup",
+                        Direction::Click => "click",
+                    };
+                    run_xdotool(&[action.to_string(), button.to_string()]);
                 }
             }
         }
 
         /// Handle key press
         pub fn key_press(&mut self, event: KeyEvent) {
-            // Apply modifiers
-            if event.modifiers & 0x01 != 0 {
-                let _ = self.enigo.key(Key::Control, Direction::Press);
-            }
-            if event.modifiers & 0x02 != 0 {
-                let _ = self.enigo.key(Key::Shift, Direction::Press);
-            }
-            if event.modifiers & 0x04 != 0 {
-                let _ = self.enigo.key(Key::Alt, Direction::Press);
-            }
-            if event.modifiers & 0x08 != 0 {
-                let _ = self.enigo.key(Key::Meta, Direction::Press);
-            }
-
-            // Press the key
-            if let Some(&key) = self.keymap.get(&event.keycode) {
-                let _ = self.enigo.key(key, Direction::Press);
-            }
+            self.apply_modifiers(event.modifiers, Direction::Press);
+            self.key(event.keycode, Direction::Press);
         }
 
         /// Handle key release
         pub fn key_release(&mut self, event: KeyEvent) {
-            // Release the key
-            if let Some(&key) = self.keymap.get(&event.keycode) {
-                let _ = self.enigo.key(key, Direction::Release);
-            }
-
-            // Release modifiers
-            if event.modifiers & 0x01 != 0 {
-                let _ = self.enigo.key(Key::Control, Direction::Release);
-            }
-            if event.modifiers & 0x02 != 0 {
-                let _ = self.enigo.key(Key::Shift, Direction::Release);
-            }
-            if event.modifiers & 0x04 != 0 {
-                let _ = self.enigo.key(Key::Alt, Direction::Release);
-            }
-            if event.modifiers & 0x08 != 0 {
-                let _ = self.enigo.key(Key::Meta, Direction::Release);
-            }
+            self.key(event.keycode, Direction::Release);
+            self.apply_modifiers(event.modifiers, Direction::Release);
         }
 
         /// Type a string (for keyboard mode)
         pub fn type_string(&mut self, text: &str) {
-            let _ = self.enigo.text(text);
+            match &mut self.backend {
+                InputBackend::Enigo(enigo) => {
+                    let _ = enigo.text(text);
+                }
+                #[cfg(target_os = "linux")]
+                InputBackend::XDoTool => {
+                    run_xdotool(&[
+                        "type".to_string(),
+                        "--delay".to_string(),
+                        "0".to_string(),
+                        text.to_string(),
+                    ]);
+                }
+            }
+        }
+
+        fn apply_modifiers(&mut self, modifiers: u8, direction: Direction) {
+            if modifiers & 0x01 != 0 {
+                self.key_named(Key::Control, "ctrl", direction);
+            }
+            if modifiers & 0x02 != 0 {
+                self.key_named(Key::Shift, "shift", direction);
+            }
+            if modifiers & 0x04 != 0 {
+                self.key_named(Key::Alt, "alt", direction);
+            }
+            if modifiers & 0x08 != 0 {
+                self.key_named(Key::Meta, "super", direction);
+            }
+        }
+
+        fn key(&mut self, keycode: u8, direction: Direction) {
+            if let Some(&key) = self.keymap.get(&keycode) {
+                let xdotool_name = xdotool_key_name(keycode).unwrap_or("");
+                self.key_named(key, xdotool_name, direction);
+            }
+        }
+
+        fn key_named(&mut self, key: Key, _xdotool_name: &str, direction: Direction) {
+            match &mut self.backend {
+                InputBackend::Enigo(enigo) => {
+                    let _ = enigo.key(key, direction);
+                }
+                #[cfg(target_os = "linux")]
+                InputBackend::XDoTool => {
+                    if _xdotool_name.is_empty() {
+                        return;
+                    }
+                    let action = match direction {
+                        Direction::Press => "keydown",
+                        Direction::Release => "keyup",
+                        Direction::Click => "key",
+                    };
+                    run_xdotool(&[action.to_string(), _xdotool_name.to_string()]);
+                }
+            }
         }
 
         /// Handle arrow key input in mouse mode (convert to mouse movement)
@@ -236,10 +317,111 @@ mod imp {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn command_exists(program: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_xdotool(args: &[String]) {
+        let _ = Command::new("xdotool").args(args).status();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn xdotool_mouse_button(button: EnigoButton) -> u8 {
+        match button {
+            EnigoButton::Left => 1,
+            EnigoButton::Middle => 2,
+            EnigoButton::Right => 3,
+            _ => 1,
+        }
+    }
+
+    fn xdotool_key_name(keycode: u8) -> Option<&'static str> {
+        match keycode {
+            0x04 => Some("a"),
+            0x05 => Some("b"),
+            0x06 => Some("c"),
+            0x07 => Some("d"),
+            0x08 => Some("e"),
+            0x09 => Some("f"),
+            0x0A => Some("g"),
+            0x0B => Some("h"),
+            0x0C => Some("i"),
+            0x0D => Some("j"),
+            0x0E => Some("k"),
+            0x0F => Some("l"),
+            0x10 => Some("m"),
+            0x11 => Some("n"),
+            0x12 => Some("o"),
+            0x13 => Some("p"),
+            0x14 => Some("q"),
+            0x15 => Some("r"),
+            0x16 => Some("s"),
+            0x17 => Some("t"),
+            0x18 => Some("u"),
+            0x19 => Some("v"),
+            0x1A => Some("w"),
+            0x1B => Some("x"),
+            0x1C => Some("y"),
+            0x1D => Some("z"),
+            0x1E => Some("1"),
+            0x1F => Some("2"),
+            0x20 => Some("3"),
+            0x21 => Some("4"),
+            0x22 => Some("5"),
+            0x23 => Some("6"),
+            0x24 => Some("7"),
+            0x25 => Some("8"),
+            0x26 => Some("9"),
+            0x27 => Some("0"),
+            0x28 => Some("Return"),
+            0x29 => Some("Escape"),
+            0x2A => Some("BackSpace"),
+            0x2B => Some("Tab"),
+            0x2C => Some("space"),
+            0x2D => Some("minus"),
+            0x2E => Some("equal"),
+            0x2F => Some("bracketleft"),
+            0x30 => Some("bracketright"),
+            0x31 => Some("backslash"),
+            0x33 => Some("semicolon"),
+            0x34 => Some("apostrophe"),
+            0x35 => Some("grave"),
+            0x36 => Some("comma"),
+            0x37 => Some("period"),
+            0x38 => Some("slash"),
+            0x3A => Some("F1"),
+            0x3B => Some("F2"),
+            0x3C => Some("F3"),
+            0x3D => Some("F4"),
+            0x3E => Some("F5"),
+            0x3F => Some("F6"),
+            0x40 => Some("F7"),
+            0x41 => Some("F8"),
+            0x42 => Some("F9"),
+            0x43 => Some("F10"),
+            0x44 => Some("F11"),
+            0x45 => Some("F12"),
+            0x4A => Some("Home"),
+            0x4B => Some("Page_Up"),
+            0x4C => Some("Delete"),
+            0x4D => Some("End"),
+            0x4E => Some("Page_Down"),
+            0x4F => Some("Right"),
+            0x50 => Some("Left"),
+            0x51 => Some("Down"),
+            0x52 => Some("Up"),
+            _ => None,
+        }
+    }
+
     pub use InputController as ImplInputController;
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
 

@@ -306,8 +306,11 @@ impl CryptoContext {
         Ok(nonce)
     }
 
-    /// Validate and extract counter from incoming nonce
-    fn validate_incoming_nonce(&mut self, nonce: &[u8; NONCE_SIZE]) -> Result<(), CryptoError> {
+    /// Validate and extract counter from incoming nonce.
+    ///
+    /// This does not mutate replay state. The caller must only commit the
+    /// returned counter after AEAD authentication succeeds.
+    fn validate_incoming_nonce(&self, nonce: &[u8; NONCE_SIZE]) -> Result<u32, CryptoError> {
         let counter = u32::from_be_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]);
 
         // Check for replay/reordering (must be strictly greater than last seen)
@@ -324,8 +327,7 @@ impl CryptoContext {
             }
         }
 
-        self.last_incoming_nonce = Some(counter);
-        Ok(())
+        Ok(counter)
     }
 
     /// Encrypt a message
@@ -369,8 +371,8 @@ impl CryptoContext {
         nonce: &[u8; NONCE_SIZE],
         tag: &[u8; TAG_SIZE],
     ) -> Result<Vec<u8>, CryptoError> {
-        // Validate nonce first (replay protection)
-        self.validate_incoming_nonce(nonce)?;
+        // Validate nonce first, but commit replay state only after authentication succeeds.
+        let incoming_counter = self.validate_incoming_nonce(nonce)?;
 
         let cipher = self
             .incoming_cipher
@@ -387,6 +389,7 @@ impl CryptoContext {
             .decrypt(&nonce_obj, ciphertext_with_tag.as_slice())
             .map_err(|_| CryptoError::DecryptionFailed)?;
 
+        self.last_incoming_nonce = Some(incoming_counter);
         Ok(plaintext)
     }
 
@@ -535,6 +538,53 @@ mod tests {
 
         let replay_result = client.decrypt(&ciphertext_1, &nonce_1, &tag_1);
         assert!(matches!(replay_result, Err(CryptoError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn test_failed_decryption_does_not_advance_replay_counter() {
+        let server_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let client_key = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+        let mut server = CryptoContext::new(server_key, true).unwrap();
+        let mut client = CryptoContext::new(client_key, false).unwrap();
+
+        let server_pub = hex::encode(server.get_our_public_key_compressed());
+        let client_pub = hex::encode(client.get_our_public_key_compressed());
+        server.set_peer_public_key(&client_pub).unwrap();
+        client.set_peer_public_key(&server_pub).unwrap();
+
+        let (server_eph_secret, server_eph_pub) = server.generate_ephemeral_keypair();
+        let (client_eph_secret, client_eph_pub) = client.generate_ephemeral_keypair();
+        let server_nonce = CryptoContext::generate_nonce();
+        let client_nonce = CryptoContext::generate_nonce();
+
+        server
+            .derive_session_keys(
+                server_eph_secret,
+                &client_eph_pub,
+                &server_nonce,
+                &client_nonce,
+            )
+            .unwrap();
+        client
+            .derive_session_keys(
+                client_eph_secret,
+                &server_eph_pub,
+                &client_nonce,
+                &server_nonce,
+            )
+            .unwrap();
+
+        let (ciphertext, valid_nonce, tag) = server.encrypt(b"authenticated").unwrap();
+        let mut forged_nonce = valid_nonce;
+        forged_nonce[0..4].copy_from_slice(&999u32.to_be_bytes());
+        let forged_tag = [0u8; TAG_SIZE];
+
+        let forged_result = client.decrypt(&[], &forged_nonce, &forged_tag);
+        assert!(matches!(forged_result, Err(CryptoError::DecryptionFailed)));
+
+        let plaintext = client.decrypt(&ciphertext, &valid_nonce, &tag).unwrap();
+        assert_eq!(plaintext, b"authenticated");
     }
 
     #[test]

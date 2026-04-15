@@ -27,15 +27,32 @@ pub struct CaptureRegion {
     pub height: u32,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod imp {
     use super::*;
     use scrap::{Capturer, Display};
+    #[cfg(target_os = "linux")]
+    use std::process::Command;
+
+    enum CaptureBackend {
+        Scrap {
+            capturer: Capturer,
+            width: usize,
+            height: usize,
+        },
+        #[cfg(target_os = "linux")]
+        Command(LinuxCommandCapture),
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy)]
+    enum LinuxCommandCapture {
+        Grim,
+        Maim,
+    }
 
     pub struct ScreenCapturer {
-        capturer: Capturer,
-        width: usize,
-        height: usize,
+        backend: CaptureBackend,
         target_width: u32,
         target_height: u32,
         jpeg_quality: u8,
@@ -52,12 +69,6 @@ mod imp {
             jpeg_quality: u8,
             capture_region: Option<[u32; 4]>,
         ) -> Result<Self, CaptureError> {
-            let display = Display::primary().map_err(|e| CaptureError::InitError(e.to_string()))?;
-            let width = display.width();
-            let height = display.height();
-            let capturer =
-                Capturer::new(display).map_err(|e| CaptureError::InitError(e.to_string()))?;
-
             let region = capture_region.map(|r| CaptureRegion {
                 x: r[0],
                 y: r[1],
@@ -65,18 +76,32 @@ mod imp {
                 height: r[3],
             });
 
-            if let Some(ref r) = region {
-                if r.x + r.width > width as u32 || r.y + r.height > height as u32 {
-                    return Err(CaptureError::InvalidRegion);
-                }
-            }
-
             let jpeg_quality = jpeg_quality.clamp(1, 100);
+            let backend = match init_scrap_backend(region) {
+                Ok(backend) => backend,
+                Err(scrap_error) => {
+                    if matches!(scrap_error, CaptureError::InvalidRegion) {
+                        return Err(scrap_error);
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Some(command_backend) = find_linux_command_backend() {
+                            CaptureBackend::Command(command_backend)
+                        } else {
+                            return Err(scrap_error);
+                        }
+                    }
+
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        return Err(scrap_error);
+                    }
+                }
+            };
 
             Ok(Self {
-                capturer,
-                width,
-                height,
+                backend,
                 target_width,
                 target_height,
                 jpeg_quality,
@@ -92,36 +117,14 @@ mod imp {
         }
 
         pub fn capture_frame(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
-            let buffer: Vec<u8> = loop {
-                match self.capturer.frame() {
-                    Ok(frame) => break frame.to_vec(),
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                            continue;
-                        }
-                        return Err(CaptureError::CaptureError(e.to_string()));
-                    }
-                }
-            };
-
-            let rgb_data = self.bgra_to_rgb(&buffer);
-            let hash = compute_hash(&rgb_data);
+            let image = self.capture_rgb_image()?;
+            let hash = compute_hash(image.as_raw());
             let last_hash = self.last_frame_hash.load(Ordering::Relaxed);
 
             if hash == last_hash && last_hash != 0 {
                 return Ok(None);
             }
             self.last_frame_hash.store(hash, Ordering::Relaxed);
-
-            let (src_width, src_height) = if let Some(ref region) = self.capture_region {
-                (region.width as usize, region.height as usize)
-            } else {
-                (self.width, self.height)
-            };
-
-            let image = RgbImage::from_raw(src_width as u32, src_height as u32, rgb_data)
-                .ok_or_else(|| CaptureError::CaptureError("Failed to create image".into()))?;
 
             let dynamic = DynamicImage::ImageRgb8(image);
             let resized =
@@ -138,32 +141,18 @@ mod imp {
             }))
         }
 
-        fn bgra_to_rgb(&self, bgra: &[u8]) -> Vec<u8> {
-            let stride = self.width * 4;
-            let (start_x, start_y, crop_width, crop_height) =
-                if let Some(ref region) = self.capture_region {
-                    (
-                        region.x as usize,
-                        region.y as usize,
-                        region.width as usize,
-                        region.height as usize,
-                    )
-                } else {
-                    (0, 0, self.width, self.height)
-                };
-
-            let mut rgb = Vec::with_capacity(crop_width * crop_height * 3);
-            for y in start_y..(start_y + crop_height) {
-                for x in start_x..(start_x + crop_width) {
-                    let offset = y * stride + x * 4;
-                    if offset + 2 < bgra.len() {
-                        rgb.push(bgra[offset + 2]);
-                        rgb.push(bgra[offset + 1]);
-                        rgb.push(bgra[offset]);
-                    }
+        fn capture_rgb_image(&mut self) -> Result<RgbImage, CaptureError> {
+            match &mut self.backend {
+                CaptureBackend::Scrap {
+                    capturer,
+                    width,
+                    height,
+                } => capture_scrap_image(capturer, *width, *height, self.capture_region),
+                #[cfg(target_os = "linux")]
+                CaptureBackend::Command(backend) => {
+                    capture_linux_command_image(*backend, self.capture_region)
                 }
             }
-            rgb
         }
 
         pub fn stop(&self) {
@@ -172,9 +161,154 @@ mod imp {
     }
 
     pub use ScreenCapturer as ImplScreenCapturer;
+
+    fn init_scrap_backend(region: Option<CaptureRegion>) -> Result<CaptureBackend, CaptureError> {
+        let display = Display::primary().map_err(|e| {
+            CaptureError::InitError(format!(
+                "desktop capture backend unavailable: {e}. On Linux, run under X11/XWayland or install grim/maim."
+            ))
+        })?;
+        let width = display.width();
+        let height = display.height();
+
+        if let Some(r) = region {
+            if r.x + r.width > width as u32 || r.y + r.height > height as u32 {
+                return Err(CaptureError::InvalidRegion);
+            }
+        }
+
+        let capturer =
+            Capturer::new(display).map_err(|e| CaptureError::InitError(e.to_string()))?;
+
+        Ok(CaptureBackend::Scrap {
+            capturer,
+            width,
+            height,
+        })
+    }
+
+    fn capture_scrap_image(
+        capturer: &mut Capturer,
+        width: usize,
+        height: usize,
+        region: Option<CaptureRegion>,
+    ) -> Result<RgbImage, CaptureError> {
+        let buffer: Vec<u8> = loop {
+            match capturer.frame() {
+                Ok(frame) => break frame.to_vec(),
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    return Err(CaptureError::CaptureError(e.to_string()));
+                }
+            }
+        };
+
+        let stride = width * 4;
+        let (start_x, start_y, crop_width, crop_height) = if let Some(region) = region {
+            (
+                region.x as usize,
+                region.y as usize,
+                region.width as usize,
+                region.height as usize,
+            )
+        } else {
+            (0, 0, width, height)
+        };
+
+        let mut rgb = Vec::with_capacity(crop_width * crop_height * 3);
+        for y in start_y..(start_y + crop_height) {
+            for x in start_x..(start_x + crop_width) {
+                let offset = y * stride + x * 4;
+                if offset + 2 < buffer.len() {
+                    rgb.push(buffer[offset + 2]);
+                    rgb.push(buffer[offset + 1]);
+                    rgb.push(buffer[offset]);
+                }
+            }
+        }
+
+        RgbImage::from_raw(crop_width as u32, crop_height as u32, rgb)
+            .ok_or_else(|| CaptureError::CaptureError("Failed to create image".into()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn find_linux_command_backend() -> Option<LinuxCommandCapture> {
+        if command_exists("grim") {
+            Some(LinuxCommandCapture::Grim)
+        } else if command_exists("maim") {
+            Some(LinuxCommandCapture::Maim)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn command_exists(program: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn capture_linux_command_image(
+        backend: LinuxCommandCapture,
+        region: Option<CaptureRegion>,
+    ) -> Result<RgbImage, CaptureError> {
+        let mut command = match backend {
+            LinuxCommandCapture::Grim => {
+                let mut command = Command::new("grim");
+                if let Some(region) = region {
+                    command.args([
+                        "-g",
+                        &format!(
+                            "{},{} {}x{}",
+                            region.x, region.y, region.width, region.height
+                        ),
+                    ]);
+                }
+                command.arg("-");
+                command
+            }
+            LinuxCommandCapture::Maim => {
+                let mut command = Command::new("maim");
+                if let Some(region) = region {
+                    command.args([
+                        "-g",
+                        &format!(
+                            "{}x{}+{}+{}",
+                            region.width, region.height, region.x, region.y
+                        ),
+                    ]);
+                }
+                command.arg("-u");
+                command
+            }
+        };
+
+        let output = command
+            .output()
+            .map_err(|e| CaptureError::CaptureError(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CaptureError::CaptureError(format!(
+                "Linux screenshot command failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        let image = image::load_from_memory(&output.stdout)
+            .map_err(|e| CaptureError::CaptureError(e.to_string()))?
+            .to_rgb8();
+
+        Ok(image)
+    }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
 
@@ -234,7 +368,7 @@ mod imp {
 
 pub use imp::ImplScreenCapturer as ScreenCapturer;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn compute_hash(rgb: &[u8]) -> u32 {
     let sample_count = 256;
     let step = rgb.len() / sample_count;

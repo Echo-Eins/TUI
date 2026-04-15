@@ -76,6 +76,8 @@ windows-sys = { version = "0.52", features = [
     "Win32_Globalization",
     "Win32_System_Console",
 ]}
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 enigo = "0.2"
 scrap = "0.5"
 

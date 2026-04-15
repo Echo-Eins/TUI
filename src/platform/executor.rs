@@ -8,6 +8,7 @@ use tokio::sync::mpsc::Receiver;
 pub enum StreamMessage {
     Stdout(String),
     Stderr(String),
+    Interrupted,
     Exit(i32),
 }
 

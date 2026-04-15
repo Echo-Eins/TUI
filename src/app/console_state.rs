@@ -92,7 +92,7 @@ impl TaskState {
                 exit_code,
                 elapsed_ms,
             } => {
-                format!("[✓ {}] [{:.1}s]", exit_code, *elapsed_ms as f64 / 1000.0)
+                format!("[ok {}] [{:.1}s]", exit_code, *elapsed_ms as f64 / 1000.0)
             }
             TaskState::Failed {
                 exit_code,
@@ -100,13 +100,13 @@ impl TaskState {
                 ..
             } => {
                 let code = exit_code.map_or("?".to_string(), |c| c.to_string());
-                format!("[✗ {}] [{:.1}s]", code, *elapsed_ms as f64 / 1000.0)
+                format!("[err {}] [{:.1}s]", code, *elapsed_ms as f64 / 1000.0)
             }
             TaskState::Interrupted { elapsed_ms } => {
-                format!("[⊘] [{:.1}s]", *elapsed_ms as f64 / 1000.0)
+                format!("[int] [{:.1}s]", *elapsed_ms as f64 / 1000.0)
             }
             TaskState::TimedOut { timeout_ms } => {
-                format!("[⏱ timeout {:.1}s]", *timeout_ms as f64 / 1000.0)
+                format!("[timeout {:.1}s]", *timeout_ms as f64 / 1000.0)
             }
         }
     }
@@ -410,9 +410,15 @@ impl ConsoleState {
     /// Complete the active block with an exit code.
     pub fn complete_active(&mut self, exit_code: i32) {
         if let Some(id) = self.active_block_id {
-            if let Some(block) = self.get_block_mut(id) {
-                block.complete(exit_code);
-            }
+            self.complete_block(id, exit_code);
+        }
+    }
+
+    pub fn complete_block(&mut self, block_id: u64, exit_code: i32) {
+        if let Some(block) = self.get_block_mut(block_id) {
+            block.complete(exit_code);
+        }
+        if self.active_block_id == Some(block_id) {
             self.active_block_id = None;
         }
     }
@@ -420,9 +426,15 @@ impl ConsoleState {
     /// Fail the active block with an error.
     pub fn fail_active(&mut self, error: String) {
         if let Some(id) = self.active_block_id {
-            if let Some(block) = self.get_block_mut(id) {
-                block.fail(error);
-            }
+            self.fail_block(id, error);
+        }
+    }
+
+    pub fn fail_block(&mut self, block_id: u64, error: String) {
+        if let Some(block) = self.get_block_mut(block_id) {
+            block.fail(error);
+        }
+        if self.active_block_id == Some(block_id) {
             self.active_block_id = None;
         }
     }
@@ -430,9 +442,15 @@ impl ConsoleState {
     /// Interrupt the active block.
     pub fn interrupt_active(&mut self) {
         if let Some(id) = self.active_block_id {
-            if let Some(block) = self.get_block_mut(id) {
-                block.interrupt();
-            }
+            self.interrupt_block(id);
+        }
+    }
+
+    pub fn interrupt_block(&mut self, block_id: u64) {
+        if let Some(block) = self.get_block_mut(block_id) {
+            block.interrupt();
+        }
+        if self.active_block_id == Some(block_id) {
             self.active_block_id = None;
         }
     }
@@ -482,8 +500,13 @@ impl ConsoleState {
     }
 
     /// Number of characters in the input buffer.
-    fn input_char_count(&self) -> usize {
+    pub fn input_char_count(&self) -> usize {
         self.input_buffer.chars().count()
+    }
+
+    pub fn set_input(&mut self, input: String) {
+        self.input_buffer = input;
+        self.cursor_position = self.input_char_count();
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -667,8 +690,7 @@ impl ConsoleState {
     pub fn exit_history_search(&mut self, accept: bool) {
         if accept {
             if let Some(cmd) = self.history_search_results.get(self.history_search_index) {
-                self.input_buffer = cmd.clone();
-                self.cursor_position = self.input_buffer.len();
+                self.set_input(cmd.clone());
             }
         }
         self.mode = ConsoleMode::Insert;
@@ -718,8 +740,7 @@ impl ConsoleState {
         }
         if let Some(idx) = self.history_nav_index {
             if let Some(cmd) = self.history_nav_cache.get(idx) {
-                self.input_buffer = cmd.clone();
-                self.cursor_position = self.input_buffer.len();
+                self.set_input(cmd.clone());
             }
         }
     }
@@ -730,14 +751,12 @@ impl ConsoleState {
             Some(0) => {
                 // Return to saved input
                 self.history_nav_index = None;
-                self.input_buffer = self.history_nav_saved_input.clone();
-                self.cursor_position = self.input_buffer.len();
+                self.set_input(self.history_nav_saved_input.clone());
             }
             Some(idx) => {
                 self.history_nav_index = Some(idx - 1);
                 if let Some(cmd) = self.history_nav_cache.get(idx - 1) {
-                    self.input_buffer = cmd.clone();
-                    self.cursor_position = self.input_buffer.len();
+                    self.set_input(cmd.clone());
                 }
             }
             None => {}
@@ -750,6 +769,69 @@ impl ConsoleState {
         self.history_nav_cache.clear();
         self.history_nav_saved_input.clear();
     }
+}
+
+pub fn split_shell_words(input: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_word = false;
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            in_word = true;
+            continue;
+        }
+
+        match ch {
+            '\\' if quote != Some('\'') => {
+                escaped = true;
+                in_word = true;
+            }
+            '\'' | '"' => {
+                in_word = true;
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                } else {
+                    current.push(ch);
+                }
+            }
+            ch if ch.is_whitespace() && quote.is_none() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+                while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            _ => {
+                current.push(ch);
+                in_word = true;
+            }
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+        in_word = true;
+    }
+
+    if let Some(q) = quote {
+        return Err(format!("unterminated {} quote", q));
+    }
+
+    if in_word {
+        words.push(current);
+    }
+
+    Ok(words)
 }
 
 #[cfg(test)]
@@ -774,5 +856,35 @@ mod tests {
             elapsed_ms: state.status_threshold_ms + 1,
         });
         assert!(state.should_show_badge(&slow_fail));
+    }
+
+    #[test]
+    fn history_accept_uses_character_cursor_position() {
+        let mut state = ConsoleState::new(16);
+        state.history_search_results = vec!["echo привет".to_string()];
+        state.exit_history_search(true);
+        assert_eq!(state.input_buffer, "echo привет");
+        assert_eq!(state.cursor_position, state.input_buffer.chars().count());
+    }
+
+    #[test]
+    fn split_shell_words_handles_quotes_and_escapes() {
+        let words = split_shell_words(r#"cd "/tmp/with spaces""#).unwrap();
+        assert_eq!(words, vec!["cd", "/tmp/with spaces"]);
+
+        let words = split_shell_words(r#"export KEY='hello world'"#).unwrap();
+        assert_eq!(words, vec!["export", "KEY=hello world"]);
+
+        let words = split_shell_words(r#"echo hello\ world"#).unwrap();
+        assert_eq!(words, vec!["echo", "hello world"]);
+
+        let words = split_shell_words(r#"printf "" "x""#).unwrap();
+        assert_eq!(words, vec!["printf", "", "x"]);
+    }
+
+    #[test]
+    fn split_shell_words_rejects_unclosed_quote() {
+        let err = split_shell_words(r#"echo "unterminated"#).unwrap_err();
+        assert!(err.contains("unterminated"));
     }
 }

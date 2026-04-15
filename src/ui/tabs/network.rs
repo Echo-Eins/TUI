@@ -55,19 +55,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 // ═══════════════════════════ FULL VIEW ═══════════════════════════
 
-fn render_full(
-    f: &mut Frame,
-    area: Rect,
-    data: &NetworkData,
-    ui: &NetworkUIState,
-    theme: &Theme,
-) {
+fn render_full(f: &mut Frame, area: Rect, data: &NetworkData, ui: &NetworkUIState, theme: &Theme) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
+            Constraint::Length(3), // header
             Constraint::Min(16),   // body (3-column)
-            Constraint::Length(8),  // bottom (params + activity)
+            Constraint::Length(8), // bottom (params + activity)
             Constraint::Length(1), // help bar
         ])
         .split(area);
@@ -115,8 +109,8 @@ fn render_compact(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Length(7),  // tool+params | result
+            Constraint::Length(3), // header
+            Constraint::Length(7), // tool+params | result
             Constraint::Min(6),    // interface/connections
             Constraint::Length(1), // help
         ])
@@ -149,7 +143,9 @@ fn render_header_bar(
     let job_span: Option<Span> = if let Some(id) = ui.running_job {
         Some(Span::styled(
             format!("Job #{id} running"),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))
     } else if let Some(id) = ui.last_job {
         Some(Span::styled(
@@ -212,7 +208,10 @@ fn render_header_bar(
             Span::styled(marker_label, Style::default().fg(Color::Yellow)),
         ];
         if let Some(js) = job_span {
-            spans.push(Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(Color::DarkGray),
+            ));
             spans.push(js);
         }
         spans
@@ -339,17 +338,17 @@ fn render_center_interface(
         .direction(Direction::Vertical)
         .constraints(if has_multi {
             vec![
-                Constraint::Length(2),  // interface selector strip
-                Constraint::Length(7),  // details
+                Constraint::Length(2), // interface selector strip
+                Constraint::Length(7), // details
                 Constraint::Min(5),    // graphs
-                Constraint::Length(3),  // totals + stats
+                Constraint::Length(3), // totals + stats
             ]
         } else {
             vec![
-                Constraint::Length(0),  // no selector
-                Constraint::Length(8),  // details
+                Constraint::Length(0), // no selector
+                Constraint::Length(8), // details
                 Constraint::Min(5),    // graphs
-                Constraint::Length(3),  // totals
+                Constraint::Length(3), // totals
             ]
         })
         .split(area);
@@ -379,7 +378,10 @@ fn render_center_interface(
                 iface_tabs.push(Span::styled(label, Style::default().fg(status_fg)));
             }
             if i + 1 < iface_count {
-                iface_tabs.push(Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)));
+                iface_tabs.push(Span::styled(
+                    " \u{2502} ",
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
         }
         let sel_block = Block::default()
@@ -387,10 +389,7 @@ fn render_center_interface(
             .border_style(Style::default().fg(bc));
         let sel_inner = sel_block.inner(chunks[0]);
         f.render_widget(sel_block, chunks[0]);
-        f.render_widget(
-            Paragraph::new(Line::from(iface_tabs)),
-            sel_inner,
-        );
+        f.render_widget(Paragraph::new(Line::from(iface_tabs)), sel_inner);
     }
 
     // ---- Interface details ----
@@ -525,13 +524,17 @@ fn render_center_interface(
             ),
             Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("Pkt:\u{2193}{} \u{2191}{}",
+                format!(
+                    "Pkt:\u{2193}{} \u{2191}{}",
                     format_pkt_count(iface.bytes_received),
                     format_pkt_count(iface.bytes_sent),
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(format!(" {}", marker_hint), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {}", marker_hint),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         let p = Paragraph::new(line).block(tot_block);
         f.render_widget(p, chunks[3]);
@@ -554,11 +557,13 @@ fn render_center_connections(
         .split(area);
 
     // ---- Connections table ----
-    let conn_header = Row::new(vec!["Process", "PID", "Proto", "Local", "Remote", "State"])
-        .style(header_style());
+    let conn_header =
+        Row::new(vec!["Process", "PID", "Proto", "Local", "Remote", "State"]).style(header_style());
 
     let max_rows = chunks[0].height.saturating_sub(4) as usize;
-    let scroll = ui.connections_scroll.min(data.connections.len().saturating_sub(max_rows));
+    let scroll = ui
+        .connections_scroll
+        .min(data.connections.len().saturating_sub(max_rows));
 
     let conn_rows: Vec<Row> = data
         .connections
@@ -611,8 +616,15 @@ fn render_center_connections(
     f.render_widget(conn_table, chunks[0]);
 
     // ---- Bandwidth consumers ----
-    let bw_header = Row::new(vec!["Process", "PID", "\u{2193}Mbps", "\u{2191}Mbps", "RX", "TX"])
-        .style(header_style());
+    let bw_header = Row::new(vec![
+        "Process",
+        "PID",
+        "\u{2193}Mbps",
+        "\u{2191}Mbps",
+        "RX",
+        "TX",
+    ])
+    .style(header_style());
 
     let bw_rows: Vec<Row> = data
         .bandwidth_consumers
@@ -710,14 +722,14 @@ fn render_sparkline_graph(
             .borders(Borders::ALL)
             .title(label.to_string())
             .border_style(Style::default().fg(color));
-        f.render_widget(
-            Paragraph::new("Collecting data...").block(block),
-            area,
-        );
+        f.render_widget(Paragraph::new("Collecting data...").block(block), area);
         return;
     }
 
-    let vals: Vec<u64> = history.iter().map(|s| (extract(s) * 100.0) as u64).collect();
+    let vals: Vec<u64> = history
+        .iter()
+        .map(|s| (extract(s) * 100.0) as u64)
+        .collect();
     let max_val = vals.iter().max().copied().unwrap_or(1).max(1);
     let max_mbps = max_val as f64 / 100.0;
     let current = vals.last().copied().unwrap_or(0) as f64 / 100.0;
@@ -752,16 +764,16 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
 
     let has_filter = !ui.filter_input.is_empty();
     let title = if has_filter {
-        format!("{} [/{}]", zone_title("RESULTS", is_focused), ui.filter_input)
+        format!(
+            "{} [/{}]",
+            zone_title("RESULTS", is_focused),
+            ui.filter_input
+        )
     } else {
         zone_title("RESULTS", is_focused)
     };
 
-    let border_color = if ui.filter_active {
-        Color::Magenta
-    } else {
-        bc
-    };
+    let border_color = if ui.filter_active { Color::Magenta } else { bc };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -778,9 +790,9 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                          // tab header
-            Constraint::Length(filter_bar_height),          // filter input bar
-            Constraint::Min(2),                             // tab content
+            Constraint::Length(1),                 // tab header
+            Constraint::Length(filter_bar_height), // filter input bar
+            Constraint::Min(2),                    // tab content
         ])
         .split(inner);
 
@@ -811,11 +823,15 @@ fn render_results_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: &
         let filter_line = Line::from(vec![
             Span::styled(
                 " /",
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{}{}", ui.filter_input, cursor),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  (Esc:cancel Enter:apply)",
@@ -920,7 +936,10 @@ fn result_tab_summary(ui: &NetworkUIState) -> Vec<Line<'static>> {
             Span::styled(" Job #", dim()),
             Span::styled(job_id.to_string(), Style::default().fg(Color::White)),
             if ui.running_job.is_some() {
-                Span::styled("  \u{2502} in progress...", Style::default().fg(Color::Cyan))
+                Span::styled(
+                    "  \u{2502} in progress...",
+                    Style::default().fg(Color::Cyan),
+                )
             } else {
                 Span::styled("  \u{2502} completed", Style::default().fg(Color::DarkGray))
             },
@@ -938,7 +957,9 @@ fn result_tab_summary(ui: &NetworkUIState) -> Vec<Line<'static>> {
             Span::styled(" Verdict: ", dim()),
             Span::styled(
                 ui.last_summary.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
     }
@@ -954,7 +975,9 @@ fn result_tab_summary(ui: &NetworkUIState) -> Vec<Line<'static>> {
         )));
         // Show top 6 detail lines as key metrics
         for l in ui.detail_lines.iter().take(6) {
-            if l.is_empty() { continue; }
+            if l.is_empty() {
+                continue;
+            }
             let (label, value) = if let Some(pos) = l.find('=') {
                 (l[..pos].trim().to_string(), l[pos + 1..].trim().to_string())
             } else if let Some(pos) = l.find(':') {
@@ -980,11 +1003,11 @@ fn result_tab_summary(ui: &NetworkUIState) -> Vec<Line<'static>> {
     if let Some(err) = &ui.last_error {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(" \u{2718} Error: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             Span::styled(
-                err.clone(),
-                Style::default().fg(Color::Red),
+                " \u{2718} Error: ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(err.clone(), Style::default().fg(Color::Red)),
         ]));
     }
 
@@ -1013,14 +1036,20 @@ fn summary_next_actions(ui: &NetworkUIState) -> Vec<&'static str> {
     match ui.selected_tool {
         NetworkDiagnosticTool::Ping => {
             if ui.last_summary.contains("loss") && !ui.last_summary.contains("loss 0.0%") {
-                vec!["Run Trace+ to locate the lossy hop", "Run MTU Probe to check PMTU"]
+                vec![
+                    "Run Trace+ to locate the lossy hop",
+                    "Run MTU Probe to check PMTU",
+                ]
             } else {
                 vec!["Stable path — consider Trace+ for topology"]
             }
         }
         NetworkDiagnosticTool::Trace => {
             if ui.last_summary.contains("not reached") || ui.last_summary.contains("PARTIAL") {
-                vec!["Try proto=tcp port=443 for firewall bypass", "Run Ping+ to confirm reachability"]
+                vec![
+                    "Try proto=tcp port=443 for firewall bypass",
+                    "Run Ping+ to confirm reachability",
+                ]
             } else {
                 vec!["Path verified — run Port Scan to check services"]
             }
@@ -1089,10 +1118,7 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
                     format!(" {}", &l[..5]),
                     Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    l[5..].to_string(),
-                    Style::default().fg(text_color),
-                ),
+                Span::styled(l[5..].to_string(), Style::default().fg(text_color)),
             ]));
             continue;
         }
@@ -1116,15 +1142,23 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
                         let before = &l[..ms_pos];
                         let rtt_str = before.split_whitespace().last().unwrap_or("0");
                         let rtt: f32 = rtt_str.parse().unwrap_or(0.0);
-                        if rtt > 200.0 { Color::Red }
-                        else if rtt > 100.0 { Color::Yellow }
-                        else if rtt > 50.0 { Color::White }
-                        else { Color::Green }
+                        if rtt > 200.0 {
+                            Color::Red
+                        } else if rtt > 100.0 {
+                            Color::Yellow
+                        } else if rtt > 50.0 {
+                            Color::White
+                        } else {
+                            Color::Green
+                        }
                     } else {
                         Color::Cyan
                     }
                 };
-                lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(hop_color))));
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", l),
+                    Style::default().fg(hop_color),
+                )));
                 continue;
             }
         }
@@ -1158,7 +1192,10 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
                     continue;
                 }
             }
-            lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(state_color))));
+            lines.push(Line::from(Span::styled(
+                format!(" {}", l),
+                Style::default().fg(state_color),
+            )));
             continue;
         }
 
@@ -1189,7 +1226,10 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
             } else {
                 Color::Red
             };
-            lines.push(Line::from(Span::styled(format!(" {}", l), Style::default().fg(sig_color))));
+            lines.push(Line::from(Span::styled(
+                format!(" {}", l),
+                Style::default().fg(sig_color),
+            )));
             continue;
         }
 
@@ -1214,7 +1254,9 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
                     && !key.is_empty()
                     && !key.contains('/')
                     && !key.contains('.')
-                    && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '-')
+                    && key
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '-')
                 {
                     Some((key.to_string(), val.to_string()))
                 } else {
@@ -1229,16 +1271,25 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
 
         if let Some((key, val)) = parsed {
             // Color the value based on content
-            let val_color = if val.contains("fail") || val.contains("error") || val == "false"
-                || val.contains("Unavailable") || val.contains("could not determine")
+            let val_color = if val.contains("fail")
+                || val.contains("error")
+                || val == "false"
+                || val.contains("Unavailable")
+                || val.contains("could not determine")
             {
                 Color::Red
-            } else if val.contains("warn") || val.contains("PARTIAL") || val.contains("PermDenied")
-                || val.contains("MissingDep") || val.contains("overhead")
+            } else if val.contains("warn")
+                || val.contains("PARTIAL")
+                || val.contains("PermDenied")
+                || val.contains("MissingDep")
+                || val.contains("overhead")
             {
                 Color::Yellow
-            } else if val.contains("true") || val.contains("OK") || val == "0"
-                || val.contains("Supported") || val.contains("standard Ethernet")
+            } else if val.contains("true")
+                || val.contains("OK")
+                || val == "0"
+                || val.contains("Supported")
+                || val.contains("standard Ethernet")
             {
                 Color::Green
             } else {
@@ -1252,12 +1303,26 @@ fn result_tab_details(ui: &NetworkUIState) -> Vec<Line<'static>> {
             // Fallback: color-code known prefixes
             let style = if l.starts_with("warning") || l.starts_with("WARN") {
                 Style::default().fg(Color::Yellow)
-            } else if l.starts_with("error") || l.starts_with("Error") || l.starts_with("CONFLICTS") {
+            } else if l.starts_with("error") || l.starts_with("Error") || l.starts_with("CONFLICTS")
+            {
                 Style::default().fg(Color::Red)
-            } else if l.starts_with("Hop") || l.starts_with("Latency") || l.starts_with("OPEN") || l.starts_with("CLOSED") {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-            } else if l.starts_with("Attempts:") || l.starts_with("Policy rules:") || l.starts_with("Details:") || l.starts_with("Interface MTU") || l.starts_with("Wi-Fi") {
-                Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED)
+            } else if l.starts_with("Hop")
+                || l.starts_with("Latency")
+                || l.starts_with("OPEN")
+                || l.starts_with("CLOSED")
+            {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if l.starts_with("Attempts:")
+                || l.starts_with("Policy rules:")
+                || l.starts_with("Details:")
+                || l.starts_with("Interface MTU")
+                || l.starts_with("Wi-Fi")
+            {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::UNDERLINED)
             } else if l.starts_with("  ") {
                 // Indented sub-items
                 Style::default().fg(Color::DarkGray)
@@ -1283,14 +1348,12 @@ fn result_tab_raw(ui: &NetworkUIState) -> Vec<Line<'static>> {
 
     let stdout_count = ui.raw_stdout.len();
     let stderr_count = ui.raw_stderr.len();
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" stdout ({} lines)", stdout_count),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!(" stdout ({} lines)", stdout_count),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )]));
 
     if ui.raw_stdout.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1310,14 +1373,12 @@ fn result_tab_raw(ui: &NetworkUIState) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" stderr ({} lines)", stderr_count),
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!(" stderr ({} lines)", stderr_count),
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )]));
 
     if ui.raw_stderr.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1372,13 +1433,29 @@ fn result_tab_advice(ui: &NetworkUIState) -> Vec<Line<'static>> {
     )));
 
     for (i, a) in ui.advice_lines.iter().enumerate() {
-        let (icon, color) = if a.contains("!") || a.starts_with("Significant") || a.starts_with("High") || a.contains("fail") {
-            ("\u{2718}", Color::Red)   // cross mark for critical
-        } else if a.contains("Consider") || a.contains("Try") || a.contains("Run") || a.contains("Check") {
-            ("\u{2192}", Color::Cyan)  // arrow for actionable
-        } else if a.contains("stable") || a.contains("reached") || a.contains("no packet loss") || a.contains("No") && a.contains("loss") {
+        let (icon, color) = if a.contains("!")
+            || a.starts_with("Significant")
+            || a.starts_with("High")
+            || a.contains("fail")
+        {
+            ("\u{2718}", Color::Red) // cross mark for critical
+        } else if a.contains("Consider")
+            || a.contains("Try")
+            || a.contains("Run")
+            || a.contains("Check")
+        {
+            ("\u{2192}", Color::Cyan) // arrow for actionable
+        } else if a.contains("stable")
+            || a.contains("reached")
+            || a.contains("no packet loss")
+            || a.contains("No") && a.contains("loss")
+        {
             ("\u{2714}", Color::Green) // checkmark for good
-        } else if a.contains("warn") || a.contains("low") || a.contains("Minor") || a.contains("filtered") {
+        } else if a.contains("warn")
+            || a.contains("low")
+            || a.contains("Minor")
+            || a.contains("filtered")
+        {
             ("\u{26a0}", Color::Yellow) // warning
         } else {
             ("\u{2022}", Color::White) // bullet for info
@@ -1388,10 +1465,7 @@ fn result_tab_advice(ui: &NetworkUIState) -> Vec<Line<'static>> {
                 format!(" {} ", icon),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{}. ", i + 1),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
             Span::styled(a.clone(), Style::default().fg(color)),
         ]));
     }
@@ -1414,26 +1488,22 @@ fn result_tab_history(ui: &NetworkUIState) -> Vec<Line<'static>> {
 
     let mut lines = Vec::new();
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" History ({} entries)", ui.result_history.len()),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!(" History ({} entries)", ui.result_history.len()),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
     // Header
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(
-                " {:<6}{:<10}{:<14}{:<16}{}",
-                "Job", "Time", "Tool", "Target", "Result"
-            ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            " {:<6}{:<10}{:<14}{:<16}{}",
+            "Job", "Time", "Tool", "Target", "Result"
         ),
-    ]));
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
     lines.push(Line::from(Span::styled(
         format!(" {}", "\u{2500}".repeat(65)),
         Style::default().fg(Color::DarkGray),
@@ -1476,9 +1546,14 @@ fn result_tab_history(ui: &NetworkUIState) -> Vec<Line<'static>> {
             ),
             Span::styled(
                 format!("{} ", verdict_icon),
-                Style::default().fg(verdict_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(verdict_color)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(trunc(&entry.summary, 36), Style::default().fg(verdict_color)),
+            Span::styled(
+                trunc(&entry.summary, 36),
+                Style::default().fg(verdict_color),
+            ),
         ]));
     }
 
@@ -1655,21 +1730,22 @@ fn render_activity_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: 
         .into_iter()
         .rev()
         .map(|ev| {
-            let (icon, color) = if ev.contains("failed") || ev.contains("Error") || ev.contains("Cannot") {
-                ("\u{2718}", Color::Red)
-            } else if ev.contains("completed") {
-                ("\u{2714}", Color::Green)
-            } else if ev.contains("started") {
-                ("\u{25b6}", Color::Cyan)
-            } else if ev.contains("Queued") {
-                ("\u{23f3}", Color::Cyan)
-            } else if ev.contains("cancelled") || ev.contains("Cancel") {
-                ("\u{23f9}", Color::Yellow)
-            } else if ev.contains("progress") || ev.contains("Job #") {
-                ("\u{2022}", Color::White)
-            } else {
-                (" ", Color::DarkGray)
-            };
+            let (icon, color) =
+                if ev.contains("failed") || ev.contains("Error") || ev.contains("Cannot") {
+                    ("\u{2718}", Color::Red)
+                } else if ev.contains("completed") {
+                    ("\u{2714}", Color::Green)
+                } else if ev.contains("started") {
+                    ("\u{25b6}", Color::Cyan)
+                } else if ev.contains("Queued") {
+                    ("\u{23f3}", Color::Cyan)
+                } else if ev.contains("cancelled") || ev.contains("Cancel") {
+                    ("\u{23f9}", Color::Yellow)
+                } else if ev.contains("progress") || ev.contains("Job #") {
+                    ("\u{2022}", Color::White)
+                } else {
+                    (" ", Color::DarkGray)
+                };
 
             // Split timestamp from message for better formatting
             if ev.starts_with('[') {
@@ -1677,10 +1753,7 @@ fn render_activity_panel(f: &mut Frame, area: Rect, ui: &NetworkUIState, theme: 
                     let ts = &ev[..close + 1];
                     let msg = ev[close + 1..].trim_start();
                     return Line::from(vec![
-                        Span::styled(
-                            format!(" {}", ts),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(format!(" {}", ts), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!(" {} ", icon),
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1871,11 +1944,17 @@ fn render_compact_bottom(
                     ]),
                     Line::from(vec![
                         Span::styled(
-                            format!("\u{2193}{:.1} \u{2191}{:.1} Mbps", iface.download_speed, iface.upload_speed),
+                            format!(
+                                "\u{2193}{:.1} \u{2191}{:.1} Mbps",
+                                iface.download_speed, iface.upload_speed
+                            ),
                             Style::default().fg(Color::Green),
                         ),
                         Span::raw("  "),
-                        Span::styled(format!("RX:{} TX:{}", rx, tx), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("RX:{} TX:{}", rx, tx),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]),
                 ];
                 f.render_widget(Paragraph::new(lines), inner);
@@ -1902,7 +1981,10 @@ fn render_compact_bottom(
                             format!("{:<12}", trunc(&c.process_name, 11)),
                             Style::default().fg(Color::White),
                         ),
-                        Span::styled(format!("{:<5}", c.protocol), Style::default().fg(Color::Cyan)),
+                        Span::styled(
+                            format!("{:<5}", c.protocol),
+                            Style::default().fg(Color::Cyan),
+                        ),
                         Span::styled(
                             format!("{}:{}", trunc(&c.remote_address, 15), c.remote_port),
                             Style::default().fg(Color::DarkGray),
@@ -1954,9 +2036,7 @@ fn traffic_display(iface: &NetworkInterface, ui: &NetworkUIState) -> (String, St
             let rx = iface
                 .bytes_received
                 .saturating_sub(marker.bytes_received_at_mark);
-            let tx = iface
-                .bytes_sent
-                .saturating_sub(marker.bytes_sent_at_mark);
+            let tx = iface.bytes_sent.saturating_sub(marker.bytes_sent_at_mark);
             return (
                 format!("\u{0394}{}", format_bytes(rx)),
                 format!("\u{0394}{}", format_bytes(tx)),

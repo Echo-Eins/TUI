@@ -95,6 +95,37 @@ where
 
         let c = *chars.peek().unwrap();
 
+        // File-descriptor redirections: 2>, 2>>, 1>, 0<.
+        if c.is_ascii_digit() {
+            let mut probe = chars.clone();
+            let mut redir = String::new();
+            while let Some(&digit) = probe.peek() {
+                if digit.is_ascii_digit() {
+                    redir.push(digit);
+                    probe.next();
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(&op @ ('>' | '<')) = probe.peek() {
+                redir.push(op);
+                probe.next();
+                if probe.peek() == Some(&op) {
+                    redir.push(op);
+                    probe.next();
+                }
+                chars = probe;
+                tokens.push(InputToken {
+                    text: redir,
+                    kind: TokenKind::Redirect,
+                    valid: None,
+                });
+                is_first_token = false;
+                continue;
+            }
+        }
+
         // Check for operators
         if c == '|' {
             chars.next();
@@ -255,22 +286,19 @@ where
 
         if is_command_position {
             kind = TokenKind::Command;
-            valid = Some(is_known_command(&word));
+            valid = if looks_like_path(&word) {
+                Some(expand_tilde_path(&word).exists())
+            } else {
+                Some(is_known_command(&word))
+            };
             after_pipe_or_semi = false;
         } else if word.starts_with('-') {
             kind = TokenKind::Flag;
             valid = None;
-        } else if word.contains('/') || word.starts_with('~') || word.starts_with('.') {
+        } else if looks_like_path(&word) {
             // Looks like a path — validate existence
             kind = TokenKind::Path;
-            let expanded = if word.starts_with('~') {
-                dirs::home_dir()
-                    .map(|h| word.replacen('~', &h.display().to_string(), 1))
-                    .unwrap_or_else(|| word.clone())
-            } else {
-                word.clone()
-            };
-            valid = Some(std::path::Path::new(&expanded).exists());
+            valid = Some(expand_tilde_path(&word).exists());
         } else {
             kind = TokenKind::Argument;
             valid = None;
@@ -286,6 +314,22 @@ where
     }
 
     tokens
+}
+
+fn looks_like_path(word: &str) -> bool {
+    word.contains('/') || word.starts_with('~') || word.starts_with('.')
+}
+
+fn expand_tilde_path(word: &str) -> std::path::PathBuf {
+    if word.starts_with('~') {
+        dirs::home_dir()
+            .map(|home| {
+                std::path::PathBuf::from(word.replacen('~', &home.display().to_string(), 1))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(word))
+    } else {
+        std::path::PathBuf::from(word)
+    }
 }
 
 /// Convert tokenized input to colored (text, color) pairs for rendering.
@@ -367,5 +411,22 @@ mod tests {
             .filter(|t| t.kind == TokenKind::Redirect)
             .collect();
         assert_eq!(redirects.len(), 1);
+    }
+
+    #[test]
+    fn test_fd_redirect() {
+        let tokens = tokenize("cmd 2>> error.log", always_known);
+        let redirects: Vec<&InputToken> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Redirect)
+            .collect();
+        assert_eq!(redirects.len(), 1);
+        assert_eq!(redirects[0].text, "2>>");
+    }
+
+    #[test]
+    fn test_path_command_is_command_token() {
+        let tokens = tokenize("./script.sh --help", always_known);
+        assert_eq!(tokens[0].kind, TokenKind::Command);
     }
 }

@@ -1,0 +1,4 @@
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes libxdo-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev",
+]

@@ -1,73 +1,94 @@
-# 🖥️ Cardputer Remote & TUI Dashboard
+# Cardputer Remote & TUI Dashboard
 
-![Rust](https://img.shields.io/badge/Rust-1.75+-orange?style=flat-square&logo=rust)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+Rust-based terminal dashboard plus a secure remote desktop server for M5Stack
+Cardputer clients.
 
-A highly secure, cross-platform remote desktop and system monitoring solution, originally built for the M5Stack Cardputer, featuring a powerful terminal user interface (TUI).
+## Features
 
-## ✨ Features
+- Remote desktop server with ECDSA mutual authentication, ECDH session keys,
+  AES-128-GCM encryption, replay protection, and mDNS discovery.
+- Cross-platform TUI dashboard for CPU, GPU, RAM, disk, network, processes,
+  services, Ollama, and settings.
+- Windows remote desktop capture/input through native desktop backends.
+- Linux remote desktop capture/input through the same Rust API:
+  - screen capture: `scrap` first, with `grim`/`maim` fallback on Linux;
+  - input injection: `enigo` first, with `xdotool` fallback on Linux.
 
-- **🔐 Enterprise-Grade Security** 
-  - ECDSA Mutual Authentication & ECDH Forward Secrecy.
-  - AES-128-GCM Authenticated Encryption with Monotonic Nonce Replay Protection.
-- **📊 Advanced TUI Dashboard** (Windows & Linux)
-  - Real-time system monitoring (CPU, RAM, Disk, Network, GPU, Processes, Services).
-  - Modular cross-platform architecture abstracting OS-level metrics.
-- **💻 Integrated Interactive Console**
-  - Fully asynchronous terminal emulator inside the TUI.
-  - Support for streaming execution and interactive mode logic.
-- **🤖 Ollama Integration** 
-  - Built-in chat, model management, and offline prompt engineering interface.
+## Security Setup
 
-## 🚀 Quick Start
+The repository `config.toml` is a template and intentionally does not contain
+valid secrets. The server refuses all-zero keys and invalid P-256 keys.
 
-### 1. Generate Security Keys
-Generates the required PC/Cardputer ECDSA keypairs and a discovery cookie:
+Generate real keys and a discovery cookie:
+
 ```bash
 cargo run --bin keygen
 ```
 
-### 2. Configure PC Server
-Generate or modify your `config.toml` to secure the connection and configure system monitors.
+Create a local config that is not committed:
 
-### 3. Launch Applications
+```bash
+cp config.toml config.local.toml
+```
 
-**To run the TUI Dashboard:**
+Then copy the generated `[security]` values into `config.local.toml`.
+
+For LAN access, set:
+
+```toml
+[network]
+bind_address = "0.0.0.0"
+```
+
+Use `127.0.0.1` only for local testing.
+
+Run the server with the local config:
+
+```bash
+cargo run --release --bin cardputer-remote -- --config config.local.toml
+```
+
+## TUI Dashboard
+
 ```bash
 cargo run --release --bin TUI
 ```
-*(Note: Omit `--release` for debugging/development)*
 
-**To run the Remote Desktop Server:**
+## Linux Runtime Notes
+
+For Linux remote desktop:
+
+- Build dependencies on Debian/Ubuntu:
+  `sudo apt install libxdo-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev`
+- X11/XWayland: `scrap` and `enigo` are preferred.
+- wlroots Wayland: install `grim` for screenshot fallback.
+- X11 fallback input: install `xdotool` if `enigo` cannot initialize.
+
+Pure Wayland compositors may require explicit desktop permissions or portal
+configuration before capture/input is allowed.
+
+## Cardputer SD Card
+
+Create `/sd/rd_keys/` and copy:
+
+- `client.key`
+- `client.pub`
+- `server.pub`
+- `cookie`
+
+The key generator can write these files directly:
+
 ```bash
-cargo run --release --bin cardputer-remote
+cargo run --bin keygen -- --output /path/to/sdcard
 ```
 
-## 🛠️ Cardputer (ESP32) Configuration
+## Verification
 
-1. Create a `/sd/rd_keys/` folder on your MicroSD card.
-2. Place the generated binaries:
-   - `client.key` (ECDSA Private - 32 bytes)
-   - `client.pub` (ECDSA Public - 33 bytes)
-   - `server.pub` (PC's Public - 33 bytes)
-3. Flash the firmware, connect to WiFi, and select "Remote Desktop".
+```bash
+cargo test
+cargo check --all-targets
+cross check --target x86_64-unknown-linux-gnu --all-targets
+```
 
-### 🕹️ Cardputer Controls
-
-| Key Bind | Action | | Key Bind | Action |
-|----------|--------|-|----------|--------|
-| `FN + ;` | Mouse Up | | `FN + ENTER` | Left Click |
-| `FN + .` | Mouse Down | | `FN + BACKSPACE` | Disconnect |
-| `FN + ,` | Mouse Left | | `A-Z, 0-9` | Type Data |
-| `FN + /` | Mouse Right | | | |
-
-## 🏗️ Technical Implementation details
-
-The TUI utilizes a highly asynchronous, cross-platform architecture built on Tokio:
-- **Windows Console:** Leverages native `tokio::process::Command` and fully asynchronous I/O streams for non-blocking execution of PowerShell.
-- **Linux Console:** Utilizes `portable-pty` bridged into Tokio via `task::spawn_blocking` and `mpsc` channels to ensure the main async event loop is never blocked by synchronous TTY interactions.
-
----
-
-**Security Notice:** Private keys are stored unencrypted on the SD card. Physical security of the Cardputer is essential. The initial TCP connection is unencrypted until the handshake completes; use on trusted networks.
+`Cross.toml` installs the Linux X11 development libraries required by the
+remote desktop capture/input backends in the cross container.

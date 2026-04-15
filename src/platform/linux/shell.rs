@@ -4,6 +4,8 @@ use crate::utils::utf8_buffer::Utf8AccumulationBuffer;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -20,6 +22,20 @@ impl LinuxCommandExecutor {
             active_pid: Arc::new(RwLock::new(None)),
         }
     }
+}
+
+fn stream_exit_from_status(status: std::process::ExitStatus) -> StreamMessage {
+    #[cfg(unix)]
+    {
+        if status.signal() == Some(libc::SIGINT) {
+            return StreamMessage::Interrupted;
+        }
+        if let Some(signal) = status.signal() {
+            return StreamMessage::Exit(128 + signal);
+        }
+    }
+
+    StreamMessage::Exit(status.code().unwrap_or(1))
 }
 
 /// Process a raw text chunk from stdout/stderr and send complete lines through the channel.
@@ -221,9 +237,9 @@ impl CommandExecutor for LinuxCommandExecutor {
             };
 
             // Wait for the child process to exit
-            let exit_code = match child.wait().await {
-                Ok(status) => status.code().unwrap_or(1),
-                Err(_) => 1,
+            let exit_message = match child.wait().await {
+                Ok(status) => stream_exit_from_status(status),
+                Err(_) => StreamMessage::Exit(1),
             };
 
             // CRITICAL: Wait for stdout/stderr tasks to finish BEFORE sending Exit.
@@ -236,7 +252,7 @@ impl CommandExecutor for LinuxCommandExecutor {
             }
 
             *active_pid.write() = None;
-            let _ = tx.send(StreamMessage::Exit(exit_code)).await;
+            let _ = tx.send(exit_message).await;
         });
 
         Ok(rx)
@@ -278,5 +294,29 @@ impl CommandExecutor for LinuxCommandExecutor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn sigint_status_maps_to_interrupted_message() {
+        let status = std::process::ExitStatus::from_raw(libc::SIGINT);
+        assert!(matches!(
+            stream_exit_from_status(status),
+            StreamMessage::Interrupted
+        ));
+    }
+
+    #[test]
+    fn signaled_status_maps_to_shell_style_exit_code() {
+        let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
+        assert!(matches!(
+            stream_exit_from_status(status),
+            StreamMessage::Exit(code) if code == 128 + libc::SIGTERM
+        ));
     }
 }
