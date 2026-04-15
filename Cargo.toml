@@ -67,6 +67,7 @@ rusqlite = { version = "0.38.0", features = ["bundled"] }
 dirs = "6.0.0"
 
 [target.'cfg(windows)'.dependencies]
+enigo = "0.2"
 windows = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -78,7 +79,6 @@ windows-sys = { version = "0.52", features = [
 ]}
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
-enigo = "0.2"
 scrap = "0.5"
 
 [target.'cfg(unix)'.dependencies]

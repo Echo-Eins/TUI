@@ -1,4 +1,4 @@
-//! Input simulation module - mouse and keyboard control
+//! Input simulation module - mouse and keyboard control.
 //!
 //! Maps Cardputer input commands to host input events.
 
@@ -19,84 +19,54 @@ pub enum InputError {
     SimulationFailed,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(windows)]
 mod imp {
     use super::*;
     use enigo::{
         Button as EnigoButton, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
     };
     use std::collections::HashMap;
-    #[cfg(target_os = "linux")]
-    use std::process::Command;
 
-    enum InputBackend {
-        Enigo(Enigo),
-        #[cfg(target_os = "linux")]
-        XDoTool,
-    }
-
-    /// Input controller for mouse and keyboard
+    /// Input controller for mouse and keyboard.
     pub struct InputController {
-        backend: InputBackend,
+        enigo: Enigo,
         current_mode: InputMode,
-        /// Mouse movement speed (pixels per command)
+        /// Mouse movement speed in pixels per command.
         mouse_speed: i32,
-        /// Keycode mapping from USB HID to enigo keys
+        /// Keycode mapping from USB HID to enigo keys.
         keymap: HashMap<u8, Key>,
     }
 
     impl InputController {
-        /// Create a new input controller
+        /// Create a new input controller.
         pub fn new() -> Result<Self, InputError> {
-            let settings = Settings::default();
-            let backend = match Enigo::new(&settings) {
-                Ok(enigo) => InputBackend::Enigo(enigo),
-                Err(e) => {
-                    #[cfg(target_os = "linux")]
-                    {
-                        if command_exists("xdotool") {
-                            InputBackend::XDoTool
-                        } else {
-                            return Err(InputError::InitError(format!(
-                                "{e}; xdotool fallback not found"
-                            )));
-                        }
-                    }
-
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        return Err(InputError::InitError(e.to_string()));
-                    }
-                }
-            };
+            let enigo = Enigo::new(&Settings::default())
+                .map_err(|error| InputError::InitError(error.to_string()))?;
             let keymap = Self::build_keymap();
 
             Ok(Self {
-                backend,
+                enigo,
                 current_mode: InputMode::Mouse,
                 mouse_speed: 5,
                 keymap,
             })
         }
 
-        /// Build USB HID keycode to enigo Key mapping
+        /// Build USB HID keycode to enigo Key mapping.
         fn build_keymap() -> HashMap<u8, Key> {
             let mut map = HashMap::new();
 
-            // Letters (0x04 - 0x1D = a-z)
             for i in 0..26u8 {
                 let c = (b'a' + i) as char;
                 map.insert(0x04 + i, Key::Unicode(c));
             }
 
-            // Numbers (0x1E - 0x27 = 1-9, 0)
             for i in 0..9u8 {
                 let c = (b'1' + i) as char;
                 map.insert(0x1E + i, Key::Unicode(c));
             }
             map.insert(0x27, Key::Unicode('0'));
 
-            // Special keys
             map.insert(0x28, Key::Return);
             map.insert(0x29, Key::Escape);
             map.insert(0x2A, Key::Backspace);
@@ -114,7 +84,6 @@ mod imp {
             map.insert(0x37, Key::Unicode('.'));
             map.insert(0x38, Key::Unicode('/'));
 
-            // Function keys (0x3A - 0x45 = F1-F12)
             map.insert(0x3A, Key::F1);
             map.insert(0x3B, Key::F2);
             map.insert(0x3C, Key::F3);
@@ -128,14 +97,11 @@ mod imp {
             map.insert(0x44, Key::F11);
             map.insert(0x45, Key::F12);
 
-            // Navigation keys
             map.insert(0x4A, Key::Home);
             map.insert(0x4B, Key::PageUp);
             map.insert(0x4C, Key::Delete);
             map.insert(0x4D, Key::End);
             map.insert(0x4E, Key::PageDown);
-
-            // Arrow keys
             map.insert(0x4F, Key::RightArrow);
             map.insert(0x50, Key::LeftArrow);
             map.insert(0x51, Key::DownArrow);
@@ -144,17 +110,14 @@ mod imp {
             map
         }
 
-        /// Get current input mode
         pub fn get_mode(&self) -> InputMode {
             self.current_mode
         }
 
-        /// Switch input mode
         pub fn switch_mode(&mut self, mode: InputMode) {
             self.current_mode = mode;
         }
 
-        /// Toggle between mouse and keyboard mode
         pub fn toggle_mode(&mut self) -> InputMode {
             self.current_mode = match self.current_mode {
                 InputMode::Mouse => InputMode::Keyboard,
@@ -163,32 +126,16 @@ mod imp {
             self.current_mode
         }
 
-        /// Set mouse movement speed (pixels per command)
         pub fn set_mouse_speed(&mut self, speed: i32) {
             self.mouse_speed = speed.clamp(1, 50);
         }
 
-        /// Handle mouse movement
         pub fn mouse_move(&mut self, movement: MouseMove) {
             let dx = movement.dx as i32 * self.mouse_speed;
             let dy = movement.dy as i32 * self.mouse_speed;
-            match &mut self.backend {
-                InputBackend::Enigo(enigo) => {
-                    let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
-                }
-                #[cfg(target_os = "linux")]
-                InputBackend::XDoTool => {
-                    run_xdotool(&[
-                        "mousemove_relative".to_string(),
-                        "--".to_string(),
-                        dx.to_string(),
-                        dy.to_string(),
-                    ]);
-                }
-            }
+            let _ = self.enigo.move_mouse(dx, dy, Coordinate::Rel);
         }
 
-        /// Handle mouse click
         pub fn mouse_click(&mut self, click: MouseClick) {
             let button = match click.button {
                 MouseButton::Left => EnigoButton::Left,
@@ -197,15 +144,9 @@ mod imp {
             };
 
             match click.action {
-                ClickAction::Press => {
-                    self.button(button, Direction::Press);
-                }
-                ClickAction::Release => {
-                    self.button(button, Direction::Release);
-                }
-                ClickAction::Click => {
-                    self.button(button, Direction::Click);
-                }
+                ClickAction::Press => self.button(button, Direction::Press),
+                ClickAction::Release => self.button(button, Direction::Release),
+                ClickAction::Click => self.button(button, Direction::Click),
                 ClickAction::DoubleClick => {
                     self.button(button, Direction::Click);
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -215,128 +156,201 @@ mod imp {
         }
 
         fn button(&mut self, button: EnigoButton, direction: Direction) {
-            match &mut self.backend {
-                InputBackend::Enigo(enigo) => {
-                    let _ = enigo.button(button, direction);
-                }
-                #[cfg(target_os = "linux")]
-                InputBackend::XDoTool => {
-                    let button = xdotool_mouse_button(button);
-                    let action = match direction {
-                        Direction::Press => "mousedown",
-                        Direction::Release => "mouseup",
-                        Direction::Click => "click",
-                    };
-                    run_xdotool(&[action.to_string(), button.to_string()]);
-                }
-            }
+            let _ = self.enigo.button(button, direction);
         }
 
-        /// Handle key press
         pub fn key_press(&mut self, event: KeyEvent) {
             self.apply_modifiers(event.modifiers, Direction::Press);
             self.key(event.keycode, Direction::Press);
         }
 
-        /// Handle key release
         pub fn key_release(&mut self, event: KeyEvent) {
             self.key(event.keycode, Direction::Release);
             self.apply_modifiers(event.modifiers, Direction::Release);
         }
 
-        /// Type a string (for keyboard mode)
         pub fn type_string(&mut self, text: &str) {
-            match &mut self.backend {
-                InputBackend::Enigo(enigo) => {
-                    let _ = enigo.text(text);
-                }
-                #[cfg(target_os = "linux")]
-                InputBackend::XDoTool => {
-                    run_xdotool(&[
-                        "type".to_string(),
-                        "--delay".to_string(),
-                        "0".to_string(),
-                        text.to_string(),
-                    ]);
-                }
-            }
+            let _ = self.enigo.text(text);
         }
 
         fn apply_modifiers(&mut self, modifiers: u8, direction: Direction) {
             if modifiers & 0x01 != 0 {
-                self.key_named(Key::Control, "ctrl", direction);
+                self.key_named(Key::Control, direction);
             }
             if modifiers & 0x02 != 0 {
-                self.key_named(Key::Shift, "shift", direction);
+                self.key_named(Key::Shift, direction);
             }
             if modifiers & 0x04 != 0 {
-                self.key_named(Key::Alt, "alt", direction);
+                self.key_named(Key::Alt, direction);
             }
             if modifiers & 0x08 != 0 {
-                self.key_named(Key::Meta, "super", direction);
+                self.key_named(Key::Meta, direction);
             }
         }
 
         fn key(&mut self, keycode: u8, direction: Direction) {
             if let Some(&key) = self.keymap.get(&keycode) {
-                let xdotool_name = xdotool_key_name(keycode).unwrap_or("");
-                self.key_named(key, xdotool_name, direction);
+                self.key_named(key, direction);
             }
         }
 
-        fn key_named(&mut self, key: Key, _xdotool_name: &str, direction: Direction) {
-            match &mut self.backend {
-                InputBackend::Enigo(enigo) => {
-                    let _ = enigo.key(key, direction);
-                }
-                #[cfg(target_os = "linux")]
-                InputBackend::XDoTool => {
-                    if _xdotool_name.is_empty() {
-                        return;
-                    }
-                    let action = match direction {
-                        Direction::Press => "keydown",
-                        Direction::Release => "keyup",
-                        Direction::Click => "key",
-                    };
-                    run_xdotool(&[action.to_string(), _xdotool_name.to_string()]);
-                }
-            }
+        fn key_named(&mut self, key: Key, direction: Direction) {
+            let _ = self.enigo.key(key, direction);
         }
 
-        /// Handle arrow key input in mouse mode (convert to mouse movement)
         pub fn arrow_to_mouse(&mut self, keycode: u8) {
             let movement = match keycode {
-                0x4F => MouseMove { dx: 1, dy: 0 },  // Right
-                0x50 => MouseMove { dx: -1, dy: 0 }, // Left
-                0x51 => MouseMove { dx: 0, dy: 1 },  // Down
-                0x52 => MouseMove { dx: 0, dy: -1 }, // Up
+                0x4F => MouseMove { dx: 1, dy: 0 },
+                0x50 => MouseMove { dx: -1, dy: 0 },
+                0x51 => MouseMove { dx: 0, dy: 1 },
+                0x52 => MouseMove { dx: 0, dy: -1 },
                 _ => return,
             };
             self.mouse_move(movement);
         }
     }
 
-    #[cfg(target_os = "linux")]
+    pub use InputController as ImplInputController;
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::*;
+    use std::process::Command;
+
+    /// Linux input controller backed by xdotool. Keeping this backend free of
+    /// link-time X11 dependencies lets native Linux builds work without libxdo-dev.
+    pub struct InputController {
+        current_mode: InputMode,
+        /// Mouse movement speed in pixels per command.
+        mouse_speed: i32,
+    }
+
+    impl InputController {
+        /// Create a new input controller.
+        pub fn new() -> Result<Self, InputError> {
+            if !command_exists("xdotool") {
+                return Err(InputError::InitError(
+                    "Linux input injection requires xdotool at runtime".to_string(),
+                ));
+            }
+
+            Ok(Self {
+                current_mode: InputMode::Mouse,
+                mouse_speed: 5,
+            })
+        }
+
+        pub fn get_mode(&self) -> InputMode {
+            self.current_mode
+        }
+
+        pub fn switch_mode(&mut self, mode: InputMode) {
+            self.current_mode = mode;
+        }
+
+        pub fn toggle_mode(&mut self) -> InputMode {
+            self.current_mode = match self.current_mode {
+                InputMode::Mouse => InputMode::Keyboard,
+                InputMode::Keyboard => InputMode::Mouse,
+            };
+            self.current_mode
+        }
+
+        pub fn set_mouse_speed(&mut self, speed: i32) {
+            self.mouse_speed = speed.clamp(1, 50);
+        }
+
+        pub fn mouse_move(&mut self, movement: MouseMove) {
+            let dx = movement.dx as i32 * self.mouse_speed;
+            let dy = movement.dy as i32 * self.mouse_speed;
+            run_xdotool(&[
+                "mousemove_relative".to_string(),
+                "--".to_string(),
+                dx.to_string(),
+                dy.to_string(),
+            ]);
+        }
+
+        pub fn mouse_click(&mut self, click: MouseClick) {
+            let button = match click.button {
+                MouseButton::Left => 1,
+                MouseButton::Middle => 2,
+                MouseButton::Right => 3,
+            };
+
+            match click.action {
+                ClickAction::Press => run_xdotool(&["mousedown".to_string(), button.to_string()]),
+                ClickAction::Release => run_xdotool(&["mouseup".to_string(), button.to_string()]),
+                ClickAction::Click => run_xdotool(&["click".to_string(), button.to_string()]),
+                ClickAction::DoubleClick => {
+                    run_xdotool(&["click".to_string(), button.to_string()]);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    run_xdotool(&["click".to_string(), button.to_string()]);
+                }
+            }
+        }
+
+        pub fn key_press(&mut self, event: KeyEvent) {
+            self.apply_modifiers(event.modifiers, "keydown");
+            self.key(event.keycode, "keydown");
+        }
+
+        pub fn key_release(&mut self, event: KeyEvent) {
+            self.key(event.keycode, "keyup");
+            self.apply_modifiers(event.modifiers, "keyup");
+        }
+
+        pub fn type_string(&mut self, text: &str) {
+            run_xdotool(&[
+                "type".to_string(),
+                "--delay".to_string(),
+                "0".to_string(),
+                text.to_string(),
+            ]);
+        }
+
+        fn apply_modifiers(&mut self, modifiers: u8, action: &str) {
+            if modifiers & 0x01 != 0 {
+                run_xdotool(&[action.to_string(), "ctrl".to_string()]);
+            }
+            if modifiers & 0x02 != 0 {
+                run_xdotool(&[action.to_string(), "shift".to_string()]);
+            }
+            if modifiers & 0x04 != 0 {
+                run_xdotool(&[action.to_string(), "alt".to_string()]);
+            }
+            if modifiers & 0x08 != 0 {
+                run_xdotool(&[action.to_string(), "super".to_string()]);
+            }
+        }
+
+        fn key(&mut self, keycode: u8, action: &str) {
+            if let Some(name) = xdotool_key_name(keycode) {
+                run_xdotool(&[action.to_string(), name.to_string()]);
+            }
+        }
+
+        pub fn arrow_to_mouse(&mut self, keycode: u8) {
+            let movement = match keycode {
+                0x4F => MouseMove { dx: 1, dy: 0 },
+                0x50 => MouseMove { dx: -1, dy: 0 },
+                0x51 => MouseMove { dx: 0, dy: 1 },
+                0x52 => MouseMove { dx: 0, dy: -1 },
+                _ => return,
+            };
+            self.mouse_move(movement);
+        }
+    }
+
     fn command_exists(program: &str) -> bool {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
             .unwrap_or(false)
     }
 
-    #[cfg(target_os = "linux")]
     fn run_xdotool(args: &[String]) {
         let _ = Command::new("xdotool").args(args).status();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn xdotool_mouse_button(button: EnigoButton) -> u8 {
-        match button {
-            EnigoButton::Left => 1,
-            EnigoButton::Middle => 2,
-            EnigoButton::Right => 3,
-            _ => 1,
-        }
     }
 
     fn xdotool_key_name(keycode: u8) -> Option<&'static str> {
@@ -425,7 +439,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    /// Input controller stub for non-Windows hosts.
+    /// Input controller stub for unsupported hosts.
     pub struct InputController {
         current_mode: InputMode,
         mouse_speed: i32,
@@ -486,7 +500,7 @@ mod imp {
 
 pub use imp::ImplInputController as InputController;
 
-/// Modifier key flags
+/// Modifier key flags.
 pub mod modifiers {
     pub const CTRL: u8 = 0x01;
     pub const SHIFT: u8 = 0x02;
@@ -494,7 +508,7 @@ pub mod modifiers {
     pub const GUI: u8 = 0x08;
 }
 
-/// USB HID keycodes for common keys
+/// USB HID keycodes for common keys.
 pub mod keycodes {
     pub const KEY_A: u8 = 0x04;
     pub const KEY_Z: u8 = 0x1D;

@@ -59,10 +59,11 @@ cargo run --release --bin TUI
 For Linux remote desktop:
 
 - Build dependencies on Debian/Ubuntu:
-  `sudo apt install libxdo-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev`
-- X11/XWayland: `scrap` and `enigo` are preferred.
+  `sudo apt install libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev`
+- X11/XWayland capture uses `scrap` first.
 - wlroots Wayland: install `grim` for screenshot fallback.
-- X11 fallback input: install `xdotool` if `enigo` cannot initialize.
+- X11/XWayland input uses `xdotool` at runtime; no `libxdo-dev` link-time
+  dependency is required for the default Linux build.
 
 Pure Wayland compositors may require explicit desktop permissions or portal
 configuration before capture/input is allowed.

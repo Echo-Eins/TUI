@@ -58,3 +58,18 @@
 - `cross check --target x86_64-unknown-linux-gnu --all-targets` passes with existing warnings.
 - `cross test --target x86_64-unknown-linux-gnu --all-targets` passes with 84 tests after rerunning with a longer timeout.
 - `git diff --check` is clean; Git only reports line-ending warnings from the Windows worktree.
+
+# Native Linux Link Fix
+
+- [x] Diagnose native Linux `rust-lld: unable to find library -lxdo`.
+- [x] Remove mandatory Linux `enigo`/`libxdo` linkage from the default build.
+- [x] Keep Windows `enigo` backend intact.
+- [x] Move Linux input injection to a runtime `xdotool` backend.
+- [x] Update Linux build/runtime docs and Cross image dependencies.
+- [ ] Re-run local and Linux cross verification after the link fix.
+
+## Native Linux Link Finding
+
+- `libxdo` was pulled in by the Linux `enigo` dependency at link time.
+- The code already had an `xdotool` runtime fallback, but fallback code cannot help if the binary cannot link.
+- Default Linux builds should not require `libxdo-dev`; only runtime input injection should require `xdotool`.
