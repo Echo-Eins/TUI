@@ -292,8 +292,8 @@ fn find_intervals(
             intervals.push(Interval {
                 start,
                 end,
-                include_start: endpoint_holds(relation, options, variables, start),
-                include_end: endpoint_holds(relation, options, variables, end),
+                include_start: interval_endpoint_included(relation, options, variables, start),
+                include_end: interval_endpoint_included(relation, options, variables, end),
             });
         }
     }
@@ -338,7 +338,9 @@ fn bisect_root(
         if !y_mid.is_finite() {
             return None;
         }
-        if near_zero(y_mid) || (high - low).abs() < root_dedup_tolerance(options.min, options.max) {
+        if near_zero(y_mid)
+            || (high - low).abs() < root_precision_tolerance(options.min, options.max)
+        {
             return Some(mid);
         }
         if y_low.signum() == y_mid.signum() {
@@ -412,6 +414,22 @@ fn relation_holds(op: RelationOp, residual: f64) -> bool {
     }
 }
 
+fn interval_endpoint_included(
+    relation: &Relation,
+    options: &SolveOptions,
+    variables: &BTreeMap<String, f64>,
+    value: f64,
+) -> bool {
+    if is_domain_endpoint(value, options.min) || is_domain_endpoint(value, options.max) {
+        return endpoint_holds(relation, options, variables, value);
+    }
+
+    matches!(
+        relation.op,
+        RelationOp::LessEqual | RelationOp::GreaterEqual
+    )
+}
+
 fn endpoint_holds(
     relation: &Relation,
     options: &SolveOptions,
@@ -429,6 +447,14 @@ fn near_zero(value: f64) -> bool {
 
 fn root_dedup_tolerance(min: f64, max: f64) -> f64 {
     ((max - min).abs() * 1e-9).max(1e-9)
+}
+
+fn root_precision_tolerance(min: f64, max: f64) -> f64 {
+    ((max - min).abs() * 1e-12).max(1e-12)
+}
+
+fn is_domain_endpoint(value: f64, endpoint: f64) -> bool {
+    (value - endpoint).abs() <= root_precision_tolerance(endpoint, value)
 }
 
 fn push_root(roots: &mut Vec<f64>, root: f64, min: f64, max: f64) {

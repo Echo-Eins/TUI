@@ -86,6 +86,7 @@
 
 - [x] First implementation milestone completed: Network graph bug fix plus Console extension platform foundation.
 - [x] Second implementation milestone completed: first useful built-in math module with `:base`, `:calc`, and shared parser/AST.
+- [x] Third implementation milestone completed: exact-first math output, `-num`, `-mb`, formula rendering, and `for <var>` formula target support.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -152,7 +153,10 @@
 - [ ] `:mod disable <name>` disables an optional module where allowed.
 - [ ] `:mod reload <name>` reloads user modules without restarting the app.
 - [x] `:calc <expr>` evaluates engineering calculator expressions.
-- [ ] `:formula <expr>` renders a LaTeX-like terminal formula without evaluating when requested.
+- [x] `:calc <expr> -num` or `:calc <expr> --num` explicitly requests numeric approximation.
+- [x] `:calc <expr> -mb` opens a rich Math Block instead of compact Console output.
+- [x] `:calc formula <expr> [for <var>] -mb` renders a LaTeX-like formula block with target variable support.
+- [x] `:formula <expr> [for <var>]` renders a LaTeX-like terminal formula without evaluating when requested.
 - [ ] `:plot <expr> [domain/options]` opens or prints a mathematical function plot.
 - [x] `:base <value> from <base> to <base|range>` converts between numeral systems from base 2 to base 16.
 - [ ] `:units <expr>` is a later optional engineering unit-conversion command.
@@ -215,6 +219,11 @@
 - [x] Support one-variable numeric inequality solving over bounded domains, for example `:calc solve sin(x) > 0 from -pi..pi`.
 - [x] Keep systems of equations, differential equations, symbolic algebra, and calculus for later phases after the function modulator exists.
 - [x] Support clear diagnostics with caret/location where possible.
+- [x] Default `:calc` output should stay compact and exact-first.
+- [x] Numeric approximation should require `-num`/`--num` or an explicit Math Block action.
+- [x] Rich Math Block should require `-mb` and should not be the default command output.
+- [x] Math Block output must include input, exact result, LaTeX-like rendering, ASCII fallback, numeric approximation, domain, and vars.
+- [x] Math Block vars section must support multiple variables from the start so systems of equations can reuse the layout later.
 - [ ] Support integer and floating-point paths where it matters for exactness.
 - [ ] Consider rational/exact arithmetic as a later phase if the dependency and UX are justified.
 - [ ] Consider complex numbers as a later phase after real-valued math is stable.
@@ -238,15 +247,17 @@
 
 ## LaTeX-Like Formula Rendering
 
-- [ ] Add a terminal formula renderer driven by the parsed expression AST.
-- [ ] Support pretty powers where terminal width and font support make it readable.
+- [x] Add a terminal formula renderer driven by the parsed expression AST.
+- [x] Treat LaTeX-like rendering as production UI: width-aware layout tree, deterministic fallback, no overflow, no broken borders, no glyph assumptions without fallback.
+- [x] Support pretty powers where terminal width and font support make it readable.
 - [ ] Support subscripts/indices where the expression model needs them.
-- [ ] Support fractions with multi-line numerator/denominator when there is enough height.
-- [ ] Support roots, grouped terms, and function calls.
-- [ ] Provide an ASCII fallback for terminals where Unicode width or glyph support is unsafe.
-- [ ] Use width-aware layout logic, for example via `unicode-width`, before drawing into ratatui buffers.
-- [ ] Never let formula rendering overflow into borders or neighboring blocks.
-- [ ] Expose pretty output through `:formula <expr>` and optionally `:calc --pretty <expr>`.
+- [x] Support fractions with multi-line numerator/denominator when there is enough height.
+- [x] Support roots, grouped terms, and function calls.
+- [x] Provide an ASCII fallback for terminals where Unicode width or glyph support is unsafe.
+- [x] Use width-aware layout logic, for example via `unicode-width`, before drawing into ratatui buffers.
+- [x] Never let formula rendering overflow into borders or neighboring blocks.
+- [x] Expose pretty output through `:formula <expr>` and rich `:calc ... -mb` output.
+- [x] Expose rich formula/result layout through `:calc ... -mb` and keep compact `:calc` output plain.
 - [ ] Add snapshot tests for powers, fractions, nested expressions, narrow width fallback, and wide width output.
 
 ## Mini-Games
@@ -325,6 +336,8 @@
 - [ ] Keep color meaningful, not decorative noise.
 - [ ] Ensure all non-ASCII glyphs have fallback or are proven width-safe.
 - [ ] Add render tests for common terminal sizes.
+- [x] Math Block must be visually heavier than normal output but still Console-native: one functional bordered block, stable title/status rows, and no nested decorative boxes.
+- [x] Math Block must degrade cleanly at narrow widths by prioritizing result, fallback, and numeric value over secondary metadata.
 
 ## Network Graph Title/Border Bug
 
@@ -380,3 +393,11 @@
 - Math milestone verification is intentionally static-only per current request; do not run `cargo test` or full compilation in this step.
 - Math module implementation completed with a shared local Pratt parser/AST/evaluator, i128-backed base conversion, one-variable numeric equation solving, and bounded-domain inequality solving.
 - Static-only verification passed for this milestone: `cargo check --all-targets` and `cross check --target x86_64-unknown-linux-gnu --all-targets`.
+- Solver correction: strict inequality interval brackets now treat internal roots as open boundaries instead of trusting floating-point sign at an approximate root.
+- Solver correction: equality no-root output now explicitly says the numeric solver only searched the displayed bounded domain.
+- Math Block design correction: rich block rendering is opt-in via `-mb`; normal `:calc` remains compact exact-first output, and `-num`/`--num` controls approximation.
+- Formula target requirement: complex formulas with multiple variables must accept `for <var>`, for example `:calc formula "(-b + sqrt(b^2 - 4*a*c)) / (2*a)" for x -mb`.
+- Exact-first output implemented for compact `:calc`; `-num` appends approximations and `-mb` renders a bounded Math Block with input, exact result, formula, fallback, approx, domain, and vars.
+- Formula renderer now uses a measured AST layout tree for fractions, powers, square roots, grouped terms, and function calls, then falls back to ASCII when width is insufficient.
+- Exact solver now handles linear/quadratic polynomial equations, basic radical equations such as `sqrt(x)=7` and `sqrt(x)/8=49`, and basic sine/cosine zero-comparison families with pi-form intervals.
+- Linux `cross check` hit Docker BuildKit `lease does not exist` once, then passed on rerun; Rust static checks passed.
