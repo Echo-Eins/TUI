@@ -88,6 +88,7 @@
 - [x] Second implementation milestone completed: first useful built-in math module with `:base`, `:calc`, and shared parser/AST.
 - [x] Third implementation milestone completed: exact-first math output, `-num`, `-mb`, formula rendering, and `for <var>` formula target support.
 - [x] Correction pass: fix relation-level `for <var>`, symbolic parameters, exact trigonometric families, and Math Block root rendering.
+- [x] Fourth implementation milestone: finish formula command surface and implement the first production-grade `:plot` math modulator.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -180,29 +181,31 @@
 
 ## Mathematical Function Modulator / Plotter
 
-- [ ] Implement the "modulator" as a ratatui-based mathematical function plotter, not just a generic module switcher.
-- [ ] Support commands such as `:plot sin(x)`, `:plot x^2 from -10..10`, and `:plot exp(-x^2) --samples auto`.
-- [ ] Support domain syntax for x ranges, for example `from -10..10`, `x=-pi..pi`, or a clearly documented equivalent.
-- [ ] Support sample count options with strict min/max limits.
-- [ ] Support render modes: line, points, bars, and compact sparkline where useful.
+- [x] Implement the "modulator" as a ratatui-style mathematical function plotter, not just a generic module switcher.
+- [x] Support commands such as `:plot sin(x)`, `:plot x^2 from -10..10`, and `:plot exp(-x^2) --samples auto`.
+- [x] Support domain syntax for x ranges, for example `from -10..10`, `x=-pi..pi`, or a clearly documented equivalent.
+- [x] Support y-range syntax such as `y=-2..2` for manual vertical bounds.
+- [x] Support sample count options with strict min/max limits.
+- [x] Support render modes: line, points, bars, and compact sparkline where useful.
+- [x] Add a bounded plot cache keyed by expression, variable, domain, samples, render mode, and canvas size.
 - [ ] Support pan and zoom for interactive plot sessions after the non-interactive renderer is stable.
 - [ ] Support cursor inspection of approximate x/y values in interactive plot sessions.
 - [ ] Support multiple functions on one plot after the single-function path is stable.
-- [ ] Support constants: `pi`, `e`, `tau`.
-- [ ] Support arithmetic operators, powers, unary operators, parentheses, and common functions.
-- [ ] Support trigonometric functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`.
-- [ ] Support hyperbolic functions: `sinh`, `cosh`, `tanh`.
-- [ ] Support logarithmic/exponential functions: `ln`, `log`, `log10`, `exp`.
-- [ ] Support numeric helpers: `sqrt`, `abs`, `floor`, `ceil`, `round`, `min`, `max`.
+- [x] Support constants: `pi`, `e`, `tau`.
+- [x] Support arithmetic operators, powers, unary operators, parentheses, and common functions.
+- [x] Support trigonometric functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`.
+- [x] Support hyperbolic functions: `sinh`, `cosh`, `tanh`.
+- [x] Support logarithmic/exponential functions: `ln`, `log`, `log10`, `exp`.
+- [x] Support numeric helpers: `sqrt`, `abs`, `floor`, `ceil`, `round`, `min`, `max`.
 - [ ] Support piecewise expressions only after the core parser and renderer are verified.
-- [ ] Detect discontinuities and asymptotes without drawing misleading vertical walls.
-- [ ] Clip out-of-range values safely.
-- [ ] Represent NaN and infinite values explicitly in sampling logic, not as panics.
-- [ ] Compute y-range automatically with robust handling for outliers.
-- [ ] Allow manual y-range when automatic range is not useful.
-- [ ] Render axes and labels when space allows.
-- [ ] Degrade gracefully in very small terminal sizes.
-- [ ] Add unit tests for expression parsing, sampling, discontinuity handling, clipping, and range selection.
+- [x] Detect discontinuities and asymptotes without drawing misleading vertical walls.
+- [x] Clip out-of-range values safely.
+- [x] Represent NaN and infinite values explicitly in sampling logic, not as panics.
+- [x] Compute y-range automatically with robust handling for outliers.
+- [x] Allow manual y-range when automatic range is not useful.
+- [x] Render axes and labels when space allows.
+- [x] Degrade gracefully in very small terminal sizes.
+- [x] Add unit tests for expression parsing, sampling, discontinuity handling, clipping, and range selection.
 - [ ] Add render/snapshot tests for narrow, medium, and wide terminal plot widgets.
 
 ## Engineering Calculator
@@ -256,7 +259,7 @@
 - [x] Add a terminal formula renderer driven by the parsed expression AST.
 - [x] Treat LaTeX-like rendering as production UI: width-aware layout tree, deterministic fallback, no overflow, no broken borders, no glyph assumptions without fallback.
 - [x] Support pretty powers where terminal width and font support make it readable.
-- [ ] Support subscripts/indices where the expression model needs them.
+- [x] Support subscripts/indices where the expression model needs them.
 - [x] Support fractions with multi-line numerator/denominator when there is enough height.
 - [x] Support roots, grouped terms, and function calls.
 - [x] Provide an ASCII fallback for terminals where Unicode width or glyph support is unsafe.
@@ -264,6 +267,7 @@
 - [x] Never let formula rendering overflow into borders or neighboring blocks.
 - [x] Expose pretty output through `:formula <expr>` and rich `:calc ... -mb` output.
 - [x] Expose rich formula/result layout through `:calc ... -mb` and keep compact `:calc` output plain.
+- [x] Expose `:calc --pretty <expr>` as an alias for formula rendering through the same AST renderer.
 - [ ] Add snapshot tests for powers, fractions, nested expressions, narrow width fallback, and wide width output.
 
 ## Mini-Games
@@ -414,3 +418,8 @@
 - Math Block formula sections now render exact result expressions, so roots/fractions are shown from the solution rather than repeating the input equation.
 - Math Block top borders now compute width exactly and no longer self-clamp into `...+`.
 - Correction pass static verification passed: `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`; existing warnings remain outside this math module work.
+- Formula renderer readiness check: `:formula <expr>`, AST-driven powers/fractions/roots, and ASCII/width-safe fallback were already present; this milestone added `:calc --pretty <expr>` and identifier-index layout for names such as `x_1`.
+- Plotter milestone added `:plot` with bounded sampling, explicit `from a..b` and `x=a..b` domains, manual `y=a..b`, line/points/bars/sparkline modes, axes/labels, robust auto y-range, clipping, invalid-value handling, and discontinuity breaks.
+- Plot cache is bounded and keyed by expression, target variable, domain, y-range, sample count, mode, canvas size, and assigned parameter values.
+- Interactive plot zoom/pan remains blocked by the existing ConsoleSession integration gap: `StartSession` is defined but not yet wired into Console event/render handling, so this milestone does not expose fake interactive controls.
+- Plotter milestone static verification passed: `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, `git diff --check`, and a direct trailing-whitespace scan for the new `src/app/math/plot.rs` file.

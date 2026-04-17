@@ -8,7 +8,9 @@ use crate::app::math::{
     convert_base, format_exact_number, format_expr, format_number as format_math_number,
     format_pi_multiple, parse_expression, parse_relation, relation_fallback, render_formula,
     solve_exact, solve_relation, BaseConversion, EvalContext, ExactSolveReport, FormulaRender,
-    Interval, MathError, Relation, SolveOptions, SolveReport,
+    Interval, MathError, PlotCache, PlotMode, PlotRender, PlotRequest, Relation, SolveOptions,
+    SolveReport, MAX_PLOT_HEIGHT, MAX_PLOT_SAMPLES, MAX_PLOT_WIDTH, MIN_PLOT_HEIGHT,
+    MIN_PLOT_SAMPLES, MIN_PLOT_WIDTH,
 };
 
 use super::{
@@ -25,6 +27,7 @@ pub(super) struct MathExtension {
 struct MathMemory {
     ans: Option<f64>,
     variables: BTreeMap<String, f64>,
+    plot_cache: PlotCache,
 }
 
 impl MathMemory {
@@ -41,6 +44,7 @@ impl MathMemory {
 struct CalcFlags {
     numeric: bool,
     math_block: bool,
+    pretty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +68,25 @@ struct FormulaQuery {
 }
 
 #[derive(Debug, Clone)]
+struct PlotQuery {
+    expression: String,
+    expr: crate::app::math::Expr,
+    variable: Option<String>,
+    x_range: Option<(f64, f64)>,
+    y_range: Option<(f64, f64)>,
+    samples: PlotSampleSetting,
+    mode: PlotMode,
+    width: Option<usize>,
+    height: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlotSampleSetting {
+    Auto,
+    Count(usize),
+}
+
+#[derive(Debug, Clone)]
 struct MathBlock {
     title: String,
     mode: String,
@@ -83,9 +106,9 @@ impl MathExtension {
             metadata: ExtensionMetadata {
                 id: "math",
                 title: "Math",
-                version: "0.2.0",
+                version: "0.3.0",
                 kind: ExtensionKind::Builtin,
-                description: "Engineering calculator, numeral base conversion, formula rendering, and shared math parser.",
+                description: "Engineering calculator, numeral base conversion, formula rendering, plotting, and shared math parser.",
                 commands: vec![
                     ConsoleCommandSpec {
                         name: "base",
@@ -96,7 +119,7 @@ impl MathExtension {
                     ConsoleCommandSpec {
                         name: "calc",
                         summary: "Evaluate expressions, render formulas, and solve equations.",
-                        usage: ":calc <expr> [-num] [-mb] | :calc formula <expr> [for x] [-mb] | :calc solve <relation> [for x] [from a..b]",
+                        usage: ":calc <expr> [-num] [-mb] | :calc --pretty <expr> | :calc formula <expr> [for x] [-mb] | :calc solve <relation> [for x] [from a..b]",
                         tags: &["math", "calculator", "solver", "formula"],
                     },
                     ConsoleCommandSpec {
@@ -104,6 +127,12 @@ impl MathExtension {
                         summary: "Render a LaTeX-like terminal formula.",
                         usage: ":formula <expr> [for <var>] [-mb]",
                         tags: &["math", "formula"],
+                    },
+                    ConsoleCommandSpec {
+                        name: "plot",
+                        summary: "Render a bounded terminal function plot.",
+                        usage: ":plot <expr> [for x] [from a..b|x=a..b] [y=a..b] [--samples auto|N] [--mode line|points|bars|sparkline]",
+                        tags: &["math", "plot", "modulator"],
                     },
                 ],
                 tags: &["math", "builtin"],
@@ -121,11 +150,92 @@ impl MathExtension {
         }
     }
 
+    fn execute_plot(&self, args: &[String], ctx: &ConsoleContext) -> ConsoleCommandResponse {
+        let query = match parse_plot_query(args) {
+            Ok(query) => query,
+            Err(error) => return ConsoleCommandResponse::error(error.message, 2),
+        };
+
+        let mut memory = self.lock_memory();
+        let variables = memory.evaluation_variables();
+        let variable = match choose_plot_variable(&query, &variables) {
+            Ok(variable) => variable,
+            Err(error) => return ConsoleCommandResponse::error(error.message, 2),
+        };
+        let unresolved = query
+            .expr
+            .variables()
+            .into_iter()
+            .filter(|name| name != &variable)
+            .filter(|name| !variables.contains_key(name))
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            return ConsoleCommandResponse::error(
+                format!(
+                    "plot has unresolved parameters: {}; assign them with ':calc let' or plot for a single target variable",
+                    unresolved.join(", ")
+                ),
+                2,
+            );
+        }
+
+        let block_width = math_block_width(ctx);
+        let content_width = block_width
+            .saturating_sub(6)
+            .clamp(MIN_PLOT_WIDTH, MAX_PLOT_WIDTH);
+        let plot_width = query
+            .width
+            .unwrap_or(content_width)
+            .clamp(MIN_PLOT_WIDTH, content_width);
+        let default_height = if ctx.theme.compact_mode { 10 } else { 14 };
+        let plot_height = query
+            .height
+            .unwrap_or(default_height)
+            .clamp(MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT);
+        let samples = match query.samples {
+            PlotSampleSetting::Auto => (plot_width * 4).clamp(MIN_PLOT_SAMPLES, MAX_PLOT_SAMPLES),
+            PlotSampleSetting::Count(samples) => samples.clamp(MIN_PLOT_SAMPLES, MAX_PLOT_SAMPLES),
+        };
+
+        let request = PlotRequest {
+            expression: query.expression.clone(),
+            expr: query.expr.clone(),
+            variable,
+            x_min: query
+                .x_range
+                .map(|range| range.0)
+                .unwrap_or(-std::f64::consts::TAU),
+            x_max: query
+                .x_range
+                .map(|range| range.1)
+                .unwrap_or(std::f64::consts::TAU),
+            y_range: query.y_range,
+            samples,
+            width: plot_width,
+            height: plot_height,
+            mode: query.mode,
+        };
+
+        match memory.plot_cache.render(&request, &variables) {
+            Ok((render, cache_hit)) => ConsoleCommandResponse::ok(render_plot_block(
+                &request,
+                &render,
+                cache_hit,
+                block_width,
+            )),
+            Err(error) => math_error(&query.expression, error),
+        }
+    }
+
     fn execute_calc(&self, args: &[String], ctx: &ConsoleContext) -> ConsoleCommandResponse {
         let input = parse_calc_input(args);
         let body = input.body.trim();
         if body.is_empty() || body.eq_ignore_ascii_case("help") {
             return ConsoleCommandResponse::ok(calc_help());
+        }
+
+        if input.flags.pretty {
+            return self.execute_formula_text(body, input.flags, ctx);
         }
 
         if !input.flags.math_block && !input.flags.numeric && body.eq_ignore_ascii_case("vars") {
@@ -529,6 +639,7 @@ impl ConsoleExtension for MathExtension {
             "base" => self.execute_base(args),
             "calc" => self.execute_calc(args, ctx),
             "formula" => self.execute_formula_command(args, ctx),
+            "plot" => self.execute_plot(args, ctx),
             _ => ConsoleCommandResponse::error(
                 format!("math extension does not handle :{command}"),
                 127,
@@ -544,6 +655,7 @@ fn parse_calc_input(args: &[String]) -> CalcInput {
         match arg.as_str() {
             "-mb" | "--mb" | "--math-block" => flags.math_block = true,
             "-num" | "--num" | "--numeric" => flags.numeric = true,
+            "--pretty" | "-pretty" => flags.pretty = true,
             _ => body.push(arg.clone()),
         }
     }
@@ -569,6 +681,165 @@ fn parse_formula_query(input: &str) -> Result<FormulaQuery, MathError> {
         return Err(MathError::new("formula expression is empty"));
     }
     Ok(FormulaQuery { expression, target })
+}
+
+fn parse_plot_query(args: &[String]) -> Result<PlotQuery, MathError> {
+    let mut body = Vec::new();
+    let mut samples = PlotSampleSetting::Auto;
+    let mut mode = PlotMode::Line;
+    let mut width = None;
+    let mut height = None;
+    let mut x_range = None;
+    let mut y_range = None;
+    let mut idx = 0usize;
+
+    while idx < args.len() {
+        let arg = &args[idx];
+        match arg.as_str() {
+            "--line" => mode = PlotMode::Line,
+            "--points" => mode = PlotMode::Points,
+            "--bars" => mode = PlotMode::Bars,
+            "--spark" | "--sparkline" => mode = PlotMode::Sparkline,
+            "--samples" => {
+                idx += 1;
+                let Some(value) = args.get(idx) else {
+                    return Err(MathError::new("--samples expects auto or a number"));
+                };
+                samples = parse_plot_samples(value)?;
+            }
+            "--mode" => {
+                idx += 1;
+                let Some(value) = args.get(idx) else {
+                    return Err(MathError::new(
+                        "--mode expects line, points, bars, or sparkline",
+                    ));
+                };
+                mode = parse_plot_mode(value)?;
+            }
+            "--width" => {
+                idx += 1;
+                let Some(value) = args.get(idx) else {
+                    return Err(MathError::new("--width expects a number"));
+                };
+                width = Some(parse_plot_dimension(value, "width")?);
+            }
+            "--height" => {
+                idx += 1;
+                let Some(value) = args.get(idx) else {
+                    return Err(MathError::new("--height expects a number"));
+                };
+                height = Some(parse_plot_dimension(value, "height")?);
+            }
+            _ if arg.starts_with("--samples=") => {
+                samples = parse_plot_samples(&arg["--samples=".len()..])?;
+            }
+            _ if arg.starts_with("--mode=") => {
+                mode = parse_plot_mode(&arg["--mode=".len()..])?;
+            }
+            _ if arg.starts_with("--width=") => {
+                width = Some(parse_plot_dimension(&arg["--width=".len()..], "width")?);
+            }
+            _ if arg.starts_with("--height=") => {
+                height = Some(parse_plot_dimension(&arg["--height=".len()..], "height")?);
+            }
+            _ if arg.starts_with("x=") => {
+                x_range = Some(parse_domain(&arg["x=".len()..])?);
+            }
+            _ if arg.starts_with("y=") => {
+                y_range = Some(parse_domain(&arg["y=".len()..])?);
+            }
+            _ => body.push(arg.clone()),
+        }
+        idx += 1;
+    }
+
+    let mut expression_text = body.join(" ");
+    if let Some((before, after)) = split_keyword_outside(&expression_text, " from ") {
+        x_range = Some(parse_domain(after.trim())?);
+        expression_text = before.trim().to_string();
+    }
+
+    let (expression_text, variable) =
+        if let Some((before, after)) = split_keyword_outside(&expression_text, " for ") {
+            let variable = after.trim().to_ascii_lowercase();
+            if !crate::app::math::expr::is_valid_identifier(&variable) {
+                return Err(MathError::new(format!(
+                    "invalid plot variable '{variable}'"
+                )));
+            }
+            (before.trim().to_string(), Some(variable))
+        } else {
+            (expression_text.trim().to_string(), None)
+        };
+
+    if expression_text.is_empty() {
+        return Err(MathError::new("plot expression is empty"));
+    }
+    let expr = parse_expression(&expression_text)?;
+
+    Ok(PlotQuery {
+        expression: expression_text,
+        expr,
+        variable,
+        x_range,
+        y_range,
+        samples,
+        mode,
+        width,
+        height,
+    })
+}
+
+fn parse_plot_samples(input: &str) -> Result<PlotSampleSetting, MathError> {
+    if input.eq_ignore_ascii_case("auto") {
+        return Ok(PlotSampleSetting::Auto);
+    }
+    let samples = input
+        .parse::<usize>()
+        .map_err(|_| MathError::new(format!("invalid plot sample count '{input}'")))?;
+    if !(MIN_PLOT_SAMPLES..=MAX_PLOT_SAMPLES).contains(&samples) {
+        return Err(MathError::new(format!(
+            "plot samples must be in {MIN_PLOT_SAMPLES}..{MAX_PLOT_SAMPLES}"
+        )));
+    }
+    Ok(PlotSampleSetting::Count(samples))
+}
+
+fn parse_plot_mode(input: &str) -> Result<PlotMode, MathError> {
+    PlotMode::parse(input).ok_or_else(|| MathError::new(format!("invalid plot mode '{input}'")))
+}
+
+fn parse_plot_dimension(input: &str, name: &str) -> Result<usize, MathError> {
+    input
+        .parse::<usize>()
+        .map_err(|_| MathError::new(format!("invalid plot {name} '{input}'")))
+}
+
+fn choose_plot_variable(
+    query: &PlotQuery,
+    variables: &BTreeMap<String, f64>,
+) -> Result<String, MathError> {
+    if let Some(variable) = &query.variable {
+        return Ok(variable.clone());
+    }
+
+    let expr_vars = query.expr.variables();
+    let unresolved = expr_vars
+        .iter()
+        .filter(|name| !variables.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unresolved.len() == 1 {
+        return Ok(unresolved[0].clone());
+    }
+    if unresolved.is_empty() || unresolved.iter().any(|name| name == "x") {
+        return Ok("x".to_string());
+    }
+
+    Err(MathError::new(format!(
+        "plot expects one target variable, found {}; use 'for <name>'",
+        unresolved.len()
+    )))
 }
 
 fn parse_solve_query_options(input: &str) -> Result<(&str, SolveQueryOptions), MathError> {
@@ -662,6 +933,62 @@ fn base_output(conversion: BaseConversion) -> Vec<OutputLine> {
     lines
 }
 
+fn render_plot_block(
+    request: &PlotRequest,
+    render: &PlotRender,
+    cache_hit: bool,
+    width: usize,
+) -> Vec<OutputLine> {
+    let width = width.clamp(48, 120);
+    let cache = if cache_hit { "hit" } else { "miss" };
+    let mut lines = Vec::new();
+    lines.push(OutputLine::stdout(top_border("PLOT / function", width)));
+    lines.push(row(
+        &format!(
+            "mode {:<10} variable {:<8} samples {:<5} cache {}",
+            render.mode.label(),
+            request.variable,
+            render.samples,
+            cache
+        ),
+        width,
+    ));
+    lines.push(row(
+        &format!(
+            "x [{}..{}]   y [{}..{}]",
+            format_pi_multiple(render.x_min),
+            format_pi_multiple(render.x_max),
+            format_math_number(render.y_min),
+            format_math_number(render.y_max)
+        ),
+        width,
+    ));
+    lines.push(row(
+        &format!(
+            "finite {} invalid {} clipped {} breaks {}",
+            render.finite_samples,
+            render.invalid_samples,
+            render.clipped_samples,
+            render.discontinuities
+        ),
+        width,
+    ));
+    section(&mut lines, "Input", &[request.expression.clone()], width);
+    section(&mut lines, "Canvas", &render.canvas, width);
+    lines.push(row(
+        "actions: --mode line|points|bars|sparkline | --samples auto|N | x=a..b | y=a..b",
+        width,
+    ));
+    lines.push(OutputLine::stdout(bottom_border(width)));
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.text = clamp_display_width(&line.text, width);
+            line
+        })
+        .collect()
+}
+
 fn calc_help() -> Vec<OutputLine> {
     vec![
         OutputLine::system("Engineering calculator"),
@@ -670,6 +997,7 @@ fn calc_help() -> Vec<OutputLine> {
         OutputLine::stdout(":calc solve x^2 - 4 = 0 for x from -10..10 -mb"),
         OutputLine::stdout(":calc solve sin(x) > 0 from -pi..pi"),
         OutputLine::stdout(":calc formula \"(-b + sqrt(b^2 - 4*a*c)) / (2*a)\" for x -mb"),
+        OutputLine::stdout(":calc --pretty \"x_1^2 / sqrt(y_2)\""),
         OutputLine::stdout(":formula sqrt(x^2 + y^2) for r -mb"),
         OutputLine::stdout(":calc let a = 42"),
         OutputLine::stdout(":calc vars"),
@@ -1076,5 +1404,34 @@ mod tests {
         let query = parse_formula_query("sqrt(b^2 - 4*a*c) for x").unwrap();
         assert_eq!(query.expression, "sqrt(b^2 - 4*a*c)");
         assert_eq!(query.target.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn parse_calc_input_extracts_pretty_flag() {
+        let input = parse_calc_input(&["--pretty".to_string(), "x_1^2".to_string()]);
+        assert!(input.flags.pretty);
+        assert_eq!(input.body, "x_1^2");
+    }
+
+    #[test]
+    fn parse_plot_query_extracts_ranges_and_mode() {
+        let query = parse_plot_query(&[
+            "sin(x)".to_string(),
+            "from".to_string(),
+            "-pi..pi".to_string(),
+            "y=-1..1".to_string(),
+            "--samples=128".to_string(),
+            "--mode".to_string(),
+            "points".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(query.expression, "sin(x)");
+        assert_eq!(
+            query.x_range,
+            Some((-std::f64::consts::PI, std::f64::consts::PI))
+        );
+        assert_eq!(query.y_range, Some((-1.0, 1.0)));
+        assert_eq!(query.samples, PlotSampleSetting::Count(128));
+        assert_eq!(query.mode, PlotMode::Points);
     }
 }

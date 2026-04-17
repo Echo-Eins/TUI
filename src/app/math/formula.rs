@@ -76,7 +76,7 @@ pub fn format_expr(expr: &Expr) -> String {
 fn render_expr(expr: &Expr) -> LayoutBox {
     match expr {
         Expr::Number(value) => LayoutBox::text(format_number_literal(*value)),
-        Expr::Variable(name) => LayoutBox::text(name.clone()),
+        Expr::Variable(name) => render_identifier(name),
         Expr::Unary { op, expr } => match op {
             UnaryOp::Positive => render_expr(expr),
             UnaryOp::Negative => hstack(vec![LayoutBox::text("-"), render_factor(expr)]),
@@ -130,6 +130,31 @@ fn render_factor(expr: &Expr) -> LayoutBox {
             render_expr(expr),
             LayoutBox::text(")"),
         ]),
+    }
+}
+
+fn render_identifier(name: &str) -> LayoutBox {
+    let Some((base, subscript)) = split_identifier_subscript(name) else {
+        return LayoutBox::text(name.to_string());
+    };
+    hstack(vec![
+        LayoutBox::text(base.to_string()),
+        subscript_box(subscript.to_string()),
+    ])
+}
+
+fn split_identifier_subscript(name: &str) -> Option<(&str, &str)> {
+    let (base, subscript) = name.split_once('_')?;
+    if base.is_empty() || subscript.is_empty() || subscript.contains('_') {
+        return None;
+    }
+    Some((base, subscript))
+}
+
+fn subscript_box(value: String) -> LayoutBox {
+    LayoutBox {
+        lines: vec![" ".repeat(UnicodeWidthStr::width(value.as_str())), value],
+        baseline: 0,
     }
 }
 
