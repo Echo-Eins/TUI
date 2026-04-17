@@ -20,9 +20,10 @@ pub fn solve_exact(
     variables: &BTreeMap<String, f64>,
     domain: Option<(f64, f64)>,
 ) -> Option<ExactSolveReport> {
-    solve_exact_trig(relation, variable, domain)
+    solve_exact_trig(relation, variable, variables, domain)
         .or_else(|| solve_exact_radical(relation, variable, variables, domain))
         .or_else(|| solve_exact_polynomial(relation, variable, variables, domain))
+        .or_else(|| solve_exact_symbolic_polynomial(relation, variable, variables, domain))
 }
 
 fn solve_exact_radical(
@@ -118,11 +119,367 @@ fn solve_exact_polynomial(
     })
 }
 
+fn solve_exact_symbolic_polynomial(
+    relation: &Relation,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+    domain: Option<(f64, f64)>,
+) -> Option<ExactSolveReport> {
+    if relation.op != RelationOp::Equal {
+        return None;
+    }
+
+    let left = symbolic_polynomial_coeffs(&relation.left, variable, variables)?;
+    let right = symbolic_polynomial_coeffs(&relation.right, variable, variables)?;
+    let coeffs = left.sub(&right);
+    let [c, b, a] = coeffs.coeffs;
+
+    if !sym_is_zero(&a) {
+        let roots = symbolic_quadratic_roots(variable, &a, &b, &c);
+        return Some(ExactSolveReport {
+            variable: variable.to_string(),
+            method: "quadratic-symbolic",
+            status: "symbolic",
+            exact_lines: roots,
+            numeric_lines: vec![
+                "Symbolic form assumes non-zero denominators; assign parameter values for degenerate cases."
+                    .to_string(),
+                "Assign parameters with ':calc let ...' to request numeric approximation."
+                    .to_string(),
+            ],
+            domain,
+        });
+    }
+
+    if !sym_is_zero(&b) {
+        return Some(ExactSolveReport {
+            variable: variable.to_string(),
+            method: "linear-symbolic",
+            status: "symbolic",
+            exact_lines: vec![format!("{variable} = {}", sym_div(&sym_neg(&c), &b))],
+            numeric_lines: vec![
+                "Symbolic form assumes non-zero denominators; assign parameter values for degenerate cases."
+                    .to_string(),
+                "Assign parameters with ':calc let ...' to request numeric approximation."
+                    .to_string(),
+            ],
+            domain,
+        });
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolicPoly {
+    coeffs: [String; 3],
+}
+
+impl SymbolicPoly {
+    fn zero() -> Self {
+        Self {
+            coeffs: std::array::from_fn(|_| "0".to_string()),
+        }
+    }
+
+    fn constant(value: impl Into<String>) -> Self {
+        let mut poly = Self::zero();
+        poly.coeffs[0] = value.into();
+        poly
+    }
+
+    fn target_variable() -> Self {
+        let mut poly = Self::zero();
+        poly.coeffs[1] = "1".to_string();
+        poly
+    }
+
+    fn add(&self, rhs: &Self) -> Self {
+        Self {
+            coeffs: std::array::from_fn(|idx| sym_add(&self.coeffs[idx], &rhs.coeffs[idx])),
+        }
+    }
+
+    fn sub(&self, rhs: &Self) -> Self {
+        Self {
+            coeffs: std::array::from_fn(|idx| sym_sub(&self.coeffs[idx], &rhs.coeffs[idx])),
+        }
+    }
+
+    fn neg(&self) -> Self {
+        Self {
+            coeffs: std::array::from_fn(|idx| sym_neg(&self.coeffs[idx])),
+        }
+    }
+
+    fn mul(&self, rhs: &Self) -> Option<Self> {
+        let mut out: [String; 3] = std::array::from_fn(|_| "0".to_string());
+        for lhs_degree in 0..=2 {
+            for rhs_degree in 0..=2 {
+                let degree = lhs_degree + rhs_degree;
+                let product = sym_mul(&self.coeffs[lhs_degree], &rhs.coeffs[rhs_degree]);
+                if sym_is_zero(&product) {
+                    continue;
+                }
+                if degree > 2 {
+                    return None;
+                }
+                out[degree] = sym_add(&out[degree], &product);
+            }
+        }
+        Some(Self { coeffs: out })
+    }
+
+    fn div_scalar(&self, divisor: &str) -> Option<Self> {
+        if sym_is_zero(divisor) {
+            return None;
+        }
+        Some(Self {
+            coeffs: std::array::from_fn(|idx| sym_div(&self.coeffs[idx], divisor)),
+        })
+    }
+
+    fn pow(&self, power: i32) -> Option<Self> {
+        match power {
+            0 => Some(Self::constant("1")),
+            1 => Some(self.clone()),
+            2 => self.mul(self),
+            _ => None,
+        }
+    }
+}
+
+fn symbolic_polynomial_coeffs(
+    expr: &Expr,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<SymbolicPoly> {
+    match expr {
+        Expr::Number(value) => Some(SymbolicPoly::constant(format_exact_number(*value))),
+        Expr::Variable(name) if name == variable => Some(SymbolicPoly::target_variable()),
+        Expr::Variable(name) => variables
+            .get(name)
+            .map(|value| SymbolicPoly::constant(format_exact_number(*value)))
+            .or_else(|| Some(SymbolicPoly::constant(name.clone()))),
+        Expr::Unary { op, expr } => {
+            let poly = symbolic_polynomial_coeffs(expr, variable, variables)?;
+            match op {
+                UnaryOp::Positive => Some(poly),
+                UnaryOp::Negative => Some(poly.neg()),
+            }
+        }
+        Expr::Binary { op, left, right } => match op {
+            BinaryOp::Add => {
+                let lhs = symbolic_polynomial_coeffs(left, variable, variables)?;
+                let rhs = symbolic_polynomial_coeffs(right, variable, variables)?;
+                Some(lhs.add(&rhs))
+            }
+            BinaryOp::Subtract => {
+                let lhs = symbolic_polynomial_coeffs(left, variable, variables)?;
+                let rhs = symbolic_polynomial_coeffs(right, variable, variables)?;
+                Some(lhs.sub(&rhs))
+            }
+            BinaryOp::Multiply => {
+                let lhs = symbolic_polynomial_coeffs(left, variable, variables)?;
+                let rhs = symbolic_polynomial_coeffs(right, variable, variables)?;
+                lhs.mul(&rhs)
+            }
+            BinaryOp::Divide => {
+                let lhs = symbolic_polynomial_coeffs(left, variable, variables)?;
+                let divisor = symbolic_constant_expr(right, variable, variables)?;
+                lhs.div_scalar(&divisor)
+            }
+            BinaryOp::Power => {
+                if !contains_target_variable(expr, variable) {
+                    return symbolic_constant_expr(expr, variable, variables)
+                        .map(SymbolicPoly::constant);
+                }
+                let exponent = constant_value(right, variables)?;
+                if !close(exponent, exponent.round()) {
+                    return None;
+                }
+                let base = symbolic_polynomial_coeffs(left, variable, variables)?;
+                base.pow(exponent.round() as i32)
+            }
+            BinaryOp::Remainder => None,
+        },
+        Expr::Function { .. } => {
+            symbolic_constant_expr(expr, variable, variables).map(SymbolicPoly::constant)
+        }
+    }
+}
+
+fn symbolic_constant_expr(
+    expr: &Expr,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<String> {
+    if contains_target_variable(expr, variable) {
+        return None;
+    }
+    constant_value(expr, variables)
+        .map(format_exact_number)
+        .or_else(|| Some(format_expr(expr)))
+}
+
+fn contains_target_variable(expr: &Expr, variable: &str) -> bool {
+    expr.variables().contains(variable)
+}
+
+fn symbolic_quadratic_roots(variable: &str, a: &str, b: &str, c: &str) -> Vec<String> {
+    let discriminant = sym_sub(&sym_pow2(b), &sym_mul(&sym_mul("4", a), c));
+    let radical = format!("sqrt({discriminant})");
+    let negative_b = sym_neg(b);
+    let denominator = sym_mul("2", a);
+    vec![
+        format!(
+            "{variable} = {}",
+            sym_div(&sym_sub(&negative_b, &radical), &denominator)
+        ),
+        format!(
+            "{variable} = {}",
+            sym_div(&sym_add(&negative_b, &radical), &denominator)
+        ),
+    ]
+}
+
+fn sym_is_zero(value: &str) -> bool {
+    matches!(value.trim(), "0" | "-0")
+}
+
+fn sym_is_one(value: &str) -> bool {
+    value.trim() == "1"
+}
+
+fn sym_is_negative_one(value: &str) -> bool {
+    value.trim() == "-1"
+}
+
+fn sym_add(lhs: &str, rhs: &str) -> String {
+    if sym_is_zero(lhs) {
+        return rhs.to_string();
+    }
+    if sym_is_zero(rhs) {
+        return lhs.to_string();
+    }
+    if let Some(rest) = rhs.strip_prefix('-') {
+        return sym_sub(lhs, rest);
+    }
+    format!("{lhs} + {rhs}")
+}
+
+fn sym_sub(lhs: &str, rhs: &str) -> String {
+    if sym_is_zero(rhs) {
+        return lhs.to_string();
+    }
+    if sym_is_zero(lhs) {
+        return sym_neg(rhs);
+    }
+    if let Some(rest) = rhs.strip_prefix('-') {
+        return sym_add(lhs, rest);
+    }
+    format!("{lhs} - {rhs}")
+}
+
+fn sym_neg(value: &str) -> String {
+    if sym_is_zero(value) {
+        return "0".to_string();
+    }
+    if let Some(rest) = value.strip_prefix('-') {
+        if !rest.contains(' ') {
+            return rest.to_string();
+        }
+    }
+    format!("-{}", sym_factor(value))
+}
+
+fn sym_mul(lhs: &str, rhs: &str) -> String {
+    if sym_is_zero(lhs) || sym_is_zero(rhs) {
+        return "0".to_string();
+    }
+    if sym_is_one(lhs) {
+        return rhs.to_string();
+    }
+    if sym_is_one(rhs) {
+        return lhs.to_string();
+    }
+    if sym_is_negative_one(lhs) {
+        return sym_neg(rhs);
+    }
+    if sym_is_negative_one(rhs) {
+        return sym_neg(lhs);
+    }
+    if lhs == rhs {
+        return sym_pow2(lhs);
+    }
+    format!("{}*{}", sym_factor(lhs), sym_factor(rhs))
+}
+
+fn sym_div(lhs: &str, rhs: &str) -> String {
+    if sym_is_zero(lhs) {
+        return "0".to_string();
+    }
+    if sym_is_one(rhs) {
+        return lhs.to_string();
+    }
+    format!("{} / {}", sym_group(lhs), sym_group(rhs))
+}
+
+fn sym_pow2(value: &str) -> String {
+    if sym_is_zero(value) {
+        return "0".to_string();
+    }
+    if sym_is_one(value) || sym_is_negative_one(value) {
+        return "1".to_string();
+    }
+    format!("{}^2", sym_factor(value))
+}
+
+fn sym_factor(value: &str) -> String {
+    if is_symbolic_atom(value) {
+        value.to_string()
+    } else {
+        format!("({value})")
+    }
+}
+
+fn sym_group(value: &str) -> String {
+    if is_symbolic_atom(value)
+        || value
+            .strip_prefix('-')
+            .is_some_and(|rest| !rest.contains(' '))
+    {
+        value.to_string()
+    } else {
+        format!("({value})")
+    }
+}
+
+fn is_symbolic_atom(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with("sqrt(") && value.ends_with(')') {
+        return true;
+    }
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '^' | '/'))
+}
+
 fn solve_exact_trig(
     relation: &Relation,
     variable: &str,
+    variables: &BTreeMap<String, f64>,
     domain: Option<(f64, f64)>,
 ) -> Option<ExactSolveReport> {
+    if let Some(trig) = match_trig_constant_relation(relation, variable, variables) {
+        if let Some(report) = trig_constant_report(variable, trig, domain) {
+            return Some(report);
+        }
+    }
+
     let trig = match_trig_zero_relation(relation, variable)?;
     if let Some((min, max)) = domain {
         let intervals = trig_domain_lines(variable, trig.func, trig.op, min, max)?;
@@ -182,6 +539,144 @@ fn solve_exact_trig(
 struct TrigRelation {
     func: &'static str,
     op: RelationOp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrigConstantRelation {
+    func: &'static str,
+    op: RelationOp,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrigPointFamily {
+    base: f64,
+    period: f64,
+    line: &'static str,
+}
+
+fn match_trig_constant_relation(
+    relation: &Relation,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<TrigConstantRelation> {
+    if let Some(value) = constant_value(&relation.right, variables) {
+        let func = match_trig_variable(&relation.left, variable)?;
+        return Some(TrigConstantRelation {
+            func,
+            op: relation.op,
+            value,
+        });
+    }
+
+    if let Some(value) = constant_value(&relation.left, variables) {
+        let func = match_trig_variable(&relation.right, variable)?;
+        return Some(TrigConstantRelation {
+            func,
+            op: reverse_relation_op(relation.op),
+            value,
+        });
+    }
+
+    None
+}
+
+fn trig_constant_report(
+    variable: &str,
+    trig: TrigConstantRelation,
+    domain: Option<(f64, f64)>,
+) -> Option<ExactSolveReport> {
+    if trig.op != RelationOp::Equal {
+        return None;
+    }
+
+    let family = trig_point_family(trig.func, trig.value)?;
+    if let Some((min, max)) = domain {
+        let points = trig_point_domain_lines(variable, family, min, max)?;
+        return Some(ExactSolveReport {
+            variable: variable.to_string(),
+            method: "trig-domain",
+            status: "exact",
+            numeric_lines: points.iter().map(|line| line.numeric.clone()).collect(),
+            exact_lines: points.into_iter().map(|line| line.exact).collect(),
+            domain,
+        });
+    }
+
+    Some(ExactSolveReport {
+        variable: variable.to_string(),
+        method: "trig-family",
+        status: "exact-family",
+        exact_lines: vec![format!("{variable} = {}", family.line)],
+        numeric_lines: vec![
+            "Use a bounded domain, for example 'from -2pi..2pi', for numeric windows.".to_string(),
+        ],
+        domain,
+    })
+}
+
+fn trig_point_family(func: &str, value: f64) -> Option<TrigPointFamily> {
+    let pi = std::f64::consts::PI;
+    let two_pi = std::f64::consts::TAU;
+    match func {
+        "sin" if close(value, 0.0) => Some(TrigPointFamily {
+            base: 0.0,
+            period: pi,
+            line: "k*pi, k in Z",
+        }),
+        "sin" if close(value, 1.0) => Some(TrigPointFamily {
+            base: pi / 2.0,
+            period: two_pi,
+            line: "pi/2 + 2k*pi, k in Z",
+        }),
+        "sin" if close(value, -1.0) => Some(TrigPointFamily {
+            base: -pi / 2.0,
+            period: two_pi,
+            line: "-pi/2 + 2k*pi, k in Z",
+        }),
+        "cos" if close(value, 0.0) => Some(TrigPointFamily {
+            base: pi / 2.0,
+            period: pi,
+            line: "pi/2 + k*pi, k in Z",
+        }),
+        "cos" if close(value, 1.0) => Some(TrigPointFamily {
+            base: 0.0,
+            period: two_pi,
+            line: "2k*pi, k in Z",
+        }),
+        "cos" if close(value, -1.0) => Some(TrigPointFamily {
+            base: pi,
+            period: two_pi,
+            line: "pi + 2k*pi, k in Z",
+        }),
+        _ => None,
+    }
+}
+
+fn trig_point_domain_lines(
+    variable: &str,
+    family: TrigPointFamily,
+    min: f64,
+    max: f64,
+) -> Option<Vec<TrigIntervalLine>> {
+    let mut lines = Vec::new();
+    let k_min = ((min - family.base) / family.period).floor() as i64 - 2;
+    let k_max = ((max - family.base) / family.period).ceil() as i64 + 2;
+    for k in k_min..=k_max {
+        let value = family.base + k as f64 * family.period;
+        if value >= min - EPS && value <= max + EPS {
+            lines.push(TrigIntervalLine {
+                exact: format!("{variable} = {}", format_pi_multiple(value)),
+                numeric: format!("{variable} ~= {}", format_number(value)),
+            });
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
 }
 
 fn match_trig_zero_relation(relation: &Relation, variable: &str) -> Option<TrigRelation> {

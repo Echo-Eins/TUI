@@ -8,3 +8,5 @@
 - Math output should be exact-first: symbolic roots, pi-based trigonometric forms, and structured formulas are primary; decimal approximations require an explicit user action such as `--num`.
 - Rich Math Block rendering must be opt-in with `-mb`; normal `:calc` output stays compact, while `-mb` shows input, exact LaTeX-like result, fallback, approximation, domain, and variables together.
 - Formula commands for multi-variable expressions must accept `for <var>` so the rendered result can show the requested target variable, e.g. `formula <expr> for x -mb`.
+- Relation-style calculator inputs must parse trailing query options such as `for <var>` before expression/relation parsing; otherwise option words become fake variables and break symbolic solving.
+- Once the user explicitly selects a solve target, other unassigned symbols are parameters, not additional unknowns to reject before the exact symbolic solver gets a chance to run.

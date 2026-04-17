@@ -87,6 +87,7 @@
 - [x] First implementation milestone completed: Network graph bug fix plus Console extension platform foundation.
 - [x] Second implementation milestone completed: first useful built-in math module with `:base`, `:calc`, and shared parser/AST.
 - [x] Third implementation milestone completed: exact-first math output, `-num`, `-mb`, formula rendering, and `for <var>` formula target support.
+- [x] Correction pass: fix relation-level `for <var>`, symbolic parameters, exact trigonometric families, and Math Block root rendering.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -206,6 +207,11 @@
 
 ## Engineering Calculator
 
+- [x] Parse `for <var>` before relation parsing for all relation-style `:calc` inputs, not only explicit `solve`.
+- [x] Allow symbolic parameter variables when the target variable is explicitly provided.
+- [x] Solve symbolic linear/quadratic equations such as `a*x^2 + b*x + c = 0 for x` exactly.
+- [x] Return exact trigonometric families for equations such as `sin(x) = 1` before numeric fallback.
+- [x] Render exact result expressions in the Math Block formula section, including roots and fractions.
 - [x] Implement a real expression evaluator, not a string-based toy calculator.
 - [x] Use a small local Pratt parser for this milestone to avoid adding calculator dependencies before the shared AST/API shape is proven.
 - [x] Keep dependency evaluation open for later symbolic math, arbitrary precision, complex numbers, or CAS-level features if local numeric solving is no longer enough.
@@ -401,3 +407,10 @@
 - Formula renderer now uses a measured AST layout tree for fractions, powers, square roots, grouped terms, and function calls, then falls back to ASCII when width is insufficient.
 - Exact solver now handles linear/quadratic polynomial equations, basic radical equations such as `sqrt(x)=7` and `sqrt(x)/8=49`, and basic sine/cosine zero-comparison families with pi-form intervals.
 - Linux `cross check` hit Docker BuildKit `lease does not exist` once, then passed on rerun; Rust static checks passed.
+- Correction pass fixed relation-level `for <var>` parsing, so `:calc a*x^2 + b*x + c = 0 for x` no longer treats `for` as an unknown symbol.
+- Explicit solve targets now allow unassigned non-target symbols as exact-solver parameters before numeric fallback is considered.
+- Symbolic linear/quadratic equations now produce exact parameterized roots, including the quadratic formula for `a*x^2 + b*x + c = 0 for x`.
+- Trigonometric point equations such as `sin(x) = 1`, `sin(x) = -1`, `cos(x) = 1`, and `cos(x) = -1` now return exact pi-family solutions before numeric fallback.
+- Math Block formula sections now render exact result expressions, so roots/fractions are shown from the solution rather than repeating the input equation.
+- Math Block top borders now compute width exactly and no longer self-clamp into `...+`.
+- Correction pass static verification passed: `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`; existing warnings remain outside this math module work.

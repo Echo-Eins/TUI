@@ -153,10 +153,17 @@ impl MathExtension {
             return self.execute_solve(rest.trim(), input.flags, ctx);
         }
 
-        match parse_relation(body) {
-            Ok(Some(relation)) => self.execute_relation(body, relation, input.flags, ctx),
+        let (relation_text, options) = match parse_solve_query_options(body) {
+            Ok(parsed) => parsed,
+            Err(error) => return ConsoleCommandResponse::error(error.message, 2),
+        };
+
+        match parse_relation(relation_text) {
+            Ok(Some(relation)) => {
+                self.execute_relation(relation_text, relation, options, input.flags, ctx)
+            }
             Ok(None) => self.execute_expression(body, input.flags, ctx),
-            Err(error) => math_error(body, error),
+            Err(error) => math_error(relation_text, error),
         }
     }
 
@@ -357,13 +364,14 @@ impl MathExtension {
         &self,
         input: &str,
         relation: Relation,
+        options: SolveQueryOptions,
         flags: CalcFlags,
         ctx: &ConsoleContext,
     ) -> ConsoleCommandResponse {
         let variables = self.lock_memory().evaluation_variables();
         let unknowns = unknown_variables(&relation, &variables);
 
-        if unknowns.is_empty() {
+        if unknowns.is_empty() && options.variable.is_none() {
             return match solve_relation(&relation, None, &variables) {
                 Ok(SolveReport::Constant { holds }) => {
                     ConsoleCommandResponse::ok(vec![OutputLine::stdout(holds.to_string())])
@@ -373,7 +381,7 @@ impl MathExtension {
             };
         }
 
-        self.execute_solve_with_relation(input, relation, SolveQueryOptions::default(), flags, ctx)
+        self.execute_solve_with_relation(input, relation, options, flags, ctx)
     }
 
     fn execute_solve(
@@ -426,21 +434,6 @@ impl MathExtension {
             }
         };
 
-        let unresolved = unknowns
-            .iter()
-            .filter(|name| *name != &variable)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !unresolved.is_empty() {
-            return ConsoleCommandResponse::error(
-                format!(
-                    "unresolved variables: {}; assign them with ':calc let' or solve for one variable",
-                    unresolved.join(", ")
-                ),
-                2,
-            );
-        }
-
         let exact = solve_exact(
             &relation,
             &variable,
@@ -451,6 +444,21 @@ impl MathExtension {
             return ConsoleCommandResponse::ok(exact_solve_output(
                 exact, &relation, input, flags, ctx, &variables,
             ));
+        }
+
+        let unresolved = unknowns
+            .iter()
+            .filter(|name| *name != &variable)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            return ConsoleCommandResponse::error(
+                format!(
+                    "numeric fallback cannot resolve symbolic parameters: {}; assign them with ':calc let' or use an exact-supported equation form",
+                    unresolved.join(", ")
+                ),
+                2,
+            );
         }
 
         let (min, max) = options.domain.unwrap_or((-100.0, 100.0));
@@ -678,6 +686,7 @@ fn exact_solve_output(
     variables: &BTreeMap<String, f64>,
 ) -> Vec<OutputLine> {
     if flags.math_block {
+        let formula = exact_result_formula(&report.exact_lines, ctx);
         return render_math_block(
             MathBlock {
                 title: "MATH BLOCK / solve".to_string(),
@@ -686,10 +695,7 @@ fn exact_solve_output(
                 status: report.status.to_string(),
                 input: input.to_string(),
                 exact_lines: report.exact_lines,
-                formula: Some(FormulaRender {
-                    pretty: vec![relation_fallback(relation)],
-                    fallback: relation_fallback(relation),
-                }),
+                formula: Some(formula),
                 approx_lines: report.numeric_lines,
                 domain: report
                     .domain
@@ -716,6 +722,31 @@ fn exact_solve_output(
         }
     }
     lines
+}
+
+fn exact_result_formula(exact_lines: &[String], ctx: &ConsoleContext) -> FormulaRender {
+    let mut pretty = Vec::new();
+    let mut fallback = Vec::new();
+
+    for line in exact_lines {
+        fallback.push(line.clone());
+        let Some((lhs, rhs)) = line.split_once(" = ") else {
+            pretty.push(line.clone());
+            continue;
+        };
+
+        match parse_expression(rhs.trim()) {
+            Ok(expr) => {
+                pretty.extend(render_formula(&expr, Some(lhs.trim()), formula_width(ctx)).pretty)
+            }
+            Err(_) => pretty.push(line.clone()),
+        }
+    }
+
+    FormulaRender {
+        pretty,
+        fallback: fallback.join("; "),
+    }
 }
 
 fn solve_output(
@@ -960,10 +991,8 @@ fn separator(lines: &mut Vec<OutputLine>, width: usize) {
 fn top_border(title: &str, width: usize) -> String {
     let label = format!(" {title} ");
     let label_width = UnicodeWidthStr::width(label.as_str());
-    let dash_count = width.saturating_sub(label_width + 3);
-    let mut line = format!("+--{label}{}", "-".repeat(dash_count));
-    line = clamp_display_width(&line, width.saturating_sub(1));
-    format!("{line}+")
+    let dash_count = width.saturating_sub(label_width + 4);
+    format!("+--{label}{}+", "-".repeat(dash_count))
 }
 
 fn bottom_border(width: usize) -> String {
