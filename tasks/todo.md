@@ -66,10 +66,317 @@
 - [x] Keep Windows `enigo` backend intact.
 - [x] Move Linux input injection to a runtime `xdotool` backend.
 - [x] Update Linux build/runtime docs and Cross image dependencies.
-- [ ] Re-run local and Linux cross verification after the link fix.
+- [x] Re-run local and Linux cross verification after the link fix.
 
 ## Native Linux Link Finding
 
 - `libxdo` was pulled in by the Linux `enigo` dependency at link time.
 - The code already had an `xdotool` runtime fallback, but fallback code cannot help if the binary cannot link.
 - Default Linux builds should not require `libxdo-dev`; only runtime input injection should require `xdotool`.
+- `cargo tree --target x86_64-unknown-linux-gnu` no longer includes `enigo` or `xdo`.
+- `cargo test` passes with 78 tests.
+- `cargo check --all-targets` passes on the local Windows target with existing warnings.
+- `cross build --target x86_64-unknown-linux-gnu --release --bin TUI` passes without `libxdo-dev`.
+- `cross check --target x86_64-unknown-linux-gnu --all-targets` passes with existing warnings.
+- `cross test --target x86_64-unknown-linux-gnu --all-targets` passes with 84 tests.
+
+# Console Extension Platform, Math Modulator, and Mini-Games
+
+## Current Status
+
+- [x] First implementation milestone completed: Network graph bug fix plus Console extension platform foundation.
+- [x] Second implementation milestone completed: first useful built-in math module with `:base`, `:calc`, and shared parser/AST.
+- [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
+- [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
+- [x] Keep secondary functionality lazy, bounded, and inactive until requested.
+- [x] Treat every module as production code: small APIs, clear ownership, no unbounded work, no UI overflow, deterministic tests.
+- [x] For this milestone, run static checks only: `cargo check --all-targets` and Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`.
+
+## Product Direction
+
+- [ ] Build Console as a terminal-first workspace, not only a shell transcript.
+- [ ] Do not create a separate Games tab in the first phase; games belong inside Console to preserve the terminal-toys vibe.
+- [ ] Treat games as hidden/optional Console apps launched from commands, not as a standalone product section.
+- [x] Keep the default shell path sacred: unknown commands continue to go to the real shell.
+- [x] Add secondary features through explicit Console extension commands.
+- [x] Prefer an explicit internal prefix such as `:` for extension commands: `:calc`, `:plot`, `:base`, `:play`, `:mods`.
+- [ ] Consider unprefixed aliases only after a config flag exists and collisions with real shell commands are handled.
+- [ ] Make extensions feel native to the Console tab: fast keyboard flow, compact output blocks, clear errors, no modal clutter.
+- [ ] Match the visual quality of the Network tab: terminal aesthetic, modern spacing/color, readable borders, responsive layouts.
+- [x] Keep normal command blocks and extension output blocks visually compatible so Console history remains coherent.
+
+## Architecture Requirements
+
+- [x] Introduce a small Console extension layer instead of hardcoding every feature directly into `AppState`.
+- [x] Add a `ConsoleCommandRouter` responsible for detecting internal commands and preserving shell passthrough.
+- [x] Add a `ConsoleExtensionRegistry` that owns built-in extension metadata and lookup.
+- [x] Define `ExtensionMetadata` with id, title, description, version, kind, commands, permissions, and tags.
+- [x] Define `ConsoleCommandSpec` so help, completion, validation, tags, and examples are generated from one source.
+- [x] Define a `ConsoleExtension` API for one-shot commands such as `:base`, `:hash`, `:formula`, and `:calc`.
+- [x] Define a `ConsoleSession` API for interactive modules such as games and graph explorers.
+- [x] Define a `ConsoleContext` carrying theme, terminal size, config, current directory, environment snapshot, and permission policy.
+- [x] Define a `ConsoleResult` model with explicit variants: text, table, formula, plot, canvas, interactive session, structured error.
+- [x] Define `ExtensionKind` as a future-proof model: built-in, script, external process, and later Wasm.
+- [x] Route input as: `:` prefix goes to Console extensions; everything else goes to the normal shell executor unless a user-enabled alias maps it.
+- [x] Keep command parsing separate from rendering and execution.
+- [x] Keep math parsing/evaluation separate from Console UI.
+- [ ] Keep game state/update/render code separate from shell command state.
+- [ ] Add a `GameRuntime` thin wrapper over `ConsoleSession` for game-specific lifecycle, scores, summaries, and commands.
+- [ ] Add a `GameRegistry` so adding a built-in game is registration, not a new hardcoded branch in Console.
+- [ ] Define a `ConsoleGame` API with id, title, help, tags, config schema, and `new_session`.
+- [ ] Keep plugin loading separate from built-in modules so security rules remain obvious.
+- [x] Do not add global mutable state for modules.
+- [ ] Avoid module-specific behavior in the generic command history path unless it is explicitly part of the API.
+
+## Performance Requirements
+
+- [ ] Idle Console must not tick games, plots, calculators, or plugins.
+- [ ] Inactive modules must use zero periodic CPU.
+- [ ] Interactive modules must have a capped tick rate per module.
+- [ ] Games should update at fixed logical ticks, not as fast as the render loop can run.
+- [ ] Graph sampling must be bounded by terminal width and an explicit sample cap.
+- [ ] Plot data must be cached and recomputed only when expression, domain, sampling settings, or widget size changes.
+- [ ] Formula layout must cache parsed/rendered AST output where possible.
+- [ ] Calculator expressions must compile or parse once per submitted command where possible.
+- [ ] Avoid per-frame heap allocations in game hot paths and plot render hot paths.
+- [ ] Cap output block length and history growth for generated module output.
+- [ ] Never block the UI/render loop on plugin execution, expensive math, filesystem scans, or external commands.
+- [ ] Add regression tests for every resource limit that protects CPU, memory, and UI responsiveness.
+
+## Core Commands
+
+- [x] `:help` prints shell-safe Console extension help.
+- [x] `:mods` lists available built-in and user modules.
+- [ ] `:mod info <name>` shows manifest, commands, permissions, and status.
+- [ ] `:mod enable <name>` enables a disabled optional module where allowed.
+- [ ] `:mod disable <name>` disables an optional module where allowed.
+- [ ] `:mod reload <name>` reloads user modules without restarting the app.
+- [x] `:calc <expr>` evaluates engineering calculator expressions.
+- [ ] `:formula <expr>` renders a LaTeX-like terminal formula without evaluating when requested.
+- [ ] `:plot <expr> [domain/options]` opens or prints a mathematical function plot.
+- [x] `:base <value> from <base> to <base|range>` converts between numeral systems from base 2 to base 16.
+- [ ] `:units <expr>` is a later optional engineering unit-conversion command.
+- [ ] `:stats <values/options>` is a later optional statistics helper.
+- [ ] `:hash <algo> <text|file>` is a later optional utility command with explicit file permission handling.
+- [ ] `:json <query/options>` is a later optional JSON formatter/query command.
+- [ ] `:regex <pattern> <text/options>` is a later optional regex playground command.
+- [ ] `:time <expr/options>` is a later optional time/date helper.
+- [ ] `:bytes <expr>` is a later optional byte-size conversion helper.
+- [ ] `:color <expr>` is a later optional hex/rgb/hsl color conversion helper.
+- [ ] `:matrix <expr>` is a later optional matrix math helper after scalar calculator behavior is stable.
+- [ ] `:encode <mode> <value>` is a later optional helper for base64, ASCII, UUID, random tokens, and related encodings.
+- [ ] `:toy <name>` starts a visual terminal toy backed by `ConsoleSession`.
+- [ ] `:games` lists available games.
+- [ ] `:play <game>` starts a game-backed `ConsoleSession`.
+- [ ] `:games --tags <tag>` filters games by type such as puzzle, arcade, word, realtime, or network.
+- [ ] `:game pause`, `:game resume`, `:game restart`, and `:game quit` control the active game session.
+- [ ] `:scores` and `:scores <game>` show local score summaries where a game supports scoring.
+- [ ] Optional aliases such as `games`, `play`, and `scores` must be config-gated and documented as aliases for `:` commands.
+
+## Mathematical Function Modulator / Plotter
+
+- [ ] Implement the "modulator" as a ratatui-based mathematical function plotter, not just a generic module switcher.
+- [ ] Support commands such as `:plot sin(x)`, `:plot x^2 from -10..10`, and `:plot exp(-x^2) --samples auto`.
+- [ ] Support domain syntax for x ranges, for example `from -10..10`, `x=-pi..pi`, or a clearly documented equivalent.
+- [ ] Support sample count options with strict min/max limits.
+- [ ] Support render modes: line, points, bars, and compact sparkline where useful.
+- [ ] Support pan and zoom for interactive plot sessions after the non-interactive renderer is stable.
+- [ ] Support cursor inspection of approximate x/y values in interactive plot sessions.
+- [ ] Support multiple functions on one plot after the single-function path is stable.
+- [ ] Support constants: `pi`, `e`, `tau`.
+- [ ] Support arithmetic operators, powers, unary operators, parentheses, and common functions.
+- [ ] Support trigonometric functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`.
+- [ ] Support hyperbolic functions: `sinh`, `cosh`, `tanh`.
+- [ ] Support logarithmic/exponential functions: `ln`, `log`, `log10`, `exp`.
+- [ ] Support numeric helpers: `sqrt`, `abs`, `floor`, `ceil`, `round`, `min`, `max`.
+- [ ] Support piecewise expressions only after the core parser and renderer are verified.
+- [ ] Detect discontinuities and asymptotes without drawing misleading vertical walls.
+- [ ] Clip out-of-range values safely.
+- [ ] Represent NaN and infinite values explicitly in sampling logic, not as panics.
+- [ ] Compute y-range automatically with robust handling for outliers.
+- [ ] Allow manual y-range when automatic range is not useful.
+- [ ] Render axes and labels when space allows.
+- [ ] Degrade gracefully in very small terminal sizes.
+- [ ] Add unit tests for expression parsing, sampling, discontinuity handling, clipping, and range selection.
+- [ ] Add render/snapshot tests for narrow, medium, and wide terminal plot widgets.
+
+## Engineering Calculator
+
+- [x] Implement a real expression evaluator, not a string-based toy calculator.
+- [x] Use a small local Pratt parser for this milestone to avoid adding calculator dependencies before the shared AST/API shape is proven.
+- [x] Keep dependency evaluation open for later symbolic math, arbitrary precision, complex numbers, or CAS-level features if local numeric solving is no longer enough.
+- [x] Support operator precedence and associativity correctly.
+- [x] Support unary plus/minus and nested parentheses.
+- [x] Support functions shared with the plotter.
+- [x] Support constants shared with the plotter.
+- [x] Support `ans` for the previous calculator result.
+- [x] Support named variables with an explicit command such as `:calc let a = 42`.
+- [x] Support one-variable numeric equation solving, for example `:calc solve x^2 - 4 = 0 for x`.
+- [x] Support one-variable numeric inequality solving over bounded domains, for example `:calc solve sin(x) > 0 from -pi..pi`.
+- [x] Keep systems of equations, differential equations, symbolic algebra, and calculus for later phases after the function modulator exists.
+- [x] Support clear diagnostics with caret/location where possible.
+- [ ] Support integer and floating-point paths where it matters for exactness.
+- [ ] Consider rational/exact arithmetic as a later phase if the dependency and UX are justified.
+- [ ] Consider complex numbers as a later phase after real-valued math is stable.
+- [x] Prevent panics, uncontrolled NaN propagation, and silent overflow where Rust types can report errors.
+- [ ] Add unit tests for precedence, functions, variables, constants, errors, and edge cases.
+- [ ] Add integration tests through the Console command router.
+
+## Base Conversion
+
+- [x] Expand `:base` to support every base from 2 through 16.
+- [x] Accept explicit source and target bases: `:base ff from 16 to 2`.
+- [x] Accept target ranges or tables: `:base 255 to 2..16`.
+- [x] Validate every digit against the source base.
+- [x] Support uppercase and lowercase digits.
+- [x] Support `_` separators in numeric input where unambiguous.
+- [x] Support negative values.
+- [x] Print clean table output when converting to several bases.
+- [x] Print specific error messages for invalid base, invalid digit, empty value, and overflow.
+- [x] Consider big integer support only if it does not add disproportionate complexity.
+- [ ] Add unit tests for every base 2..16 and invalid digit paths.
+
+## LaTeX-Like Formula Rendering
+
+- [ ] Add a terminal formula renderer driven by the parsed expression AST.
+- [ ] Support pretty powers where terminal width and font support make it readable.
+- [ ] Support subscripts/indices where the expression model needs them.
+- [ ] Support fractions with multi-line numerator/denominator when there is enough height.
+- [ ] Support roots, grouped terms, and function calls.
+- [ ] Provide an ASCII fallback for terminals where Unicode width or glyph support is unsafe.
+- [ ] Use width-aware layout logic, for example via `unicode-width`, before drawing into ratatui buffers.
+- [ ] Never let formula rendering overflow into borders or neighboring blocks.
+- [ ] Expose pretty output through `:formula <expr>` and optionally `:calc --pretty <expr>`.
+- [ ] Add snapshot tests for powers, fractions, nested expressions, narrow width fallback, and wide width output.
+
+## Mini-Games
+
+- [ ] Implement games as Console extensions backed by `ConsoleSession`.
+- [ ] Launch games inside an interactive Console output block, not a fullscreen tab.
+- [ ] Represent active games as a `GameBlock` or equivalent Console block that owns render area, input, tick state, and lifecycle.
+- [ ] Exit active games consistently with `Esc`, `q`, or `Ctrl+C`.
+- [ ] On finish or quit, leave a compact history summary such as game id, status, score, and elapsed time.
+- [ ] Keep game summaries searchable/readable in normal Console history.
+- [ ] Start with one small game to prove the API before adding several.
+- [ ] Candidate first games: Snake, 2048, Minesweeper, Tetris, Netwalk.
+- [ ] Candidate later arcade games: Pong, Breakout.
+- [ ] Candidate later word games: Wordle, Hangman, Typing trainer.
+- [ ] Candidate later grid/puzzle games: Pipes, Sokoban, Conway Life.
+- [ ] Candidate later adventure games: tiny Rogue-lite micro dungeon.
+- [ ] Candidate later visual/toy sessions: Matrix rain, Mandelbrot explorer, rain, clock, starfield, plasma.
+- [ ] Candidate project-specific game: Packet Runner with packet loss, firewall, NAT, and route-choice mechanics.
+- [ ] Keep all games keyboard-only and terminal-native.
+- [ ] Support arrow keys and WASD where appropriate.
+- [ ] Support per-game options such as `:play tetris --level 3` and `:play mines --size 16x16 --mines 40`.
+- [ ] Define per-game tags so `:games --tags puzzle` and similar filters are useful.
+- [ ] Use deterministic seeded RNG in tests.
+- [ ] Keep board memory fixed or tightly bounded.
+- [ ] Keep game ticks capped and independent of render frequency.
+- [ ] Support pause, resume, restart, and quit consistently.
+- [ ] Ensure leaving a game returns the Console to normal shell input cleanly.
+- [ ] First implementation should be Snake because it validates realtime tick, input, render, pause, quit, and summary flow.
+- [ ] Second implementation should be 2048 because it validates turn-based input without realtime pressure.
+- [ ] Add Minesweeper and Tetris after the runtime handles both realtime and turn-based models.
+- [ ] Add Netwalk after the basics because it gives the project a unique network-themed game.
+- [ ] Add unit tests for game state transitions.
+- [ ] Add render/snapshot tests for compact and full-width game layouts.
+
+## User Modules and Plugin System
+
+- [ ] Phase 1: built-in modules only, behind the same extension API.
+- [ ] Phase 2: manifest-driven content for built-in modules, such as Sokoban levels, Wordle dictionaries, Minesweeper presets, and game settings.
+- [ ] Phase 3: user-authored script modules with a manifest and strict permissions.
+- [ ] Phase 4: external process plugins using a stable JSON-lines protocol if script modules are not enough.
+- [ ] Do not implement native dynamic Rust plugins with `.so`/`.dll` loading in the early phases because ABI stability, safety, and versioning are disproportionate risk.
+- [ ] Evaluate a small scripting engine such as Rhai only after built-in APIs are stable.
+- [ ] Define `ModuleManifest` fields: id, name, version, kind, description, commands, session types, tags, permissions, entrypoint.
+- [ ] Allow manifests to describe command help text and examples.
+- [ ] Default-deny filesystem access.
+- [ ] Default-deny network access.
+- [ ] Default-deny shell/process execution.
+- [ ] Default-deny environment access except explicitly passed safe values.
+- [ ] Show dangerous permissions in `:mod info` before a user enables a module.
+- [ ] Add execution timeouts for user modules.
+- [ ] Add kill/cancel handling for long-running external plugins.
+- [ ] Add output-size limits for user modules.
+- [ ] Add clear error reporting for permission denial and module crashes.
+- [ ] Use platform-appropriate module directories: `%APPDATA%` on Windows and `$XDG_CONFIG_HOME` on Linux.
+- [ ] Support project-local modules only after trust rules are explicit.
+- [ ] Never auto-run project-local modules without user trust.
+- [ ] External process plugins should use messages such as `init`, `key`, `tick`, and `resize`.
+- [ ] External process plugins should return bounded frame lines plus status over JSON-lines.
+- [ ] Add manifest validation tests and plugin protocol tests before enabling external modules.
+
+## Console UI and Design
+
+- [ ] Create a cohesive Console extension visual language before adding many modules.
+- [ ] Keep the design terminal-native but modern, similar in quality to the Network tab.
+- [ ] Keep games visually inside Console output history rather than visually acting like a separate tab.
+- [ ] Prefer ASCII-safe boards for first implementations to avoid repeating mojibake issues.
+- [ ] Use compact status bars for game title, score, speed/level, elapsed time, and key hints.
+- [ ] Support theme presets such as classic, matrix, amber, and mono after the base styling is stable.
+- [ ] Use consistent title, subtitle, border, focus, and error styles.
+- [ ] Avoid nested decorative boxes unless the border is functionally meaningful.
+- [ ] Keep output dense enough for terminal work but not cramped.
+- [ ] Ensure every block works at narrow widths.
+- [ ] Clamp or wrap titles so they never overwrite borders.
+- [ ] Keep status text stable so values do not cause layout jitter.
+- [ ] Use clear keyboard hints only where they are actionable.
+- [ ] Keep color meaningful, not decorative noise.
+- [ ] Ensure all non-ASCII glyphs have fallback or are proven width-safe.
+- [ ] Add render tests for common terminal sizes.
+
+## Network Graph Title/Border Bug
+
+- [x] Reproduce the reported upload graph issue from the screenshot.
+- [x] Inspect `render_sparkline_graph` title construction in `src/ui/tabs/network.rs`.
+- [x] Confirm whether the dynamic title segment such as sample seconds is too long for the graph width.
+- [x] Fix title layout so changing values never replace the right border.
+- [x] Prefer moving volatile sample-count text out of the block title or width-clamping it.
+- [x] Keep download/upload graph titles visually consistent.
+- [x] Add a narrow-width render regression test for both graphs.
+- [x] Add a full-width render regression test for both graphs.
+- [x] Verify the right border remains intact while values change.
+
+## Verification Plan
+
+- [x] Run `cargo fmt --all` after implementation changes.
+- [x] Run `cargo test` after each coherent module milestone.
+- [x] Run `cargo check --all-targets` before marking a milestone complete.
+- [x] Run Linux `cross check --target x86_64-unknown-linux-gnu --all-targets` after cross-platform changes.
+- [x] Run Linux cross-test coverage after behavior changes; use split `--lib`, `--bins`, and `--doc` when monolithic `--all-targets` is too slow.
+- [x] Run `git diff --check` before every review update.
+- [ ] Add unit tests for command routing, calculator parsing/evaluation, base conversion, plot sampling, formula layout, game state, and plugin manifests.
+- [ ] Add render/snapshot tests for Console extension blocks, plot widgets, formula output, games, and the Network graph bug.
+- [ ] Add performance checks or targeted benchmarks for graph sampling, game ticks, and formula layout if they become non-trivial.
+- [ ] Manually verify Linux Console keyboard flow after interactive modules are introduced.
+- [ ] Manually verify Windows Console behavior is unchanged for normal shell commands.
+
+## Staff-Engineer Review Gate
+
+- [ ] Does the extension router preserve normal shell intent?
+- [ ] Does every module have bounded CPU, memory, output, and tick behavior?
+- [ ] Does every UI block stay inside its ratatui area at small sizes?
+- [ ] Does the calculator produce correct results for non-trivial engineering expressions?
+- [ ] Does `:base` work for every base from 2 through 16 with clear errors?
+- [ ] Does formula rendering degrade cleanly when pretty output is not safe?
+- [ ] Are user modules disabled or sandboxed by default?
+- [ ] Are Network graph borders stable under changing values?
+- [ ] Are tests strong enough that regressions would be caught before release?
+- [ ] Is the implementation smaller and clearer than a direct hardcoded feature pile would be?
+
+## Review Notes
+
+- The mathematical modulator means a function plotter/renderer, not only a generic module manager.
+- Games are intentionally later than the extension API, calculator, plotter, formula renderer, and Network graph bug.
+- Plugin support is intentionally phased after built-ins so the API can be proven without security risk.
+- The current plan favors explicit internal commands to avoid breaking Linux shell behavior that was just repaired.
+- Network graph title rendering now removes the volatile sample-count title segment and width-clamps graph titles before ratatui draws the border.
+- Console Extension Platform foundation now routes only `:`-prefixed commands to `ConsoleCommandRouter`; non-prefixed input remains normal shell input.
+- The initial built-in Console Core extension provides `:help` and `:mods`; future math/games/toys modules should register through the same registry.
+- `cross test --target x86_64-unknown-linux-gnu --all-targets` timed out as a monolithic command once, then the equivalent Linux test surface passed when split into `--lib`, `--bins`, and `--doc`.
+- Final milestone verification passed: `cargo fmt --all`, `cargo test`, `cargo check --all-targets`, `cross check --target x86_64-unknown-linux-gnu --all-targets`, split Linux `cross test` for `--lib`/`--bins`/`--doc`, and `git diff --check`.
+- Math module implementation plan: add a shared `app::math` core with AST/parser/evaluator/base conversion/numeric solver, then expose it through a thin built-in Console extension for `:base` and `:calc`.
+- Math milestone verification is intentionally static-only per current request; do not run `cargo test` or full compilation in this step.
+- Math module implementation completed with a shared local Pratt parser/AST/evaluator, i128-backed base conversion, one-variable numeric equation solving, and bounded-domain inequality solving.
+- Static-only verification passed for this milestone: `cargo check --all-targets` and `cross check --target x86_64-unknown-linux-gnu --all-targets`.

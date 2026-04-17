@@ -12,7 +12,7 @@ Cardputer clients.
 - Windows remote desktop capture/input through native desktop backends.
 - Linux remote desktop capture/input through the same Rust API:
   - screen capture: `scrap` first, with `grim`/`maim` fallback on Linux;
-  - input injection: `enigo` first, with `xdotool` fallback on Linux.
+  - input injection: `xdotool` runtime backend on Linux.
 
 ## Security Setup
 

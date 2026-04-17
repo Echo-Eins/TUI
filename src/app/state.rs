@@ -69,6 +69,7 @@ pub struct AppState {
     pub console_state: crate::app::console_state::ConsoleState,
     pub history: crate::app::history::CommandHistory,
     pub suggestion_engine: crate::app::suggestions::SuggestionEngine,
+    console_extensions: crate::app::extensions::ConsoleCommandRouter,
     console_executor: Arc<dyn CommandExecutor>,
     #[allow(dead_code)]
     pub selected_section: Option<String>,
@@ -2385,6 +2386,45 @@ impl AppState {
         });
     }
 
+    fn console_extension_context(&self) -> crate::app::extensions::ConsoleContext {
+        let config = self.config.read();
+        let mut env_vars = self
+            .console_state
+            .env_vars
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        env_vars.sort_by(|a, b| a.0.cmp(&b.0));
+
+        crate::app::extensions::ConsoleContext {
+            cwd: self.console_state.cwd.clone(),
+            shell_name: self.console_state.shell_name.clone(),
+            terminal_size: self.terminal_size,
+            env_vars,
+            config: crate::app::extensions::ConsoleConfigContext {
+                history_limit: config.console.history_limit,
+                max_output_lines: config.console.max_output_lines,
+            },
+            theme: crate::app::extensions::ConsoleThemeContext {
+                name: config.general.theme.clone(),
+                compact_mode: config.general.compact_mode,
+            },
+            permissions: crate::app::extensions::PermissionPolicy::default_deny(),
+        }
+    }
+
+    fn try_intercept_console_extension(&mut self, cmd: &str) -> bool {
+        let context = self.console_extension_context();
+        match self.console_extensions.route(cmd, &context) {
+            crate::app::extensions::ConsoleRoute::Shell => false,
+            crate::app::extensions::ConsoleRoute::Handled(response) => {
+                let (lines, exit_code) = response.into_lines();
+                self.finish_console_block(cmd.trim().to_string(), lines, exit_code);
+                true
+            }
+        }
+    }
+
     /// Refresh the ghost text based on current input buffer.
     /// Checks suggestion engine first (for command-name completions),
     /// then falls back to history prefix search.
@@ -2397,6 +2437,11 @@ impl AppState {
         }
 
         let cwd = self.console_state.cwd.clone();
+
+        if let Some(suggestion) = self.console_extensions.suggest_prefixed_command(input) {
+            self.console_state.update_ghost_text(Some(suggestion));
+            return;
+        }
 
         // 1. Try suggestion engine (builtins, PATH, aliases, Portage) for command/package completion
         let suggestions = self.suggestion_engine.suggest(input, &cwd);
@@ -2439,8 +2484,10 @@ impl AppState {
         }
 
         let engine = &self.suggestion_engine;
-        self.console_state.highlighted_input =
-            crate::app::syntax::highlight(&input, |cmd| engine.is_known_command(cmd));
+        let extensions = &self.console_extensions;
+        self.console_state.highlighted_input = crate::app::syntax::highlight(&input, |cmd| {
+            engine.is_known_command(cmd) || extensions.is_prefixed_command(cmd)
+        });
     }
 
     /// Expand command macros (!! / !$ / sudo !!) and return the expanded command.
@@ -2596,6 +2643,7 @@ impl AppState {
 
             console_state,
             suggestion_engine: crate::app::suggestions::SuggestionEngine::new(),
+            console_extensions: crate::app::extensions::ConsoleCommandRouter::builtin(),
             console_executor,
             history: {
                 let history_dir = dirs::data_local_dir()
@@ -3011,6 +3059,10 @@ impl AppState {
                                 self.console_state.scroll_offset = 0;
 
                                 if !raw_cmd.trim().is_empty() {
+                                    if self.try_intercept_console_extension(&raw_cmd) {
+                                        return Ok(true);
+                                    }
+
                                     let cmd =
                                         match self.expand_macros(&raw_cmd) {
                                             Ok(cmd) => cmd,

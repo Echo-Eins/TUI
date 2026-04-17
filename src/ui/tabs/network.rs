@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Row, Sparkline, Table, Wrap},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::state::{
     NetworkCenterView, NetworkDiagnosticTool, NetworkFocusZone, NetworkResultTab, NetworkUIState,
@@ -720,7 +721,7 @@ fn render_sparkline_graph(
     if history.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(label.to_string())
+            .title(fit_block_title(label, area.width))
             .border_style(Style::default().fg(color));
         f.render_widget(Paragraph::new("Collecting data...").block(block), area);
         return;
@@ -738,22 +739,75 @@ fn render_sparkline_graph(
     } else {
         vals.iter().sum::<u64>() as f64 / (vals.len() as f64 * 100.0)
     };
-    let samples = vals.len();
+    let title = traffic_graph_title(label, current, avg_mbps, max_mbps, area.width);
 
     let sparkline = Sparkline::default()
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(
-                    "{} {:.2} Mbps \u{2502} avg:{:.2} peak:{:.2} \u{2502} {}s",
-                    label, current, avg_mbps, max_mbps, samples
-                ))
+                .title(title)
                 .border_style(Style::default().fg(color)),
         )
         .data(&vals)
         .style(Style::default().fg(color))
         .max(max_val);
     f.render_widget(sparkline, area);
+}
+
+fn traffic_graph_title(
+    label: &str,
+    current: f64,
+    avg_mbps: f64,
+    max_mbps: f64,
+    width: u16,
+) -> String {
+    let full = format!(
+        "{} {:.2} Mbps | avg:{:.2} peak:{:.2}",
+        label, current, avg_mbps, max_mbps
+    );
+    fit_block_title(&full, width)
+}
+
+fn fit_block_title(title: &str, width: u16) -> String {
+    let max_width = width.saturating_sub(4) as usize;
+    truncate_display_width(title, max_width)
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+
+    if max_width <= 3 {
+        let mut out = String::new();
+        let mut used = 0;
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + ch_width > max_width {
+                break;
+            }
+            out.push(ch);
+            used += ch_width;
+        }
+        return out;
+    }
+
+    let target = max_width - 3;
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > target {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push_str("...");
+    out
 }
 
 // ═══════════════════════════ RESULTS PANEL ═══════════════════════════
@@ -2154,5 +2208,91 @@ fn format_pkt_count(count: u64) -> String {
         format!("{:.1}K", count as f64 / 1_000.0)
     } else {
         count.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitors::TrafficSample;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::VecDeque;
+
+    fn sample_history(count: usize) -> VecDeque<TrafficSample> {
+        (0..count)
+            .map(|idx| TrafficSample {
+                timestamp: idx as u64,
+                download_mbps: idx as f64 / 10.0,
+                upload_mbps: (count.saturating_sub(idx)) as f64 / 20.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn graph_title_fits_inside_block_width_without_sample_counter() {
+        let title = traffic_graph_title(
+            "Upload [wlan0-very-long-interface-name]",
+            0.01,
+            0.02,
+            12.34,
+            36,
+        );
+
+        assert!(UnicodeWidthStr::width(title.as_str()) <= 32);
+        assert!(!title.ends_with('s'));
+    }
+
+    #[test]
+    fn sparkline_keeps_right_border_intact_on_narrow_graph() {
+        let history = sample_history(120);
+        let backend = TestBackend::new(36, 5);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+
+        terminal
+            .draw(|frame| {
+                render_sparkline_graph(
+                    frame,
+                    Rect::new(0, 0, 36, 5),
+                    &history,
+                    |sample| sample.upload_mbps,
+                    "Upload [wlan0-very-long-interface-name]",
+                    Color::Cyan,
+                );
+            })
+            .expect("render graph");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(35, 0)].symbol(), "┐");
+        assert_eq!(buffer[(35, 4)].symbol(), "┘");
+        for y in 1..4 {
+            assert_eq!(buffer[(35, y)].symbol(), "│");
+        }
+    }
+
+    #[test]
+    fn sparkline_keeps_right_border_intact_on_wide_graph() {
+        let history = sample_history(120);
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+
+        terminal
+            .draw(|frame| {
+                render_sparkline_graph(
+                    frame,
+                    Rect::new(0, 0, 80, 5),
+                    &history,
+                    |sample| sample.download_mbps,
+                    "Download [wlan0]",
+                    Color::Green,
+                );
+            })
+            .expect("render graph");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(79, 0)].symbol(), "┐");
+        assert_eq!(buffer[(79, 4)].symbol(), "┘");
+        for y in 1..4 {
+            assert_eq!(buffer[(79, y)].symbol(), "│");
+        }
     }
 }

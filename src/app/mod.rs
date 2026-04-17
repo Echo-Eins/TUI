@@ -1,6 +1,8 @@
 pub mod config;
 pub mod console_state;
+pub mod extensions;
 pub mod history;
+pub mod math;
 pub mod monitors_task;
 pub mod state;
 pub mod sudo;
