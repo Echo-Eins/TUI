@@ -10,3 +10,4 @@
 - Formula commands for multi-variable expressions must accept `for <var>` so the rendered result can show the requested target variable, e.g. `formula <expr> for x -mb`.
 - Relation-style calculator inputs must parse trailing query options such as `for <var>` before expression/relation parsing; otherwise option words become fake variables and break symbolic solving.
 - Once the user explicitly selects a solve target, other unassigned symbols are parameters, not additional unknowns to reject before the exact symbolic solver gets a chance to run.
+- When the user explicitly asks for ratatui visual modules, treat string/ASCII output as a fallback or smoke-test layer only; the production path must render through typed ratatui widgets or an interactive session render path.

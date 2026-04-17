@@ -88,7 +88,8 @@
 - [x] Second implementation milestone completed: first useful built-in math module with `:base`, `:calc`, and shared parser/AST.
 - [x] Third implementation milestone completed: exact-first math output, `-num`, `-mb`, formula rendering, and `for <var>` formula target support.
 - [x] Correction pass: fix relation-level `for <var>`, symbolic parameters, exact trigonometric families, and Math Block root rendering.
-- [x] Fourth implementation milestone: finish formula command surface and implement the first production-grade `:plot` math modulator.
+- [x] Fourth implementation milestone: finish formula command surface and implement the first bounded fallback `:plot` math modulator.
+- [x] Fifth implementation milestone: promote `:plot` to a typed Console output rendered by ratatui widgets, with ASCII fallback kept only as fallback/history output.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -159,7 +160,7 @@
 - [x] `:calc <expr> -mb` opens a rich Math Block instead of compact Console output.
 - [x] `:calc formula <expr> [for <var>] -mb` renders a LaTeX-like formula block with target variable support.
 - [x] `:formula <expr> [for <var>]` renders a LaTeX-like terminal formula without evaluating when requested.
-- [ ] `:plot <expr> [domain/options]` opens or prints a mathematical function plot.
+- [x] `:plot <expr> [domain/options]` opens or prints a mathematical function plot through a typed ratatui Console block.
 - [x] `:base <value> from <base> to <base|range>` converts between numeral systems from base 2 to base 16.
 - [ ] `:units <expr>` is a later optional engineering unit-conversion command.
 - [ ] `:stats <values/options>` is a later optional statistics helper.
@@ -188,6 +189,9 @@
 - [x] Support sample count options with strict min/max limits.
 - [x] Support render modes: line, points, bars, and compact sparkline where useful.
 - [x] Add a bounded plot cache keyed by expression, variable, domain, samples, render mode, and canvas size.
+- [x] Return typed plot data from the math extension instead of flattening production plots into strings.
+- [x] Render plot command blocks with ratatui `Chart`/typed widgets in the Console UI.
+- [x] Keep ASCII plot canvas as a width-safe fallback and test/debug representation.
 - [ ] Support pan and zoom for interactive plot sessions after the non-interactive renderer is stable.
 - [ ] Support cursor inspection of approximate x/y values in interactive plot sessions.
 - [ ] Support multiple functions on one plot after the single-function path is stable.
@@ -206,7 +210,7 @@
 - [x] Render axes and labels when space allows.
 - [x] Degrade gracefully in very small terminal sizes.
 - [x] Add unit tests for expression parsing, sampling, discontinuity handling, clipping, and range selection.
-- [ ] Add render/snapshot tests for narrow, medium, and wide terminal plot widgets.
+- [ ] Add wider snapshot coverage for narrow, medium, and wide terminal plot widgets.
 
 ## Engineering Calculator
 
@@ -423,3 +427,6 @@
 - Plot cache is bounded and keyed by expression, target variable, domain, y-range, sample count, mode, canvas size, and assigned parameter values.
 - Interactive plot zoom/pan remains blocked by the existing ConsoleSession integration gap: `StartSession` is defined but not yet wired into Console event/render handling, so this milestone does not expose fake interactive controls.
 - Plotter milestone static verification passed: `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, `git diff --check`, and a direct trailing-whitespace scan for the new `src/app/math/plot.rs` file.
+- Plotter UI correction: `:plot` now returns typed Console plot output with sampled series data; the Console tab renders it through ratatui `Chart`/`Sparkline` widgets and keeps the ASCII canvas only as fallback/debug output.
+- Plotter UI tests cover typed command block storage, ratatui chart rendering, narrow fallback rendering, and discontinuity-aware plot series splitting.
+- Plotter UI verification passed: `cargo fmt --all`, `cargo test` with 102 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.

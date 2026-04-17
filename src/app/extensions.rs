@@ -4,7 +4,7 @@ use std::time::Duration;
 use crossterm::event::KeyEvent;
 use ratatui::{layout::Rect, Frame};
 
-use crate::app::console_state::{split_shell_words, OutputLine};
+use crate::app::console_state::{split_shell_words, CommandOutput, ConsolePlotBlock, OutputLine};
 
 mod math;
 
@@ -118,7 +118,7 @@ pub enum ConsoleResult {
     Text(Vec<OutputLine>),
     Table(Vec<Vec<String>>),
     Formula(Vec<String>),
-    Plot(Vec<String>),
+    Plot(ConsolePlotBlock),
     Canvas(Vec<String>),
     StartSession(Box<dyn ConsoleSession>),
     Error(String),
@@ -144,6 +144,37 @@ impl ConsoleCommandResponse {
         }
     }
 
+    pub fn plot(plot: ConsolePlotBlock) -> Self {
+        Self {
+            result: ConsoleResult::Plot(plot),
+            exit_code: 0,
+        }
+    }
+
+    pub fn into_outputs(self) -> (Vec<CommandOutput>, i32) {
+        let mut exit_code = self.exit_code;
+        let outputs = match self.result {
+            ConsoleResult::Text(lines) => lines.into_iter().map(CommandOutput::Line).collect(),
+            ConsoleResult::Table(rows) => rows
+                .into_iter()
+                .map(|row| CommandOutput::Line(OutputLine::stdout(row.join("  "))))
+                .collect(),
+            ConsoleResult::Formula(lines) | ConsoleResult::Canvas(lines) => lines
+                .into_iter()
+                .map(|line| CommandOutput::Line(OutputLine::stdout(line)))
+                .collect(),
+            ConsoleResult::Plot(plot) => vec![CommandOutput::Plot(plot)],
+            ConsoleResult::StartSession(_) => {
+                exit_code = 1;
+                vec![CommandOutput::Line(OutputLine::stderr(
+                    "interactive console sessions are not wired yet",
+                ))]
+            }
+            ConsoleResult::Error(message) => vec![CommandOutput::Line(OutputLine::stderr(message))],
+        };
+        (outputs, exit_code)
+    }
+
     pub fn into_lines(self) -> (Vec<OutputLine>, i32) {
         let mut exit_code = self.exit_code;
         let lines = match self.result {
@@ -152,9 +183,14 @@ impl ConsoleCommandResponse {
                 .into_iter()
                 .map(|row| OutputLine::stdout(row.join("  ")))
                 .collect(),
-            ConsoleResult::Formula(lines)
-            | ConsoleResult::Plot(lines)
-            | ConsoleResult::Canvas(lines) => lines.into_iter().map(OutputLine::stdout).collect(),
+            ConsoleResult::Formula(lines) | ConsoleResult::Canvas(lines) => {
+                lines.into_iter().map(OutputLine::stdout).collect()
+            }
+            ConsoleResult::Plot(plot) => plot
+                .fallback_lines
+                .into_iter()
+                .map(OutputLine::stdout)
+                .collect(),
             ConsoleResult::StartSession(_) => {
                 exit_code = 1;
                 vec![OutputLine::stderr(

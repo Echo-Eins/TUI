@@ -66,6 +66,62 @@ impl OutputLine {
 // ── Task State Machine ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+pub enum CommandOutput {
+    Line(OutputLine),
+    Plot(ConsolePlotBlock),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsolePlotMode {
+    Line,
+    Points,
+    Bars,
+    Sparkline,
+}
+
+impl ConsolePlotMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Points => "points",
+            Self::Bars => "bars",
+            Self::Sparkline => "sparkline",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsolePlotSeries {
+    pub points: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsolePlotBlock {
+    pub title: String,
+    pub expression: String,
+    pub variable: String,
+    pub mode: ConsolePlotMode,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub x_min_label: String,
+    pub x_max_label: String,
+    pub y_min_label: String,
+    pub y_max_label: String,
+    pub samples: usize,
+    pub finite_samples: usize,
+    pub invalid_samples: usize,
+    pub clipped_samples: usize,
+    pub discontinuities: usize,
+    pub cache_hit: bool,
+    pub requested_width: usize,
+    pub requested_height: usize,
+    pub series: Vec<ConsolePlotSeries>,
+    pub fallback_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum TaskState {
     Completed {
         exit_code: i32,
@@ -134,6 +190,7 @@ pub struct CommandBlock {
     pub input: String,
     pub cwd: String,
     pub output_lines: Vec<OutputLine>,
+    pub output_items: Vec<CommandOutput>,
     pub state: Option<TaskState>, // None = still running
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
@@ -154,6 +211,7 @@ impl CommandBlock {
             input,
             cwd,
             output_lines: Vec::new(),
+            output_items: Vec::new(),
             state: None,
             started_at: Instant::now(),
             finished_at: None,
@@ -176,10 +234,29 @@ impl CommandBlock {
 
     /// Push an output line, keeping max_lines at most.
     pub fn push_line(&mut self, line: OutputLine, max_lines: usize) {
+        self.output_items.push(CommandOutput::Line(line.clone()));
         self.output_lines.push(line);
         if self.output_lines.len() > max_lines {
             let excess = self.output_lines.len() - max_lines;
             self.output_lines.drain(0..excess);
+        }
+        self.trim_output_items(max_lines);
+    }
+
+    pub fn push_output(&mut self, output: CommandOutput, max_lines: usize) {
+        match output {
+            CommandOutput::Line(line) => self.push_line(line, max_lines),
+            CommandOutput::Plot(plot) => {
+                self.output_items.push(CommandOutput::Plot(plot));
+                self.trim_output_items(max_lines);
+            }
+        }
+    }
+
+    fn trim_output_items(&mut self, max_items: usize) {
+        if self.output_items.len() > max_items {
+            let excess = self.output_items.len() - max_items;
+            self.output_items.drain(0..excess);
         }
     }
 
@@ -856,6 +933,46 @@ mod tests {
             elapsed_ms: state.status_threshold_ms + 1,
         });
         assert!(state.should_show_badge(&slow_fail));
+    }
+
+    #[test]
+    fn command_block_keeps_typed_output_next_to_legacy_lines() {
+        let mut block = CommandBlock::new(1, ":plot x".to_string(), ".".to_string());
+        block.push_line(OutputLine::stdout("ready"), 16);
+        block.push_output(
+            CommandOutput::Plot(ConsolePlotBlock {
+                title: "PLOT / function".to_string(),
+                expression: "x".to_string(),
+                variable: "x".to_string(),
+                mode: ConsolePlotMode::Line,
+                x_min: -1.0,
+                x_max: 1.0,
+                y_min: -1.0,
+                y_max: 1.0,
+                x_min_label: "-1".to_string(),
+                x_max_label: "1".to_string(),
+                y_min_label: "-1".to_string(),
+                y_max_label: "1".to_string(),
+                samples: 16,
+                finite_samples: 16,
+                invalid_samples: 0,
+                clipped_samples: 0,
+                discontinuities: 0,
+                cache_hit: false,
+                requested_width: 64,
+                requested_height: 8,
+                series: vec![ConsolePlotSeries {
+                    points: vec![(-1.0, -1.0), (1.0, 1.0)],
+                }],
+                fallback_lines: vec!["fallback".to_string()],
+            }),
+            16,
+        );
+
+        assert_eq!(block.output_lines.len(), 1);
+        assert_eq!(block.output_items.len(), 2);
+        assert!(matches!(block.output_items[0], CommandOutput::Line(_)));
+        assert!(matches!(block.output_items[1], CommandOutput::Plot(_)));
     }
 
     #[test]

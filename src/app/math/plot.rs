@@ -89,8 +89,14 @@ impl PlotRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct PlotSeries {
+    pub points: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PlotRender {
     pub canvas: Vec<String>,
+    pub series: Vec<PlotSeries>,
     pub x_min: f64,
     pub x_max: f64,
     pub y_min: f64,
@@ -214,9 +220,11 @@ pub fn render_plot(
             render_grid(request, &samples, y_min, y_max)
         }
     };
+    let series = build_plot_series(request, &samples, y_min, y_max);
 
     Ok(PlotRender {
         canvas,
+        series,
         x_min: request.x_min,
         x_max: request.x_max,
         y_min,
@@ -236,6 +244,54 @@ struct PlotStats {
     invalid_samples: usize,
     clipped_samples: usize,
     discontinuities: usize,
+}
+
+fn build_plot_series(
+    request: &PlotRequest,
+    samples: &[PlotSample],
+    y_min: f64,
+    y_max: f64,
+) -> Vec<PlotSeries> {
+    let mut series = Vec::new();
+    let mut current = Vec::new();
+    let mut previous_y = None;
+    let y_span = y_max - y_min;
+
+    for sample in samples {
+        let Some(y) = sample.y else {
+            flush_series(&mut series, &mut current);
+            previous_y = None;
+            continue;
+        };
+
+        if y < y_min || y > y_max {
+            flush_series(&mut series, &mut current);
+            previous_y = None;
+            continue;
+        }
+
+        if matches!(request.mode, PlotMode::Line | PlotMode::Sparkline) {
+            if let Some(prev) = previous_y {
+                if is_discontinuity(prev, y, y_span) {
+                    flush_series(&mut series, &mut current);
+                }
+            }
+        }
+
+        current.push((sample.x, y));
+        previous_y = Some(y);
+    }
+
+    flush_series(&mut series, &mut current);
+    series
+}
+
+fn flush_series(series: &mut Vec<PlotSeries>, current: &mut Vec<(f64, f64)>) {
+    if !current.is_empty() {
+        series.push(PlotSeries {
+            points: std::mem::take(current),
+        });
+    }
 }
 
 fn sample_expression(request: &PlotRequest, variables: &BTreeMap<String, f64>) -> Vec<PlotSample> {
@@ -596,6 +652,7 @@ mod tests {
     fn renders_basic_function_plot() {
         let render = render_plot(&request("sin(x)"), &BTreeMap::new()).unwrap();
         assert!(!render.canvas.is_empty());
+        assert!(!render.series.is_empty());
         assert!(render.finite_samples > 100);
         assert!(render.canvas.iter().any(|line| line.contains('*')));
     }
@@ -617,5 +674,16 @@ mod tests {
         let (_, second_hit) = cache.render(&request, &BTreeMap::new()).unwrap();
         assert!(!first_hit);
         assert!(second_hit);
+    }
+
+    #[test]
+    fn line_series_breaks_across_asymptotes() {
+        let mut request = request("tan(x)");
+        request.x_min = -std::f64::consts::PI;
+        request.x_max = std::f64::consts::PI;
+        request.samples = 512;
+        let render = render_plot(&request, &BTreeMap::new()).unwrap();
+        assert!(render.series.len() > 1);
+        assert!(render.discontinuities > 0 || render.clipped_samples > 0);
     }
 }

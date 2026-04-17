@@ -1,12 +1,16 @@
 use crate::app::{
-    console_state::{CommandBlock, ConsoleMode},
+    console_state::{CommandBlock, CommandOutput, ConsoleMode, ConsolePlotBlock, ConsolePlotMode},
     AppState,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
-    widgets::{Block as UiBlock, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Axis, Block as UiBlock, Borders, Chart, Clear, Dataset, GraphType, Paragraph, Sparkline,
+        Wrap,
+    },
     Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -147,6 +151,16 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
     let inner = output_block.inner(area);
     f.render_widget(output_block, area);
 
+    if state.console_state.blocks.iter().any(|block| {
+        block
+            .output_items
+            .iter()
+            .any(|item| matches!(item, CommandOutput::Plot(_)))
+    }) {
+        render_blocks_typed(f, state, inner);
+        return;
+    }
+
     // Collect all lines from all blocks into a flat list for scrolling
     let mut all_lines: Vec<Line> = Vec::new();
 
@@ -281,6 +295,404 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
         .scroll((view_offset as u16, 0));
 
     f.render_widget(paragraph, inner);
+}
+
+fn render_blocks_typed(f: &mut Frame, state: &mut AppState, area: Rect) {
+    let items = build_console_render_items(state);
+    let visible_height = area.height;
+    let content_height = items
+        .iter()
+        .map(|item| item.height(area.width))
+        .sum::<u16>();
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let scroll_offset = state.console_state.scroll_offset.min(max_scroll);
+    let view_offset = max_scroll.saturating_sub(scroll_offset);
+
+    let mut consumed = 0u16;
+    let mut y = area.y;
+    let bottom = area.y.saturating_add(area.height);
+
+    for item in items {
+        let height = item.height(area.width);
+        if consumed.saturating_add(height) <= view_offset {
+            consumed = consumed.saturating_add(height);
+            continue;
+        }
+        if y >= bottom {
+            break;
+        }
+
+        let clipped_top = view_offset.saturating_sub(consumed);
+        let available_height = bottom.saturating_sub(y);
+        let render_height = height.saturating_sub(clipped_top).min(available_height);
+        if render_height == 0 {
+            consumed = consumed.saturating_add(height);
+            continue;
+        }
+
+        match item {
+            ConsoleRenderItem::Line(line) => {
+                if clipped_top == 0 {
+                    f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+                    y = y.saturating_add(1);
+                }
+            }
+            ConsoleRenderItem::Plot(plot) => {
+                let plot_x = area.x.saturating_add(1);
+                let plot_width = area.width.saturating_sub(1);
+                render_plot_output(f, plot, Rect::new(plot_x, y, plot_width, render_height));
+                y = y.saturating_add(render_height);
+            }
+        }
+
+        consumed = consumed.saturating_add(height);
+    }
+
+    state.console_state.scroll_offset = scroll_offset;
+}
+
+enum ConsoleRenderItem<'a> {
+    Line(Line<'static>),
+    Plot(&'a ConsolePlotBlock),
+}
+
+impl ConsoleRenderItem<'_> {
+    fn height(&self, width: u16) -> u16 {
+        match self {
+            Self::Line(_) => 1,
+            Self::Plot(plot) => plot_item_height(plot, width),
+        }
+    }
+}
+
+fn build_console_render_items(state: &AppState) -> Vec<ConsoleRenderItem<'_>> {
+    let mut items = Vec::new();
+    for block in &state.console_state.blocks {
+        items.push(ConsoleRenderItem::Line(block_header_line(
+            block,
+            &state.console_state,
+        )));
+
+        if block.output_items.is_empty() {
+            for output_line in &block.output_lines {
+                items.push(ConsoleRenderItem::Line(output_line_line(output_line)));
+            }
+        } else {
+            for output in &block.output_items {
+                match output {
+                    CommandOutput::Line(output_line) => {
+                        items.push(ConsoleRenderItem::Line(output_line_line(output_line)));
+                    }
+                    CommandOutput::Plot(plot) => items.push(ConsoleRenderItem::Plot(plot)),
+                }
+            }
+        }
+
+        if block.sudo_hint
+            || (block.explain_hint && !block.is_explaining && block.explanation.is_none())
+        {
+            items.push(ConsoleRenderItem::Line(gutter_line(
+                "--------------------------------------",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let mut hint_spans = vec![Span::styled("| ", Style::default().fg(Color::DarkGray))];
+            if block.sudo_hint {
+                hint_spans.push(Span::styled(
+                    " [Ctrl+S: Re-run with sudo] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            if block.explain_hint && !block.is_explaining && block.explanation.is_none() {
+                hint_spans.push(Span::styled(
+                    " [Ctrl+E: Explain Error with AI] ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            items.push(ConsoleRenderItem::Line(Line::from(hint_spans)));
+        }
+
+        if block.is_explaining {
+            items.push(ConsoleRenderItem::Line(gutter_line("", Style::default())));
+            items.push(ConsoleRenderItem::Line(gutter_line(
+                "AI is analyzing the error...",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::RAPID_BLINK),
+            )));
+        } else if let Some(explanation) = &block.explanation {
+            items.push(ConsoleRenderItem::Line(gutter_line("", Style::default())));
+            items.push(ConsoleRenderItem::Line(gutter_line(
+                "AI Explanation",
+                Style::default().fg(Color::Magenta),
+            )));
+            for line in explanation.lines() {
+                items.push(ConsoleRenderItem::Line(Line::from(vec![
+                    Span::styled("| ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("> ", Style::default().fg(Color::Magenta)),
+                    Span::raw(line.to_string()),
+                ])));
+            }
+            items.push(ConsoleRenderItem::Line(gutter_line(
+                "-----------------------------------",
+                Style::default().fg(Color::Magenta),
+            )));
+        }
+
+        items.push(ConsoleRenderItem::Line(Line::from("")));
+    }
+    items
+}
+
+fn block_header_line(
+    block: &CommandBlock,
+    console_state: &crate::app::console_state::ConsoleState,
+) -> Line<'static> {
+    let mut header_spans = vec![
+        Span::styled("$ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            block.input.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if let Some((badge_text, badge_color)) = get_block_badge(block, console_state) {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(badge_text, Style::default().fg(badge_color)));
+    }
+
+    Line::from(header_spans)
+}
+
+fn output_line_line(output_line: &crate::app::console_state::OutputLine) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("| ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            output_line.text.clone(),
+            Style::default().fg(output_line.stream.color()),
+        ),
+    ])
+}
+
+fn gutter_line(text: impl Into<String>, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("| ", Style::default().fg(Color::DarkGray)),
+        Span::styled(text.into(), style),
+    ])
+}
+
+fn plot_item_height(plot: &ConsolePlotBlock, width: u16) -> u16 {
+    if width < 46 || plot.series.is_empty() {
+        return plot.fallback_lines.len().clamp(4, 14) as u16;
+    }
+    let chart_height = (plot.requested_height as u16).clamp(6, 16);
+    chart_height.saturating_add(5)
+}
+
+fn render_plot_output(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
+    if area.width < 46 || area.height < 8 || plot.series.is_empty() {
+        render_plot_fallback(f, plot, area);
+        return;
+    }
+
+    let title = clamp_plain_text(&plot.title, area.width.saturating_sub(4) as usize);
+    let block = UiBlock::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", title))
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Rgb(12, 14, 16)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 5 || inner.width < 24 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(3)])
+        .split(inner);
+
+    let cache = if plot.cache_hit { "hit" } else { "miss" };
+    let info = vec![
+        Line::from(vec![
+            Span::styled(" mode ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<9}", plot.mode.label()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(" var ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<8}", plot.variable),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(" samples ", Style::default().fg(Color::DarkGray)),
+            Span::styled(plot.samples.to_string(), Style::default().fg(Color::White)),
+            Span::styled(" cache ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cache, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(" finite ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                plot.finite_samples.to_string(),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(" invalid ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                plot.invalid_samples.to_string(),
+                Style::default().fg(if plot.invalid_samples > 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(" clipped ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                plot.clipped_samples.to_string(),
+                Style::default().fg(if plot.clipped_samples > 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(" breaks ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                plot.discontinuities.to_string(),
+                Style::default().fg(if plot.discontinuities > 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(info), chunks[0]);
+
+    if plot.mode == ConsolePlotMode::Sparkline {
+        render_plot_sparkline(f, plot, chunks[1]);
+        return;
+    }
+
+    let graph_type = match plot.mode {
+        ConsolePlotMode::Bars => GraphType::Bar,
+        ConsolePlotMode::Points => GraphType::Scatter,
+        ConsolePlotMode::Line | ConsolePlotMode::Sparkline => GraphType::Line,
+    };
+    let marker = match plot.mode {
+        ConsolePlotMode::Bars => symbols::Marker::Bar,
+        ConsolePlotMode::Points => symbols::Marker::Dot,
+        ConsolePlotMode::Line | ConsolePlotMode::Sparkline => symbols::Marker::Braille,
+    };
+    let style = match plot.mode {
+        ConsolePlotMode::Bars => Style::default().fg(Color::Green),
+        ConsolePlotMode::Points => Style::default().fg(Color::Yellow),
+        ConsolePlotMode::Line | ConsolePlotMode::Sparkline => Style::default().fg(Color::Cyan),
+    };
+    let datasets = plot
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(_, series)| !series.points.is_empty())
+        .map(|(idx, series)| {
+            let mut dataset = Dataset::default()
+                .marker(marker)
+                .graph_type(graph_type)
+                .style(style)
+                .data(series.points.as_slice());
+            if idx == 0 {
+                dataset = dataset.name(clamp_plain_text(
+                    &plot.expression,
+                    chunks[1].width.saturating_sub(4) as usize,
+                ));
+            }
+            dataset
+        })
+        .collect::<Vec<_>>();
+
+    let x_labels = axis_labels(&plot.x_min_label, &plot.x_max_label, plot.x_min, plot.x_max);
+    let y_labels = axis_labels(&plot.y_min_label, &plot.y_max_label, plot.y_min, plot.y_max);
+    let chart = Chart::new(datasets)
+        .x_axis(
+            Axis::default()
+                .style(Style::default().fg(Color::DarkGray))
+                .bounds([plot.x_min, plot.x_max])
+                .labels(x_labels),
+        )
+        .y_axis(
+            Axis::default()
+                .style(Style::default().fg(Color::DarkGray))
+                .bounds([plot.y_min, plot.y_max])
+                .labels(y_labels),
+        );
+
+    f.render_widget(chart, chunks[1]);
+}
+
+fn render_plot_sparkline(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
+    let values = plot
+        .series
+        .iter()
+        .flat_map(|series| series.points.iter().map(|(_, y)| *y))
+        .map(|y| ((y - plot.y_min) / (plot.y_max - plot.y_min)).clamp(0.0, 1.0))
+        .map(|t| (t * 100.0).round() as u64)
+        .collect::<Vec<_>>();
+    let max_value = values.iter().copied().max().unwrap_or(1).max(1);
+    let sparkline = Sparkline::default()
+        .data(&values)
+        .style(Style::default().fg(Color::Cyan))
+        .max(max_value);
+    f.render_widget(sparkline, area);
+}
+
+fn render_plot_fallback(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
+    let lines = plot
+        .fallback_lines
+        .iter()
+        .take(area.height as usize)
+        .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Cyan))))
+        .collect::<Vec<_>>();
+    let fallback = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::Cyan));
+    f.render_widget(fallback, area);
+}
+
+fn axis_labels(min_label: &str, max_label: &str, min: f64, max: f64) -> Vec<Line<'static>> {
+    if min < 0.0 && max > 0.0 {
+        vec![
+            Line::from(min_label.to_string()),
+            Line::from("0"),
+            Line::from(max_label.to_string()),
+        ]
+    } else {
+        vec![
+            Line::from(min_label.to_string()),
+            Line::from(max_label.to_string()),
+        ]
+    }
+}
+
+fn clamp_plain_text(input: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in input.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
 }
 
 fn get_block_badge(
@@ -670,6 +1082,8 @@ fn visible_input_window(input: &str, cursor_position: usize, max_width: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::console_state::ConsolePlotSeries;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn visible_input_window_keeps_cursor_visible_for_long_ascii() {
@@ -683,5 +1097,81 @@ mod tests {
         let (visible, cursor_width) = visible_input_window("ab界cd", 4, 4);
         assert_eq!(visible, "界cd");
         assert_eq!(cursor_width, 3);
+    }
+
+    #[test]
+    fn plot_output_renders_with_ratatui_chart_block() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let plot = sample_plot();
+
+        terminal
+            .draw(|frame| render_plot_output(frame, &plot, Rect::new(0, 0, 80, 18)))
+            .expect("render plot");
+
+        let text = buffer_text(terminal.backend().buffer(), 80, 18);
+        assert!(text.contains("PLOT / function"));
+        assert!(text.contains("samples"));
+        assert!(text.contains("sin(x)"));
+    }
+
+    #[test]
+    fn plot_output_uses_fallback_when_area_is_too_narrow() {
+        let backend = TestBackend::new(32, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let plot = sample_plot();
+
+        terminal
+            .draw(|frame| render_plot_output(frame, &plot, Rect::new(0, 0, 32, 8)))
+            .expect("render plot fallback");
+
+        let text = buffer_text(terminal.backend().buffer(), 32, 8);
+        assert!(text.contains("fallback plot"));
+    }
+
+    fn sample_plot() -> ConsolePlotBlock {
+        ConsolePlotBlock {
+            title: "PLOT / function".to_string(),
+            expression: "sin(x)".to_string(),
+            variable: "x".to_string(),
+            mode: ConsolePlotMode::Line,
+            x_min: -std::f64::consts::PI,
+            x_max: std::f64::consts::PI,
+            y_min: -1.0,
+            y_max: 1.0,
+            x_min_label: "-pi".to_string(),
+            x_max_label: "pi".to_string(),
+            y_min_label: "-1".to_string(),
+            y_max_label: "1".to_string(),
+            samples: 64,
+            finite_samples: 64,
+            invalid_samples: 0,
+            clipped_samples: 0,
+            discontinuities: 0,
+            cache_hit: false,
+            requested_width: 72,
+            requested_height: 10,
+            series: vec![ConsolePlotSeries {
+                points: (0..64)
+                    .map(|idx| {
+                        let t = idx as f64 / 63.0;
+                        let x = -std::f64::consts::PI + std::f64::consts::TAU * t;
+                        (x, x.sin())
+                    })
+                    .collect(),
+            }],
+            fallback_lines: vec!["fallback plot".to_string()],
+        }
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 }

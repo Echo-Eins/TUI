@@ -2038,11 +2038,24 @@ impl AppState {
         lines: Vec<crate::app::console_state::OutputLine>,
         exit_code: i32,
     ) -> u64 {
+        let outputs = lines
+            .into_iter()
+            .map(crate::app::console_state::CommandOutput::Line)
+            .collect();
+        self.finish_console_block_outputs(input, outputs, exit_code)
+    }
+
+    fn finish_console_block_outputs(
+        &mut self,
+        input: String,
+        outputs: Vec<crate::app::console_state::CommandOutput>,
+        exit_code: i32,
+    ) -> u64 {
         let max_lines = self.config.read().console.max_output_lines;
         let block_id = self.console_state.start_command(input);
         if let Some(block) = self.console_state.get_block_mut(block_id) {
-            for line in lines {
-                block.push_line(line, max_lines);
+            for output in outputs {
+                block.push_output(output, max_lines);
             }
             block.complete(exit_code);
             if exit_code != 0
@@ -2418,8 +2431,8 @@ impl AppState {
         match self.console_extensions.route(cmd, &context) {
             crate::app::extensions::ConsoleRoute::Shell => false,
             crate::app::extensions::ConsoleRoute::Handled(response) => {
-                let (lines, exit_code) = response.into_lines();
-                self.finish_console_block(cmd.trim().to_string(), lines, exit_code);
+                let (outputs, exit_code) = response.into_outputs();
+                self.finish_console_block_outputs(cmd.trim().to_string(), outputs, exit_code);
                 true
             }
         }

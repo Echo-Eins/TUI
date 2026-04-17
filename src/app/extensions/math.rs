@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::console_state::OutputLine;
+use crate::app::console_state::{ConsolePlotBlock, ConsolePlotMode, ConsolePlotSeries, OutputLine};
 use crate::app::math::{
     convert_base, format_exact_number, format_expr, format_number as format_math_number,
     format_pi_multiple, parse_expression, parse_relation, relation_fallback, render_formula,
@@ -217,7 +217,7 @@ impl MathExtension {
         };
 
         match memory.plot_cache.render(&request, &variables) {
-            Ok((render, cache_hit)) => ConsoleCommandResponse::ok(render_plot_block(
+            Ok((render, cache_hit)) => ConsoleCommandResponse::plot(console_plot_block(
                 &request,
                 &render,
                 cache_hit,
@@ -931,6 +931,58 @@ fn base_output(conversion: BaseConversion) -> Vec<OutputLine> {
         )));
     }
     lines
+}
+
+fn console_plot_block(
+    request: &PlotRequest,
+    render: &PlotRender,
+    cache_hit: bool,
+    fallback_width: usize,
+) -> ConsolePlotBlock {
+    let fallback_lines = render_plot_block(request, render, cache_hit, fallback_width)
+        .into_iter()
+        .map(|line| line.text)
+        .collect();
+
+    ConsolePlotBlock {
+        title: "PLOT / function".to_string(),
+        expression: request.expression.clone(),
+        variable: request.variable.clone(),
+        mode: console_plot_mode(render.mode),
+        x_min: render.x_min,
+        x_max: render.x_max,
+        y_min: render.y_min,
+        y_max: render.y_max,
+        x_min_label: format_pi_multiple(render.x_min),
+        x_max_label: format_pi_multiple(render.x_max),
+        y_min_label: format_math_number(render.y_min),
+        y_max_label: format_math_number(render.y_max),
+        samples: render.samples,
+        finite_samples: render.finite_samples,
+        invalid_samples: render.invalid_samples,
+        clipped_samples: render.clipped_samples,
+        discontinuities: render.discontinuities,
+        cache_hit,
+        requested_width: request.width,
+        requested_height: request.height,
+        series: render
+            .series
+            .iter()
+            .map(|series| ConsolePlotSeries {
+                points: series.points.clone(),
+            })
+            .collect(),
+        fallback_lines,
+    }
+}
+
+fn console_plot_mode(mode: PlotMode) -> ConsolePlotMode {
+    match mode {
+        PlotMode::Line => ConsolePlotMode::Line,
+        PlotMode::Points => ConsolePlotMode::Points,
+        PlotMode::Bars => ConsolePlotMode::Bars,
+        PlotMode::Sparkline => ConsolePlotMode::Sparkline,
+    }
 }
 
 fn render_plot_block(
