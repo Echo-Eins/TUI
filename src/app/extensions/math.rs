@@ -1,21 +1,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    symbols,
+    text::{Line as UiLine, Span},
+    widgets::{Axis, Block as UiBlock, Borders, Chart, Dataset, GraphType, Paragraph, Wrap},
+    Frame,
+};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::console_state::{ConsolePlotBlock, ConsolePlotMode, ConsolePlotSeries, OutputLine};
+use crate::app::console_state::{
+    ConsolePlotBlock, ConsolePlotMode, ConsolePlotSeries, OutputLine, OutputSpan, OutputStream,
+};
 use crate::app::math::{
     convert_base, format_exact_number, format_expr, format_number as format_math_number,
     format_pi_multiple, parse_expression, parse_relation, relation_fallback, render_formula,
-    solve_exact, solve_relation, BaseConversion, EvalContext, ExactSolveReport, FormulaRender,
-    Interval, MathError, PlotCache, PlotMode, PlotRender, PlotRequest, Relation, SolveOptions,
-    SolveReport, MAX_PLOT_HEIGHT, MAX_PLOT_SAMPLES, MAX_PLOT_WIDTH, MIN_PLOT_HEIGHT,
-    MIN_PLOT_SAMPLES, MIN_PLOT_WIDTH,
+    solve_exact, solve_relation, BaseConversion, EvalContext, ExactSolveReport, Expr,
+    FormulaRender, Interval, MathError, PlotCache, PlotMode, PlotRender, PlotRequest, Relation,
+    RelationOp, SolveOptions, SolveReport, MAX_PLOT_HEIGHT, MAX_PLOT_SAMPLES, MAX_PLOT_WIDTH,
+    MIN_PLOT_HEIGHT, MIN_PLOT_SAMPLES, MIN_PLOT_WIDTH,
 };
 
 use super::{
     ConsoleCommandResponse, ConsoleCommandSpec, ConsoleContext, ConsoleExtension,
-    ConsoleExtensionRegistry, ExtensionKind, ExtensionMetadata,
+    ConsoleExtensionRegistry, ConsoleSession, ExtensionKind, ExtensionMetadata, SessionStatus,
+    SessionSummary,
 };
 
 pub(super) struct MathExtension {
@@ -78,6 +91,7 @@ struct PlotQuery {
     mode: PlotMode,
     width: Option<usize>,
     height: Option<usize>,
+    interactive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +109,7 @@ struct MathBlock {
     input: String,
     exact_lines: Vec<String>,
     formula: Option<FormulaRender>,
+    visual: Option<Vec<OutputLine>>,
     approx_lines: Vec<String>,
     domain: String,
     vars: Vec<String>,
@@ -131,7 +146,7 @@ impl MathExtension {
                     ConsoleCommandSpec {
                         name: "plot",
                         summary: "Render a bounded terminal function plot.",
-                        usage: ":plot <expr> [for x] [from a..b|x=a..b] [y=a..b] [--samples auto|N] [--mode line|points|bars|sparkline]",
+                        usage: ":plot <expr> [-i] [for x] [from a..b|x=a..b] [y=a..b] [--samples auto|N] [--mode line|points|bars|sparkline]",
                         tags: &["math", "plot", "modulator"],
                     },
                 ],
@@ -217,12 +232,23 @@ impl MathExtension {
         };
 
         match memory.plot_cache.render(&request, &variables) {
-            Ok((render, cache_hit)) => ConsoleCommandResponse::plot(console_plot_block(
-                &request,
-                &render,
-                cache_hit,
-                block_width,
-            )),
+            Ok((render, cache_hit)) => {
+                if query.interactive {
+                    ConsoleCommandResponse::session(Box::new(InteractivePlotSession::new(
+                        request,
+                        variables,
+                        render,
+                        query.samples,
+                    )))
+                } else {
+                    ConsoleCommandResponse::plot(console_plot_block(
+                        &request,
+                        &render,
+                        cache_hit,
+                        block_width,
+                    ))
+                }
+            }
             Err(error) => math_error(&query.expression, error),
         }
     }
@@ -326,6 +352,7 @@ impl MathExtension {
                     input: input.to_string(),
                     exact_lines: vec![render.fallback.clone()],
                     formula: Some(render),
+                    visual: None,
                     approx_lines: approx
                         .map(|value| vec![format!("~= {}", format_math_number(value))])
                         .unwrap_or_else(|| {
@@ -402,6 +429,7 @@ impl MathExtension {
                     input: format!("let {name} = {expr_input}"),
                     exact_lines: vec![format!("{name} = {exact}")],
                     formula: Some(render_formula(&expr, Some(&name), formula_width(ctx))),
+                    visual: None,
                     approx_lines: vec![format!("{name} ~= {}", format_math_number(value))],
                     domain: "n/a".to_string(),
                     vars: self.variables_output_plain(Some(&name)),
@@ -452,6 +480,7 @@ impl MathExtension {
                     input: input.to_string(),
                     exact_lines: vec![exact.clone()],
                     formula: Some(render_formula(&expr, None, formula_width(ctx))),
+                    visual: None,
                     approx_lines: vec![format!("~= {}", format_math_number(value))],
                     domain: "n/a".to_string(),
                     vars: variable_rows(expr.variables(), None, &variables),
@@ -691,11 +720,13 @@ fn parse_plot_query(args: &[String]) -> Result<PlotQuery, MathError> {
     let mut height = None;
     let mut x_range = None;
     let mut y_range = None;
+    let mut interactive = false;
     let mut idx = 0usize;
 
     while idx < args.len() {
         let arg = &args[idx];
         match arg.as_str() {
+            "-i" | "--interactive" | "--session" => interactive = true,
             "--line" => mode = PlotMode::Line,
             "--points" => mode = PlotMode::Points,
             "--bars" => mode = PlotMode::Bars,
@@ -787,6 +818,7 @@ fn parse_plot_query(args: &[String]) -> Result<PlotQuery, MathError> {
         mode,
         width,
         height,
+        interactive,
     })
 }
 
@@ -985,6 +1017,369 @@ fn console_plot_mode(mode: PlotMode) -> ConsolePlotMode {
     }
 }
 
+struct InteractivePlotSession {
+    request: PlotRequest,
+    variables: BTreeMap<String, f64>,
+    samples: PlotSampleSetting,
+    initial_x: (f64, f64),
+    initial_y: (f64, f64),
+    view_x: (f64, f64),
+    view_y: (f64, f64),
+    cache: Mutex<PlotCache>,
+    started_at: Instant,
+    status: SessionStatus,
+}
+
+impl InteractivePlotSession {
+    fn new(
+        request: PlotRequest,
+        variables: BTreeMap<String, f64>,
+        render: PlotRender,
+        samples: PlotSampleSetting,
+    ) -> Self {
+        let initial_x = (render.x_min, render.x_max);
+        let initial_y = (render.y_min, render.y_max);
+        Self {
+            request,
+            variables,
+            samples,
+            initial_x,
+            initial_y,
+            view_x: initial_x,
+            view_y: initial_y,
+            cache: Mutex::new(PlotCache::default()),
+            started_at: Instant::now(),
+            status: SessionStatus::Running,
+        }
+    }
+
+    fn request_for_area(&self, area: Rect) -> PlotRequest {
+        let width = area.width.saturating_sub(4).max(MIN_PLOT_WIDTH as u16) as usize;
+        let height = area.height.saturating_sub(5).max(MIN_PLOT_HEIGHT as u16) as usize;
+        let width = width.clamp(MIN_PLOT_WIDTH, MAX_PLOT_WIDTH);
+        let height = height.clamp(MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT);
+        let samples = match self.samples {
+            PlotSampleSetting::Auto => (width * 4).clamp(MIN_PLOT_SAMPLES, MAX_PLOT_SAMPLES),
+            PlotSampleSetting::Count(samples) => samples.clamp(MIN_PLOT_SAMPLES, MAX_PLOT_SAMPLES),
+        };
+
+        PlotRequest {
+            expression: self.request.expression.clone(),
+            expr: self.request.expr.clone(),
+            variable: self.request.variable.clone(),
+            x_min: self.view_x.0,
+            x_max: self.view_x.1,
+            y_range: Some(self.view_y),
+            samples,
+            width,
+            height,
+            mode: self.request.mode,
+        }
+    }
+
+    fn pan_x(&mut self, direction: f64) {
+        let span = self.view_x.1 - self.view_x.0;
+        let delta = span * 0.12 * direction;
+        self.view_x.0 += delta;
+        self.view_x.1 += delta;
+    }
+
+    fn pan_y(&mut self, direction: f64) {
+        let span = self.view_y.1 - self.view_y.0;
+        let delta = span * 0.12 * direction;
+        self.view_y.0 += delta;
+        self.view_y.1 += delta;
+    }
+
+    fn zoom(&mut self, factor: f64) {
+        self.view_x = zoom_range(self.view_x, factor);
+        self.view_y = zoom_range(self.view_y, factor);
+    }
+
+    fn reset_view(&mut self) {
+        self.view_x = self.initial_x;
+        self.view_y = self.initial_y;
+    }
+}
+
+impl ConsoleSession for InteractivePlotSession {
+    fn title(&self) -> &str {
+        "PLOT SESSION / function"
+    }
+
+    fn tick(&mut self, _dt: Duration) -> SessionStatus {
+        self.status
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> SessionStatus {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.status = SessionStatus::Quit;
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.pan_x(-1.0),
+            KeyCode::Right | KeyCode::Char('l') => self.pan_x(1.0),
+            KeyCode::Up | KeyCode::Char('k') => self.pan_y(1.0),
+            KeyCode::Down | KeyCode::Char('j') => self.pan_y(-1.0),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.zoom(0.78),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.zoom(1.28),
+            KeyCode::Char('r') | KeyCode::Char('0') => self.reset_view(),
+            _ => {}
+        }
+        self.status
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        render_interactive_plot_session(frame, self, area);
+    }
+
+    fn summary(&self) -> SessionSummary {
+        SessionSummary {
+            title: self.title().to_string(),
+            status: self.status,
+            lines: vec![
+                format!("expression: {}", self.request.expression),
+                format!(
+                    "view x [{}..{}] y [{}..{}]",
+                    format_pi_multiple(self.view_x.0),
+                    format_pi_multiple(self.view_x.1),
+                    format_math_number(self.view_y.0),
+                    format_math_number(self.view_y.1)
+                ),
+                format!("elapsed: {:.1}s", self.started_at.elapsed().as_secs_f64()),
+            ],
+        }
+    }
+}
+
+fn zoom_range(range: (f64, f64), factor: f64) -> (f64, f64) {
+    let center = (range.0 + range.1) * 0.5;
+    let half = ((range.1 - range.0) * factor * 0.5).max(1e-9);
+    (center - half, center + half)
+}
+
+fn render_interactive_plot_session(
+    frame: &mut Frame,
+    session: &InteractivePlotSession,
+    area: Rect,
+) {
+    if area.width < 32 || area.height < 8 {
+        frame.render_widget(Paragraph::new("plot session needs at least 32x8"), area);
+        return;
+    }
+
+    let title = clamp_display_width(session.title(), area.width.saturating_sub(4) as usize);
+    let block = UiBlock::default()
+        .borders(Borders::ALL)
+        .title(format!(" {title} "))
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Rgb(12, 14, 16)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 24 || inner.height < 5 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let request = session.request_for_area(chunks[1]);
+    let render_result = {
+        let mut cache = session
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.render(&request, &session.variables)
+    };
+
+    match render_result {
+        Ok((render, cache_hit)) => {
+            render_interactive_plot_info(frame, &request, &render, cache_hit, chunks[0]);
+            render_plot_chart(frame, &request, &render, chunks[1]);
+        }
+        Err(error) => {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    UiLine::from(Span::styled(
+                        "plot render error",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )),
+                    UiLine::from(error.message),
+                ])
+                .wrap(Wrap { trim: false }),
+                chunks[1],
+            );
+        }
+    }
+
+    let help = UiLine::from(vec![
+        Span::styled(" arrows/hjkl ", Style::default().fg(Color::Yellow)),
+        Span::raw("pan  "),
+        Span::styled(" +/- ", Style::default().fg(Color::Yellow)),
+        Span::raw("zoom  "),
+        Span::styled(" r/0 ", Style::default().fg(Color::Yellow)),
+        Span::raw("reset  "),
+        Span::styled(" q/Esc/Ctrl+C ", Style::default().fg(Color::Yellow)),
+        Span::raw("quit"),
+    ]);
+    frame.render_widget(Paragraph::new(help), chunks[2]);
+}
+
+fn render_interactive_plot_info(
+    frame: &mut Frame,
+    request: &PlotRequest,
+    render: &PlotRender,
+    cache_hit: bool,
+    area: Rect,
+) {
+    let cache = if cache_hit { "hit" } else { "miss" };
+    let info = vec![
+        UiLine::from(vec![
+            Span::styled(" expr ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                clamp_display_width(&request.expression, area.width.saturating_sub(36) as usize),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" var ", Style::default().fg(Color::DarkGray)),
+            Span::styled(request.variable.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(" mode ", Style::default().fg(Color::DarkGray)),
+            Span::styled(request.mode.label(), Style::default().fg(Color::Yellow)),
+        ]),
+        UiLine::from(vec![
+            Span::styled(" x ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!(
+                    "{}..{}",
+                    format_pi_multiple(render.x_min),
+                    format_pi_multiple(render.x_max)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("   y ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!(
+                    "{}..{}",
+                    format_math_number(render.y_min),
+                    format_math_number(render.y_max)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("   samples ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                render.samples.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" cache ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cache, Style::default().fg(Color::Green)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(info), area);
+}
+
+fn render_plot_chart(frame: &mut Frame, request: &PlotRequest, render: &PlotRender, area: Rect) {
+    if area.width < 24 || area.height < 3 || render.series.is_empty() {
+        let lines = render
+            .canvas
+            .iter()
+            .take(area.height as usize)
+            .map(|line| UiLine::from(Span::styled(line.clone(), Style::default().fg(Color::Cyan))))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
+
+    let graph_type = match request.mode {
+        PlotMode::Bars => GraphType::Bar,
+        PlotMode::Points => GraphType::Scatter,
+        PlotMode::Line | PlotMode::Sparkline => GraphType::Line,
+    };
+    let marker = match request.mode {
+        PlotMode::Bars => symbols::Marker::Bar,
+        PlotMode::Points => symbols::Marker::Dot,
+        PlotMode::Line | PlotMode::Sparkline => symbols::Marker::Braille,
+    };
+    let style = match request.mode {
+        PlotMode::Bars => Style::default().fg(Color::Green),
+        PlotMode::Points => Style::default().fg(Color::Yellow),
+        PlotMode::Line | PlotMode::Sparkline => Style::default().fg(Color::Cyan),
+    };
+    let datasets = render
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(_, series)| !series.points.is_empty())
+        .map(|(idx, series)| {
+            let mut dataset = Dataset::default()
+                .marker(marker)
+                .graph_type(graph_type)
+                .style(style)
+                .data(series.points.as_slice());
+            if idx == 0 {
+                dataset = dataset.name(clamp_display_width(
+                    &request.expression,
+                    area.width.saturating_sub(4) as usize,
+                ));
+            }
+            dataset
+        })
+        .collect::<Vec<_>>();
+
+    let chart = Chart::new(datasets)
+        .x_axis(
+            Axis::default()
+                .title(UiLine::from(Span::styled(
+                    "x",
+                    Style::default().fg(Color::Cyan),
+                )))
+                .style(Style::default().fg(Color::DarkGray))
+                .bounds([render.x_min, render.x_max])
+                .labels(plot_axis_labels(
+                    format_pi_multiple(render.x_min),
+                    format_pi_multiple(render.x_max),
+                    render.x_min,
+                    render.x_max,
+                )),
+        )
+        .y_axis(
+            Axis::default()
+                .title(UiLine::from(Span::styled(
+                    "y",
+                    Style::default().fg(Color::Cyan),
+                )))
+                .style(Style::default().fg(Color::DarkGray))
+                .bounds([render.y_min, render.y_max])
+                .labels(plot_axis_labels(
+                    format_math_number(render.y_min),
+                    format_math_number(render.y_max),
+                    render.y_min,
+                    render.y_max,
+                )),
+        );
+    frame.render_widget(chart, area);
+}
+
+fn plot_axis_labels(
+    min_label: String,
+    max_label: String,
+    min: f64,
+    max: f64,
+) -> Vec<UiLine<'static>> {
+    if min < 0.0 && max > 0.0 {
+        vec![
+            UiLine::from(min_label),
+            UiLine::from("0"),
+            UiLine::from(max_label),
+        ]
+    } else {
+        vec![UiLine::from(min_label), UiLine::from(max_label)]
+    }
+}
+
 fn render_plot_block(
     request: &PlotRequest,
     render: &PlotRender,
@@ -1051,6 +1446,7 @@ fn calc_help() -> Vec<OutputLine> {
         OutputLine::stdout(":calc formula \"(-b + sqrt(b^2 - 4*a*c)) / (2*a)\" for x -mb"),
         OutputLine::stdout(":calc --pretty \"x_1^2 / sqrt(y_2)\""),
         OutputLine::stdout(":formula sqrt(x^2 + y^2) for r -mb"),
+        OutputLine::stdout(":plot sin(x) from -pi..pi -i"),
         OutputLine::stdout(":calc let a = 42"),
         OutputLine::stdout(":calc vars"),
         OutputLine::stdout(":calc clear"),
@@ -1067,6 +1463,7 @@ fn exact_solve_output(
 ) -> Vec<OutputLine> {
     if flags.math_block {
         let formula = exact_result_formula(&report.exact_lines, ctx);
+        let visual = trig_unit_circle_visual(relation, &report.variable, variables);
         return render_math_block(
             MathBlock {
                 title: "MATH BLOCK / solve".to_string(),
@@ -1076,6 +1473,7 @@ fn exact_solve_output(
                 input: input.to_string(),
                 exact_lines: report.exact_lines,
                 formula: Some(formula),
+                visual,
                 approx_lines: report.numeric_lines,
                 domain: report
                     .domain
@@ -1162,6 +1560,9 @@ fn solve_output(
                         variable_rows(relation.variables(), Some(&variable), variables)
                     })
                     .unwrap_or_else(|| vec![format!("{variable:<4} target  real")]);
+                let visual = relation_context.and_then(|(relation, _, variables)| {
+                    trig_unit_circle_visual(relation, &variable, variables)
+                });
                 return render_math_block(
                     MathBlock {
                         title: "MATH BLOCK / solve".to_string(),
@@ -1179,6 +1580,7 @@ fn solve_output(
                             pretty: vec![relation_fallback(relation)],
                             fallback: relation_fallback(relation),
                         }),
+                        visual,
                         approx_lines: result_lines,
                         domain: format!(
                             "[{}..{}]",
@@ -1220,6 +1622,9 @@ fn solve_output(
                         variable_rows(relation.variables(), Some(&variable), variables)
                     })
                     .unwrap_or_else(|| vec![format!("{variable:<4} target  real")]);
+                let visual = relation_context.and_then(|(relation, _, variables)| {
+                    trig_unit_circle_visual(relation, &variable, variables)
+                });
                 return render_math_block(
                     MathBlock {
                         title: "MATH BLOCK / solve".to_string(),
@@ -1237,6 +1642,7 @@ fn solve_output(
                             pretty: vec![relation_fallback(relation)],
                             fallback: relation_fallback(relation),
                         }),
+                        visual,
                         approx_lines: result_lines,
                         domain: format!(
                             "[{}..{}]",
@@ -1314,6 +1720,297 @@ fn variable_rows(
     rows
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrigVisualRelation {
+    func: &'static str,
+    op: RelationOp,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CircleCellRole {
+    Empty,
+    Circle,
+    Axis,
+    Arc,
+    Boundary,
+    Solution,
+    Label,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CircleCell {
+    ch: char,
+    role: CircleCellRole,
+}
+
+impl Default for CircleCell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            role: CircleCellRole::Empty,
+        }
+    }
+}
+
+fn trig_unit_circle_visual(
+    relation: &Relation,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<Vec<OutputLine>> {
+    let trig = match_trig_visual_relation(relation, variable, variables)?;
+    if !trig.value.is_finite() || trig.value < -1.0 || trig.value > 1.0 {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    lines.push(OutputLine::styled(
+        OutputStream::Stdout,
+        vec![
+            OutputSpan::new("one-period visual: ", Color::DarkGray),
+            OutputSpan::new(trig.func, Color::Cyan),
+            OutputSpan::new(format!("({variable}) {} ", trig.op.label()), Color::White),
+            OutputSpan::new(format_math_number(trig.value), Color::Yellow),
+        ],
+    ));
+    lines.extend(render_trig_circle(trig));
+    lines.push(OutputLine::styled(
+        OutputStream::Stdout,
+        vec![
+            OutputSpan::new("legend: ", Color::DarkGray),
+            OutputSpan::new("#", Color::Green),
+            OutputSpan::new(" solution arc  ", Color::DarkGray),
+            OutputSpan::new("B", Color::Yellow),
+            OutputSpan::new(" boundary  ", Color::DarkGray),
+            OutputSpan::new("*", Color::LightMagenta),
+            OutputSpan::new(" exact point", Color::DarkGray),
+        ],
+    ));
+    Some(lines)
+}
+
+fn match_trig_visual_relation(
+    relation: &Relation,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<TrigVisualRelation> {
+    if let Some(value) = constant_expr_value(&relation.right, variable, variables) {
+        let func = match_trig_visual_expr(&relation.left, variable)?;
+        return Some(TrigVisualRelation {
+            func,
+            op: relation.op,
+            value,
+        });
+    }
+
+    if let Some(value) = constant_expr_value(&relation.left, variable, variables) {
+        let func = match_trig_visual_expr(&relation.right, variable)?;
+        return Some(TrigVisualRelation {
+            func,
+            op: reverse_relation_op(relation.op),
+            value,
+        });
+    }
+
+    None
+}
+
+fn constant_expr_value(
+    expr: &Expr,
+    variable: &str,
+    variables: &BTreeMap<String, f64>,
+) -> Option<f64> {
+    if expr.variables().iter().any(|name| name == variable) {
+        return None;
+    }
+    expr.eval(&EvalContext::with_variables(variables.clone()))
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn match_trig_visual_expr(expr: &Expr, variable: &str) -> Option<&'static str> {
+    let Expr::Function { name, args } = expr else {
+        return None;
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::Variable(arg) = &args[0] else {
+        return None;
+    };
+    if arg != variable {
+        return None;
+    }
+    match name.as_str() {
+        "sin" => Some("sin"),
+        "cos" => Some("cos"),
+        _ => None,
+    }
+}
+
+fn reverse_relation_op(op: RelationOp) -> RelationOp {
+    match op {
+        RelationOp::Equal => RelationOp::Equal,
+        RelationOp::Less => RelationOp::Greater,
+        RelationOp::LessEqual => RelationOp::GreaterEqual,
+        RelationOp::Greater => RelationOp::Less,
+        RelationOp::GreaterEqual => RelationOp::LessEqual,
+    }
+}
+
+fn render_trig_circle(trig: TrigVisualRelation) -> Vec<OutputLine> {
+    const WIDTH: usize = 39;
+    const HEIGHT: usize = 19;
+    const CX: f64 = 19.0;
+    const CY: f64 = 9.0;
+    const R: f64 = 7.0;
+
+    let mut grid = vec![vec![CircleCell::default(); WIDTH]; HEIGHT];
+
+    for col in 1..WIDTH.saturating_sub(1) {
+        put_circle_cell(&mut grid, col, CY as usize, '-', CircleCellRole::Axis);
+    }
+    for row in 1..HEIGHT.saturating_sub(1) {
+        put_circle_cell(&mut grid, CX as usize, row, '|', CircleCellRole::Axis);
+    }
+    put_circle_cell(
+        &mut grid,
+        CX as usize,
+        CY as usize,
+        '+',
+        CircleCellRole::Axis,
+    );
+    put_circle_word(&mut grid, CX as usize + 1, 0, "sin", CircleCellRole::Label);
+    put_circle_word(
+        &mut grid,
+        WIDTH.saturating_sub(4),
+        CY as usize + 1,
+        "cos",
+        CircleCellRole::Label,
+    );
+
+    for degree in 0..360 {
+        let angle = (degree as f64).to_radians();
+        let (col, row) = circle_point(angle, CX, CY, R);
+        put_circle_cell(&mut grid, col, row, '.', CircleCellRole::Circle);
+    }
+
+    if trig.op == RelationOp::Equal {
+        for angle in trig_boundary_angles(trig) {
+            let (col, row) = circle_point(angle, CX, CY, R);
+            put_circle_cell(&mut grid, col, row, '*', CircleCellRole::Solution);
+        }
+    } else {
+        for idx in 0..720 {
+            let angle = std::f64::consts::TAU * idx as f64 / 720.0;
+            if trig_relation_holds(trig, angle) {
+                let (col, row) = circle_point(angle, CX, CY, R);
+                put_circle_cell(&mut grid, col, row, '#', CircleCellRole::Arc);
+            }
+        }
+        for angle in trig_boundary_angles(trig) {
+            let (col, row) = circle_point(angle, CX, CY, R);
+            put_circle_cell(&mut grid, col, row, 'B', CircleCellRole::Boundary);
+        }
+    }
+
+    grid.into_iter()
+        .map(|row| {
+            OutputLine::styled(
+                OutputStream::Stdout,
+                row.into_iter()
+                    .map(|cell| OutputSpan::new(cell.ch.to_string(), circle_cell_color(cell.role)))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn circle_point(angle: f64, cx: f64, cy: f64, radius: f64) -> (usize, usize) {
+    let col = (cx + radius * angle.cos()).round().max(0.0) as usize;
+    let row = (cy - radius * angle.sin()).round().max(0.0) as usize;
+    (col.min(38), row.min(18))
+}
+
+fn put_circle_word(
+    grid: &mut [Vec<CircleCell>],
+    col: usize,
+    row: usize,
+    text: &str,
+    role: CircleCellRole,
+) {
+    for (offset, ch) in text.chars().enumerate() {
+        put_circle_cell(grid, col.saturating_add(offset), row, ch, role);
+    }
+}
+
+fn put_circle_cell(
+    grid: &mut [Vec<CircleCell>],
+    col: usize,
+    row: usize,
+    ch: char,
+    role: CircleCellRole,
+) {
+    let Some(line) = grid.get_mut(row) else {
+        return;
+    };
+    let Some(cell) = line.get_mut(col) else {
+        return;
+    };
+    if role >= cell.role {
+        *cell = CircleCell { ch, role };
+    }
+}
+
+fn circle_cell_color(role: CircleCellRole) -> Color {
+    match role {
+        CircleCellRole::Empty => Color::White,
+        CircleCellRole::Circle => Color::DarkGray,
+        CircleCellRole::Axis => Color::DarkGray,
+        CircleCellRole::Arc => Color::Green,
+        CircleCellRole::Boundary => Color::Yellow,
+        CircleCellRole::Solution => Color::LightMagenta,
+        CircleCellRole::Label => Color::Cyan,
+    }
+}
+
+fn trig_boundary_angles(trig: TrigVisualRelation) -> Vec<f64> {
+    let value = trig.value.clamp(-1.0, 1.0);
+    let mut angles = match trig.func {
+        "sin" => {
+            let first = value.asin().rem_euclid(std::f64::consts::TAU);
+            vec![
+                first,
+                (std::f64::consts::PI - first).rem_euclid(std::f64::consts::TAU),
+            ]
+        }
+        "cos" => {
+            let first = value.acos().rem_euclid(std::f64::consts::TAU);
+            vec![first, (-first).rem_euclid(std::f64::consts::TAU)]
+        }
+        _ => Vec::new(),
+    };
+    angles.sort_by(|lhs, rhs| lhs.partial_cmp(rhs).unwrap_or(std::cmp::Ordering::Equal));
+    angles.dedup_by(|lhs, rhs| (*lhs - *rhs).abs() < 1e-9);
+    angles
+}
+
+fn trig_relation_holds(trig: TrigVisualRelation, angle: f64) -> bool {
+    let sample = match trig.func {
+        "sin" => angle.sin(),
+        "cos" => angle.cos(),
+        _ => return false,
+    };
+    let residual = sample - trig.value;
+    match trig.op {
+        RelationOp::Equal => residual.abs() <= 1e-9,
+        RelationOp::Less => residual < -1e-9,
+        RelationOp::LessEqual => residual <= 1e-9,
+        RelationOp::Greater => residual > 1e-9,
+        RelationOp::GreaterEqual => residual >= -1e-9,
+    }
+}
+
 fn render_math_block(block: MathBlock, width: usize) -> Vec<OutputLine> {
     let width = width.clamp(48, 120);
     let mut lines = Vec::new();
@@ -1331,6 +2028,9 @@ fn render_math_block(block: MathBlock, width: usize) -> Vec<OutputLine> {
     if let Some(formula) = block.formula {
         section(&mut lines, "Formula", &formula.pretty, width);
         section(&mut lines, "ASCII Fallback", &[formula.fallback], width);
+    }
+    if let Some(visual) = block.visual {
+        styled_section(&mut lines, "Trig Unit Circle", &visual, width);
     }
     section(&mut lines, "Approx", &block.approx_lines, width);
     section(&mut lines, "Vars", &block.vars, width);
@@ -1361,6 +2061,24 @@ fn section(lines: &mut Vec<OutputLine>, title: &str, body: &[String], width: usi
     }
 }
 
+fn styled_section(lines: &mut Vec<OutputLine>, title: &str, body: &[OutputLine], width: usize) {
+    separator(lines, width);
+    lines.push(row(title, width));
+    if body.is_empty() {
+        lines.push(row("  none", width));
+    } else {
+        for line in body {
+            let mut spans = vec![OutputSpan::new("  ", Color::DarkGray)];
+            if let Some(line_spans) = &line.spans {
+                spans.extend(line_spans.iter().cloned());
+            } else {
+                spans.push(OutputSpan::new(line.text.clone(), line.stream.color()));
+            }
+            lines.push(styled_row(spans, width));
+        }
+    }
+}
+
 fn separator(lines: &mut Vec<OutputLine>, width: usize) {
     lines.push(OutputLine::stdout(format!(
         "+{}+",
@@ -1384,6 +2102,26 @@ fn row(text: &str, width: usize) -> OutputLine {
     let text = clamp_display_width(text, inner);
     let pad = inner.saturating_sub(UnicodeWidthStr::width(text.as_str()));
     OutputLine::stdout(format!("| {text}{} |", " ".repeat(pad)))
+}
+
+fn styled_row(spans: Vec<OutputSpan>, width: usize) -> OutputLine {
+    let inner = width.saturating_sub(4);
+    let content = spans
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    if UnicodeWidthStr::width(content.as_str()) > inner {
+        return row(&content, width);
+    }
+
+    let pad = inner.saturating_sub(UnicodeWidthStr::width(content.as_str()));
+    let mut row_spans = vec![OutputSpan::new("| ", Color::DarkGray)];
+    row_spans.extend(spans);
+    if pad > 0 {
+        row_spans.push(OutputSpan::new(" ".repeat(pad), Color::White));
+    }
+    row_spans.push(OutputSpan::new(" |", Color::DarkGray));
+    OutputLine::styled(OutputStream::Stdout, row_spans)
 }
 
 fn clamp_display_width(text: &str, max_width: usize) -> String {
@@ -1485,5 +2223,98 @@ mod tests {
         assert_eq!(query.y_range, Some((-1.0, 1.0)));
         assert_eq!(query.samples, PlotSampleSetting::Count(128));
         assert_eq!(query.mode, PlotMode::Points);
+    }
+
+    #[test]
+    fn parse_plot_query_extracts_interactive_flag() {
+        let query = parse_plot_query(&["sin(x)".to_string(), "-i".to_string()]).unwrap();
+        assert!(query.interactive);
+    }
+
+    #[test]
+    fn trig_visual_marks_equation_solution_points() {
+        let relation = parse_relation("sin(x) = 1").unwrap().unwrap();
+        let lines = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
+        let text = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("sin"));
+        assert!(text.contains("cos"));
+        assert!(text.contains('*'));
+        assert!(lines
+            .iter()
+            .filter_map(|line| line.spans.as_ref())
+            .flatten()
+            .any(|span| span.color == Color::LightMagenta));
+    }
+
+    #[test]
+    fn trig_visual_marks_inequality_arc_and_boundaries() {
+        let relation = parse_relation("sin(x) > 0").unwrap().unwrap();
+        let lines = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
+        let text = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains('#'));
+        assert!(text.contains('B'));
+        assert!(lines
+            .iter()
+            .filter_map(|line| line.spans.as_ref())
+            .flatten()
+            .any(|span| span.color == Color::Green));
+        assert!(lines
+            .iter()
+            .filter_map(|line| line.spans.as_ref())
+            .flatten()
+            .any(|span| span.color == Color::Yellow));
+    }
+
+    #[test]
+    fn interactive_plot_session_renders_controls_and_axes() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let expr = parse_expression("sin(x)").unwrap();
+        let request = PlotRequest {
+            expression: "sin(x)".to_string(),
+            expr,
+            variable: "x".to_string(),
+            x_min: -std::f64::consts::PI,
+            x_max: std::f64::consts::PI,
+            y_range: Some((-1.0, 1.0)),
+            samples: 128,
+            width: 72,
+            height: 12,
+            mode: PlotMode::Line,
+        };
+        let render = crate::app::math::plot::render_plot(&request, &BTreeMap::new()).unwrap();
+        let session =
+            InteractivePlotSession::new(request, BTreeMap::new(), render, PlotSampleSetting::Auto);
+        let backend = TestBackend::new(86, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+
+        terminal
+            .draw(|frame| session.render(frame, Rect::new(0, 0, 86, 20)))
+            .expect("render plot session");
+
+        let text = buffer_text(terminal.backend().buffer(), 86, 20);
+        assert!(text.contains("PLOT SESSION"));
+        assert!(text.contains("pan"));
+        assert!(text.contains("zoom"));
+        assert!(text.contains(" y "));
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 }

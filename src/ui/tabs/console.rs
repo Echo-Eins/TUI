@@ -152,10 +152,11 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
     f.render_widget(output_block, area);
 
     if state.console_state.blocks.iter().any(|block| {
-        block
-            .output_items
-            .iter()
-            .any(|item| matches!(item, CommandOutput::Plot(_)))
+        block.session.is_some()
+            || block
+                .output_items
+                .iter()
+                .any(|item| matches!(item, CommandOutput::Plot(_)))
     }) {
         render_blocks_typed(f, state, inner);
         return;
@@ -187,13 +188,7 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
 
         // Output lines
         for output_line in &block.output_lines {
-            all_lines.push(Line::from(vec![
-                Span::styled("| ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    output_line.text.clone(),
-                    Style::default().fg(output_line.stream.color()),
-                ),
-            ]));
+            all_lines.push(output_line_line(output_line));
         }
 
         // Sudo & Explain hint lines
@@ -343,6 +338,12 @@ fn render_blocks_typed(f: &mut Frame, state: &mut AppState, area: Rect) {
                 render_plot_output(f, plot, Rect::new(plot_x, y, plot_width, render_height));
                 y = y.saturating_add(render_height);
             }
+            ConsoleRenderItem::Session(session) => {
+                let session_x = area.x.saturating_add(1);
+                let session_width = area.width.saturating_sub(1);
+                session.render(f, Rect::new(session_x, y, session_width, render_height));
+                y = y.saturating_add(render_height);
+            }
         }
 
         consumed = consumed.saturating_add(height);
@@ -354,6 +355,7 @@ fn render_blocks_typed(f: &mut Frame, state: &mut AppState, area: Rect) {
 enum ConsoleRenderItem<'a> {
     Line(Line<'static>),
     Plot(&'a ConsolePlotBlock),
+    Session(&'a dyn crate::app::extensions::ConsoleSession),
 }
 
 impl ConsoleRenderItem<'_> {
@@ -361,6 +363,7 @@ impl ConsoleRenderItem<'_> {
         match self {
             Self::Line(_) => 1,
             Self::Plot(plot) => plot_item_height(plot, width),
+            Self::Session(_) => session_item_height(width),
         }
     }
 }
@@ -386,6 +389,9 @@ fn build_console_render_items(state: &AppState) -> Vec<ConsoleRenderItem<'_>> {
                     CommandOutput::Plot(plot) => items.push(ConsoleRenderItem::Plot(plot)),
                 }
             }
+        }
+        if let Some(session) = block.session.as_deref() {
+            items.push(ConsoleRenderItem::Session(session));
         }
 
         if block.sudo_hint
@@ -471,13 +477,20 @@ fn block_header_line(
 }
 
 fn output_line_line(output_line: &crate::app::console_state::OutputLine) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("| ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
+    let mut spans = vec![Span::styled("| ", Style::default().fg(Color::DarkGray))];
+    if let Some(output_spans) = &output_line.spans {
+        spans.extend(
+            output_spans
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), Style::default().fg(span.color))),
+        );
+    } else {
+        spans.push(Span::styled(
             output_line.text.clone(),
             Style::default().fg(output_line.stream.color()),
-        ),
-    ])
+        ));
+    }
+    Line::from(spans)
 }
 
 fn gutter_line(text: impl Into<String>, style: Style) -> Line<'static> {
@@ -493,6 +506,14 @@ fn plot_item_height(plot: &ConsolePlotBlock, width: u16) -> u16 {
     }
     let chart_height = (plot.requested_height as u16).clamp(6, 16);
     chart_height.saturating_add(5)
+}
+
+fn session_item_height(width: u16) -> u16 {
+    if width < 50 {
+        12
+    } else {
+        18
+    }
 }
 
 fn render_plot_output(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
@@ -535,6 +556,16 @@ fn render_plot_output(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
             Span::styled(plot.samples.to_string(), Style::default().fg(Color::White)),
             Span::styled(" cache ", Style::default().fg(Color::DarkGray)),
             Span::styled(cache, Style::default().fg(Color::Green)),
+            Span::styled(" x ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}..{}", plot.x_min_label, plot.x_max_label),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" y ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}..{}", plot.y_min_label, plot.y_max_label),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled(" finite ", Style::default().fg(Color::DarkGray)),
@@ -619,12 +650,20 @@ fn render_plot_output(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
     let chart = Chart::new(datasets)
         .x_axis(
             Axis::default()
+                .title(Line::from(Span::styled(
+                    "x",
+                    Style::default().fg(Color::Cyan),
+                )))
                 .style(Style::default().fg(Color::DarkGray))
                 .bounds([plot.x_min, plot.x_max])
                 .labels(x_labels),
         )
         .y_axis(
             Axis::default()
+                .title(Line::from(Span::styled(
+                    "y",
+                    Style::default().fg(Color::Cyan),
+                )))
                 .style(Style::default().fg(Color::DarkGray))
                 .bounds([plot.y_min, plot.y_max])
                 .labels(y_labels),
@@ -634,6 +673,32 @@ fn render_plot_output(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
 }
 
 fn render_plot_sparkline(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
+    if area.height >= 3 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        render_plot_sparkline_values(f, plot, chunks[0]);
+        let labels = Line::from(vec![
+            Span::styled(" x ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}..{}", plot.x_min_label, plot.x_max_label),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("   y ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}..{}", plot.y_min_label, plot.y_max_label),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(labels), chunks[1]);
+        return;
+    }
+
+    render_plot_sparkline_values(f, plot, area);
+}
+
+fn render_plot_sparkline_values(f: &mut Frame, plot: &ConsolePlotBlock, area: Rect) {
     let values = plot
         .series
         .iter()
@@ -1113,6 +1178,7 @@ mod tests {
         assert!(text.contains("PLOT / function"));
         assert!(text.contains("samples"));
         assert!(text.contains("sin(x)"));
+        assert!(text.contains(" y"));
     }
 
     #[test]

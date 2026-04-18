@@ -38,6 +38,15 @@ enum AsyncUpdate {
     ErrorExplanationFailed { block_id: u64, error: String },
 }
 
+fn session_status_label(status: crate::app::extensions::SessionStatus) -> &'static str {
+    match status {
+        crate::app::extensions::SessionStatus::Running => "running",
+        crate::app::extensions::SessionStatus::Paused => "paused",
+        crate::app::extensions::SessionStatus::Finished => "finished",
+        crate::app::extensions::SessionStatus::Quit => "quit",
+    }
+}
+
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub tab_manager: TabManager,
@@ -80,6 +89,7 @@ pub struct AppState {
     pub last_view_toggle_input: Option<Instant>,
     pub last_text_input: Option<Instant>,
     pub terminal_size: (u16, u16),
+    last_console_session_tick: Instant,
 
     // CPU UI state
     pub cpu_state: CpuUIState,
@@ -2082,6 +2092,122 @@ impl AppState {
         block_id
     }
 
+    fn start_console_session_block(
+        &mut self,
+        input: String,
+        session: Box<dyn crate::app::extensions::ConsoleSession>,
+    ) -> u64 {
+        self.last_console_session_tick = Instant::now();
+        self.console_state.start_session(input, session)
+    }
+
+    fn handle_console_session_key(&mut self, key: KeyEvent) {
+        let Some(block_id) = self.console_state.active_session_block_id() else {
+            return;
+        };
+
+        let status =
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                crate::app::extensions::SessionStatus::Quit
+            } else {
+                let Some(block) = self.console_state.get_block_mut(block_id) else {
+                    return;
+                };
+                let Some(session) = block.session.as_mut() else {
+                    return;
+                };
+                session.handle_key(key)
+            };
+
+        self.apply_console_session_status(block_id, status);
+    }
+
+    pub fn tick_console_sessions(&mut self) {
+        let Some(block_id) = self.console_state.active_session_block_id() else {
+            self.last_console_session_tick = Instant::now();
+            return;
+        };
+
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_console_session_tick);
+        if dt < Duration::from_millis(16) {
+            return;
+        }
+        self.last_console_session_tick = now;
+
+        let status = {
+            let Some(block) = self.console_state.get_block_mut(block_id) else {
+                return;
+            };
+            let Some(session) = block.session.as_mut() else {
+                return;
+            };
+            session.tick(dt)
+        };
+
+        self.apply_console_session_status(block_id, status);
+    }
+
+    fn apply_console_session_status(
+        &mut self,
+        block_id: u64,
+        status: crate::app::extensions::SessionStatus,
+    ) {
+        match status {
+            crate::app::extensions::SessionStatus::Running
+            | crate::app::extensions::SessionStatus::Paused => return,
+            crate::app::extensions::SessionStatus::Finished
+            | crate::app::extensions::SessionStatus::Quit => {}
+        }
+
+        let max_lines = self.config.read().console.max_output_lines;
+        let exit_code = if status == crate::app::extensions::SessionStatus::Quit {
+            130
+        } else {
+            0
+        };
+
+        if let Some(block) = self.console_state.get_block_mut(block_id) {
+            let summary = block.session.as_ref().map(|session| session.summary());
+            if let Some(summary) = summary {
+                block.push_line(
+                    crate::app::console_state::OutputLine::system(format!(
+                        "{} [{}]",
+                        summary.title,
+                        session_status_label(status)
+                    )),
+                    max_lines,
+                );
+                for line in summary.lines {
+                    block.push_line(
+                        crate::app::console_state::OutputLine::stdout(line),
+                        max_lines,
+                    );
+                }
+            }
+            block.session = None;
+            if status == crate::app::extensions::SessionStatus::Quit {
+                block.interrupt();
+            } else {
+                block.complete(0);
+            }
+        }
+
+        if self.console_state.active_block_id == Some(block_id) {
+            self.console_state.active_block_id = None;
+        }
+
+        if let Some(block) = self.console_state.get_block(block_id) {
+            let _ = self.history.record(
+                &block.input,
+                &block.cwd,
+                Some(exit_code),
+                Some(block.elapsed_ms() as i64),
+                &self.console_state.hostname,
+            );
+        }
+    }
+
     /// Try to intercept a shell builtin command. Returns `Some(true)` if handled,
     /// `Some(false)` should never happen (reserved), `None` if not a builtin.
     fn try_intercept_builtin(&mut self, cmd: &str) -> Option<bool> {
@@ -2431,8 +2557,22 @@ impl AppState {
         match self.console_extensions.route(cmd, &context) {
             crate::app::extensions::ConsoleRoute::Shell => false,
             crate::app::extensions::ConsoleRoute::Handled(response) => {
-                let (outputs, exit_code) = response.into_outputs();
-                self.finish_console_block_outputs(cmd.trim().to_string(), outputs, exit_code);
+                let crate::app::extensions::ConsoleCommandResponse { result, exit_code } = response;
+                match result {
+                    crate::app::extensions::ConsoleResult::StartSession(session) => {
+                        self.start_console_session_block(cmd.trim().to_string(), session);
+                    }
+                    result => {
+                        let response =
+                            crate::app::extensions::ConsoleCommandResponse { result, exit_code };
+                        let (outputs, exit_code) = response.into_outputs();
+                        self.finish_console_block_outputs(
+                            cmd.trim().to_string(),
+                            outputs,
+                            exit_code,
+                        );
+                    }
+                }
                 true
             }
         }
@@ -2677,6 +2817,7 @@ impl AppState {
             last_view_toggle_input: None,
             last_text_input: None,
             terminal_size: terminal::size().unwrap_or((120, 40)),
+            last_console_session_tick: Instant::now(),
 
             cpu_state: CpuUIState {
                 selected_index: 0,
@@ -2808,6 +2949,15 @@ impl AppState {
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         let is_initial_press = matches!(key.kind, KeyEventKind::Press);
+        if self.tab_manager.current() == TabType::Console
+            && self.console_state.active_session_block_id().is_some()
+        {
+            if is_initial_press {
+                self.handle_console_session_key(key);
+            }
+            return Ok(true);
+        }
+
         // Handle Ctrl+C
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if is_initial_press && self.tab_manager.current() == TabType::Console {

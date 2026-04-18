@@ -1,6 +1,7 @@
-use ratatui::style::Color;
+use crossterm::event::KeyEvent;
+use ratatui::{layout::Rect, style::Color, Frame};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // ── Console Modes ──────────────────────────────────────────────────────────
 
@@ -35,9 +36,25 @@ impl OutputStream {
 // ── Output Line ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+pub struct OutputSpan {
+    pub text: String,
+    pub color: Color,
+}
+
+impl OutputSpan {
+    pub fn new(text: impl Into<String>, color: Color) -> Self {
+        Self {
+            text: text.into(),
+            color,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OutputLine {
     pub text: String,
     pub stream: OutputStream,
+    pub spans: Option<Vec<OutputSpan>>,
 }
 
 impl OutputLine {
@@ -45,6 +62,7 @@ impl OutputLine {
         Self {
             text: text.into(),
             stream: OutputStream::Stdout,
+            spans: None,
         }
     }
 
@@ -52,6 +70,7 @@ impl OutputLine {
         Self {
             text: text.into(),
             stream: OutputStream::Stderr,
+            spans: None,
         }
     }
 
@@ -59,8 +78,41 @@ impl OutputLine {
         Self {
             text: text.into(),
             stream: OutputStream::System,
+            spans: None,
         }
     }
+
+    pub fn styled(stream: OutputStream, spans: Vec<OutputSpan>) -> Self {
+        let text = spans.iter().map(|span| span.text.as_str()).collect();
+        Self {
+            text,
+            stream,
+            spans: Some(spans),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStatus {
+    Running,
+    Paused,
+    Finished,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub title: String,
+    pub status: SessionStatus,
+    pub lines: Vec<String>,
+}
+
+pub trait ConsoleSession: Send {
+    fn title(&self) -> &str;
+    fn tick(&mut self, dt: Duration) -> SessionStatus;
+    fn handle_key(&mut self, key: KeyEvent) -> SessionStatus;
+    fn render(&self, frame: &mut Frame, area: Rect);
+    fn summary(&self) -> SessionSummary;
 }
 
 // ── Task State Machine ─────────────────────────────────────────────────────
@@ -184,13 +236,13 @@ impl TaskState {
 
 // ── Command Block ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
 pub struct CommandBlock {
     pub id: u64,
     pub input: String,
     pub cwd: String,
     pub output_lines: Vec<OutputLine>,
     pub output_items: Vec<CommandOutput>,
+    pub session: Option<Box<dyn ConsoleSession>>,
     pub state: Option<TaskState>, // None = still running
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
@@ -212,6 +264,7 @@ impl CommandBlock {
             cwd,
             output_lines: Vec::new(),
             output_items: Vec::new(),
+            session: None,
             state: None,
             started_at: Instant::now(),
             finished_at: None,
@@ -264,6 +317,7 @@ impl CommandBlock {
     pub fn complete(&mut self, exit_code: i32) {
         let elapsed_ms = self.elapsed_ms();
         self.finished_at = Some(Instant::now());
+        self.session = None;
         if exit_code == 0 {
             self.state = Some(TaskState::Completed {
                 exit_code,
@@ -296,6 +350,7 @@ impl CommandBlock {
     pub fn fail(&mut self, error: String) {
         let elapsed_ms = self.elapsed_ms();
         self.finished_at = Some(Instant::now());
+        self.session = None;
         self.state = Some(TaskState::Failed {
             error,
             exit_code: None,
@@ -307,6 +362,7 @@ impl CommandBlock {
     pub fn interrupt(&mut self) {
         let elapsed_ms = self.elapsed_ms();
         self.finished_at = Some(Instant::now());
+        self.session = None;
         self.state = Some(TaskState::Interrupted { elapsed_ms });
     }
 }
@@ -467,6 +523,14 @@ impl ConsoleState {
         id
     }
 
+    pub fn start_session(&mut self, input: String, session: Box<dyn ConsoleSession>) -> u64 {
+        let id = self.start_command(input);
+        if let Some(block) = self.get_block_mut(id) {
+            block.session = Some(session);
+        }
+        id
+    }
+
     /// Find a mutable reference to a block by ID.
     pub fn get_block_mut(&mut self, block_id: u64) -> Option<&mut CommandBlock> {
         self.blocks.iter_mut().find(|b| b.id == block_id)
@@ -482,6 +546,16 @@ impl ConsoleState {
         self.active_block_id
             .and_then(|id| self.get_block(id))
             .map_or(false, |b| b.is_running())
+    }
+
+    pub fn active_session_block_id(&self) -> Option<u64> {
+        let block_id = self.active_block_id?;
+        let block = self.get_block(block_id)?;
+        if block.is_running() && block.session.is_some() {
+            Some(block_id)
+        } else {
+            None
+        }
     }
 
     /// Complete the active block with an exit code.
@@ -914,6 +988,36 @@ pub fn split_shell_words(input: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::extensions::{ConsoleSession, SessionStatus, SessionSummary};
+    use crossterm::event::KeyEvent;
+    use ratatui::{layout::Rect, Frame};
+    use std::time::Duration;
+
+    struct DummySession;
+
+    impl ConsoleSession for DummySession {
+        fn title(&self) -> &str {
+            "dummy"
+        }
+
+        fn tick(&mut self, _dt: Duration) -> SessionStatus {
+            SessionStatus::Running
+        }
+
+        fn handle_key(&mut self, _key: KeyEvent) -> SessionStatus {
+            SessionStatus::Running
+        }
+
+        fn render(&self, _frame: &mut Frame, _area: Rect) {}
+
+        fn summary(&self) -> SessionSummary {
+            SessionSummary {
+                title: "dummy".to_string(),
+                status: SessionStatus::Running,
+                lines: Vec::new(),
+            }
+        }
+    }
 
     #[test]
     fn badge_respects_threshold_for_completed_and_failed_states() {
@@ -973,6 +1077,19 @@ mod tests {
         assert_eq!(block.output_items.len(), 2);
         assert!(matches!(block.output_items[0], CommandOutput::Line(_)));
         assert!(matches!(block.output_items[1], CommandOutput::Plot(_)));
+    }
+
+    #[test]
+    fn console_state_tracks_active_session_blocks() {
+        let mut state = ConsoleState::new(16);
+        let block_id = state.start_session(":plot sin(x) -i".to_string(), Box::new(DummySession));
+
+        assert_eq!(state.active_session_block_id(), Some(block_id));
+        assert!(state.get_block(block_id).unwrap().session.is_some());
+
+        state.interrupt_block(block_id);
+        assert_eq!(state.active_session_block_id(), None);
+        assert!(state.get_block(block_id).unwrap().session.is_none());
     }
 
     #[test]

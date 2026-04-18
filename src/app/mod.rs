@@ -106,5 +106,6 @@ impl App {
     /// without requiring a user input event.
     pub fn tick(&mut self) {
         self.state.apply_async_updates();
+        self.state.tick_console_sessions();
     }
 }

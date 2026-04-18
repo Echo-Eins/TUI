@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
-
-use crossterm::event::KeyEvent;
-use ratatui::{layout::Rect, Frame};
 
 use crate::app::console_state::{split_shell_words, CommandOutput, ConsolePlotBlock, OutputLine};
+pub use crate::app::console_state::{ConsoleSession, SessionStatus, SessionSummary};
 
 mod math;
 
@@ -91,29 +88,6 @@ impl PermissionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStatus {
-    Running,
-    Paused,
-    Finished,
-    Quit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub title: String,
-    pub status: SessionStatus,
-    pub lines: Vec<String>,
-}
-
-pub trait ConsoleSession: Send {
-    fn title(&self) -> &str;
-    fn tick(&mut self, dt: Duration) -> SessionStatus;
-    fn handle_key(&mut self, key: KeyEvent) -> SessionStatus;
-    fn render(&self, frame: &mut Frame, area: Rect);
-    fn summary(&self) -> SessionSummary;
-}
-
 pub enum ConsoleResult {
     Text(Vec<OutputLine>),
     Table(Vec<Vec<String>>),
@@ -147,6 +121,13 @@ impl ConsoleCommandResponse {
     pub fn plot(plot: ConsolePlotBlock) -> Self {
         Self {
             result: ConsoleResult::Plot(plot),
+            exit_code: 0,
+        }
+    }
+
+    pub fn session(session: Box<dyn ConsoleSession>) -> Self {
+        Self {
+            result: ConsoleResult::StartSession(session),
             exit_code: 0,
         }
     }

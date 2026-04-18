@@ -591,7 +591,7 @@ fn put(grid: &mut [Vec<char>], row: usize, col: usize, ch: char) {
 
 fn y_label(row: usize, height: usize, y_min: f64, y_max: f64, zero_row: Option<usize>) -> String {
     if row == 0 {
-        format_number(y_max)
+        format!("y {}", format_number(y_max))
     } else if row + 1 == height {
         format_number(y_min)
     } else if Some(row) == zero_row {

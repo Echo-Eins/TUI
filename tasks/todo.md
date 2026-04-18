@@ -90,6 +90,7 @@
 - [x] Correction pass: fix relation-level `for <var>`, symbolic parameters, exact trigonometric families, and Math Block root rendering.
 - [x] Fourth implementation milestone: finish formula command surface and implement the first bounded fallback `:plot` math modulator.
 - [x] Fifth implementation milestone: promote `:plot` to a typed Console output rendered by ratatui widgets, with ASCII fallback kept only as fallback/history output.
+- [x] Sixth implementation milestone: add trig Math Block unit-circle visuals, explicit plot axes, real `ConsoleSession` runtime wiring, and interactive plot zoom/pan.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -131,15 +132,16 @@
 - [ ] Keep plugin loading separate from built-in modules so security rules remain obvious.
 - [x] Do not add global mutable state for modules.
 - [ ] Avoid module-specific behavior in the generic command history path unless it is explicitly part of the API.
+- [x] Wire `ConsoleSession` into Console command blocks, key dispatch, ticking, rendering, termination, and history summaries before adding games.
 
 ## Performance Requirements
 
-- [ ] Idle Console must not tick games, plots, calculators, or plugins.
-- [ ] Inactive modules must use zero periodic CPU.
-- [ ] Interactive modules must have a capped tick rate per module.
+- [x] Idle Console must not tick games, plots, calculators, or plugins.
+- [x] Inactive modules must use zero periodic CPU.
+- [x] Interactive modules must have a capped tick rate per module.
 - [ ] Games should update at fixed logical ticks, not as fast as the render loop can run.
 - [ ] Graph sampling must be bounded by terminal width and an explicit sample cap.
-- [ ] Plot data must be cached and recomputed only when expression, domain, sampling settings, or widget size changes.
+- [x] Plot data must be cached and recomputed only when expression, domain, sampling settings, or widget size changes.
 - [ ] Formula layout must cache parsed/rendered AST output where possible.
 - [ ] Calculator expressions must compile or parse once per submitted command where possible.
 - [ ] Avoid per-frame heap allocations in game hot paths and plot render hot paths.
@@ -192,7 +194,8 @@
 - [x] Return typed plot data from the math extension instead of flattening production plots into strings.
 - [x] Render plot command blocks with ratatui `Chart`/typed widgets in the Console UI.
 - [x] Keep ASCII plot canvas as a width-safe fallback and test/debug representation.
-- [ ] Support pan and zoom for interactive plot sessions after the non-interactive renderer is stable.
+- [x] Render explicit `x` and `y` axes/titles for all typed plot graphs and preserve the width-safe fallback.
+- [x] Support pan and zoom through interactive plot sessions after the non-interactive renderer is stable.
 - [ ] Support cursor inspection of approximate x/y values in interactive plot sessions.
 - [ ] Support multiple functions on one plot after the single-function path is stable.
 - [x] Support constants: `pi`, `e`, `tau`.
@@ -218,6 +221,7 @@
 - [x] Allow symbolic parameter variables when the target variable is explicitly provided.
 - [x] Solve symbolic linear/quadratic equations such as `a*x^2 + b*x + c = 0 for x` exactly.
 - [x] Return exact trigonometric families for equations such as `sin(x) = 1` before numeric fallback.
+- [x] Render a rich trigonometric unit circle in `-mb` for supported trig equations and inequalities, including `sin`/`cos` axes, exact solution points, inequality bounds, and highlighted solution arcs.
 - [x] Render exact result expressions in the Math Block formula section, including roots and fractions.
 - [x] Implement a real expression evaluator, not a string-based toy calculator.
 - [x] Use a small local Pratt parser for this milestone to avoid adding calculator dependencies before the shared AST/API shape is proven.
@@ -430,3 +434,9 @@
 - Plotter UI correction: `:plot` now returns typed Console plot output with sampled series data; the Console tab renders it through ratatui `Chart`/`Sparkline` widgets and keeps the ASCII canvas only as fallback/debug output.
 - Plotter UI tests cover typed command block storage, ratatui chart rendering, narrow fallback rendering, and discontinuity-aware plot series splitting.
 - Plotter UI verification passed: `cargo fmt --all`, `cargo test` with 102 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.
+- Sixth milestone added styled Console output spans, so Math Block can render colored ASCII-safe visuals without ANSI escape leakage.
+- Trig Math Block visuals now draw a one-period `sin`/`cos` unit circle for supported `sin(x)`/`cos(x)` equations and inequalities, with exact points, inequality boundaries, and highlighted solution arcs.
+- `ConsoleSession` is now wired into command blocks, key dispatch, capped ticking, typed rendering, quit/finish summaries, Ctrl+C handling, and history recording.
+- `:plot <expr> -i` starts an interactive plot session with arrow/HJKL pan, `+`/`-` zoom, `r`/`0` reset, and `q`/`Esc`/`Ctrl+C` quit; cursor inspect remains intentionally deferred.
+- Typed plot blocks now expose explicit `x`/`y` axis titles and visible x/y range labels; ASCII fallback labels the y axis as well.
+- Sixth milestone verification passed: `cargo fmt --all`, `cargo test` with 107 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.
