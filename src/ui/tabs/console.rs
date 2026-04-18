@@ -1,5 +1,8 @@
 use crate::app::{
-    console_state::{CommandBlock, CommandOutput, ConsoleMode, ConsolePlotBlock, ConsolePlotMode},
+    console_state::{
+        CommandBlock, CommandOutput, ConsoleMode, ConsolePlotBlock, ConsolePlotMode,
+        ConsoleTrigUnitCircleBlock, ConsoleVisualBlock, ConsoleVisualKind,
+    },
     AppState,
 };
 use ratatui::{
@@ -8,6 +11,7 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
+        canvas::{Canvas, Circle, Line as CanvasLine, Points},
         Axis, Block as UiBlock, Borders, Chart, Clear, Dataset, GraphType, Paragraph, Sparkline,
         Wrap,
     },
@@ -156,7 +160,7 @@ fn render_blocks(f: &mut Frame, state: &mut AppState, area: Rect) {
             || block
                 .output_items
                 .iter()
-                .any(|item| matches!(item, CommandOutput::Plot(_)))
+                .any(|item| matches!(item, CommandOutput::Plot(_) | CommandOutput::Visual(_)))
     }) {
         render_blocks_typed(f, state, inner);
         return;
@@ -338,6 +342,16 @@ fn render_blocks_typed(f: &mut Frame, state: &mut AppState, area: Rect) {
                 render_plot_output(f, plot, Rect::new(plot_x, y, plot_width, render_height));
                 y = y.saturating_add(render_height);
             }
+            ConsoleRenderItem::Visual(visual) => {
+                let visual_x = area.x.saturating_add(1);
+                let visual_width = area.width.saturating_sub(1);
+                render_visual_output(
+                    f,
+                    visual,
+                    Rect::new(visual_x, y, visual_width, render_height),
+                );
+                y = y.saturating_add(render_height);
+            }
             ConsoleRenderItem::Session(session) => {
                 let session_x = area.x.saturating_add(1);
                 let session_width = area.width.saturating_sub(1);
@@ -355,6 +369,7 @@ fn render_blocks_typed(f: &mut Frame, state: &mut AppState, area: Rect) {
 enum ConsoleRenderItem<'a> {
     Line(Line<'static>),
     Plot(&'a ConsolePlotBlock),
+    Visual(&'a ConsoleVisualBlock),
     Session(&'a dyn crate::app::extensions::ConsoleSession),
 }
 
@@ -363,6 +378,7 @@ impl ConsoleRenderItem<'_> {
         match self {
             Self::Line(_) => 1,
             Self::Plot(plot) => plot_item_height(plot, width),
+            Self::Visual(visual) => visual_item_height(visual, width),
             Self::Session(_) => session_item_height(width),
         }
     }
@@ -387,6 +403,7 @@ fn build_console_render_items(state: &AppState) -> Vec<ConsoleRenderItem<'_>> {
                         items.push(ConsoleRenderItem::Line(output_line_line(output_line)));
                     }
                     CommandOutput::Plot(plot) => items.push(ConsoleRenderItem::Plot(plot)),
+                    CommandOutput::Visual(visual) => items.push(ConsoleRenderItem::Visual(visual)),
                 }
             }
         }
@@ -513,6 +530,186 @@ fn session_item_height(width: u16) -> u16 {
         12
     } else {
         18
+    }
+}
+
+fn visual_item_height(visual: &ConsoleVisualBlock, width: u16) -> u16 {
+    if width < 46 {
+        return visual.fallback_lines.len().clamp(4, 14) as u16;
+    }
+
+    match &visual.kind {
+        ConsoleVisualKind::TrigUnitCircle(_) => 21,
+    }
+}
+
+fn render_visual_output(f: &mut Frame, visual: &ConsoleVisualBlock, area: Rect) {
+    match &visual.kind {
+        ConsoleVisualKind::TrigUnitCircle(circle) => {
+            render_trig_unit_circle_output(f, visual, circle, area);
+        }
+    }
+}
+
+fn render_trig_unit_circle_output(
+    f: &mut Frame,
+    visual: &ConsoleVisualBlock,
+    circle: &ConsoleTrigUnitCircleBlock,
+    area: Rect,
+) {
+    if area.width < 46 || area.height < 12 {
+        render_visual_fallback(f, visual, area);
+        return;
+    }
+
+    let title = clamp_plain_text(&visual.title, area.width.saturating_sub(4) as usize);
+    let block = UiBlock::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", title))
+        .border_style(Style::default().fg(Color::LightMagenta))
+        .style(Style::default().bg(Color::Rgb(12, 14, 16)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 10 || inner.width < 34 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(6),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let point_count = circle.solution_points.len() + circle.boundary_points.len();
+    let info = vec![
+        Line::from(vec![
+            Span::styled(" expr ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                clamp_plain_text(&circle.expression, inner.width.saturating_sub(8) as usize),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" axis ", Style::default().fg(Color::DarkGray)),
+            Span::styled("cos=x  ", Style::default().fg(Color::Cyan)),
+            Span::styled("sin=y  ", Style::default().fg(Color::Cyan)),
+            Span::styled(" relation ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{}(x) {} {}",
+                    circle.function, circle.relation, circle.value_label
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(" points ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                point_count.to_string(),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(info), chunks[0]);
+
+    let canvas = Canvas::default()
+        .marker(symbols::Marker::Braille)
+        .x_bounds([-1.18, 1.18])
+        .y_bounds([-1.18, 1.18])
+        .paint(|ctx| {
+            ctx.draw(&Circle {
+                x: 0.0,
+                y: 0.0,
+                radius: 1.0,
+                color: Color::DarkGray,
+            });
+            ctx.draw(&CanvasLine {
+                x1: -1.12,
+                y1: 0.0,
+                x2: 1.12,
+                y2: 0.0,
+                color: Color::Cyan,
+            });
+            ctx.draw(&CanvasLine {
+                x1: 0.0,
+                y1: -1.12,
+                x2: 0.0,
+                y2: 1.12,
+                color: Color::Cyan,
+            });
+            if !circle.arc_points.is_empty() {
+                ctx.draw(&Points {
+                    coords: circle.arc_points.as_slice(),
+                    color: Color::Green,
+                });
+            }
+            if !circle.boundary_points.is_empty() {
+                ctx.draw(&Points {
+                    coords: circle.boundary_points.as_slice(),
+                    color: Color::Yellow,
+                });
+            }
+            if !circle.solution_points.is_empty() {
+                ctx.draw(&Points {
+                    coords: circle.solution_points.as_slice(),
+                    color: Color::LightMagenta,
+                });
+            }
+            ctx.print(
+                1.02,
+                -0.08,
+                Span::styled("cos", Style::default().fg(Color::Cyan)),
+            );
+            ctx.print(
+                0.04,
+                1.04,
+                Span::styled("sin", Style::default().fg(Color::Cyan)),
+            );
+        });
+    f.render_widget(canvas, chunks[1]);
+
+    let legend = vec![
+        Line::from(vec![
+            Span::styled(" arc ", Style::default().fg(Color::DarkGray)),
+            Span::styled("solution range  ", Style::default().fg(Color::Green)),
+            Span::styled("boundary  ", Style::default().fg(Color::Yellow)),
+            Span::styled("exact point", Style::default().fg(Color::LightMagenta)),
+        ]),
+        Line::from(Span::styled(
+            "unit circle | one period | exact markers",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(legend), chunks[2]);
+}
+
+fn render_visual_fallback(f: &mut Frame, visual: &ConsoleVisualBlock, area: Rect) {
+    let lines = visual
+        .fallback_lines
+        .iter()
+        .take(area.height as usize)
+        .map(output_line_content_line)
+        .collect::<Vec<_>>();
+    let fallback = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::Cyan));
+    f.render_widget(fallback, area);
+}
+
+fn output_line_content_line(output_line: &crate::app::console_state::OutputLine) -> Line<'static> {
+    if let Some(output_spans) = &output_line.spans {
+        Line::from(
+            output_spans
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), Style::default().fg(span.color)))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Line::from(Span::styled(
+            output_line.text.clone(),
+            Style::default().fg(output_line.stream.color()),
+        ))
     }
 }
 
@@ -1147,7 +1344,10 @@ fn visible_input_window(input: &str, cursor_position: usize, max_width: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::console_state::ConsolePlotSeries;
+    use crate::app::console_state::{
+        ConsolePlotSeries, ConsoleTrigUnitCircleBlock, ConsoleVisualBlock, ConsoleVisualKind,
+        OutputLine,
+    };
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
@@ -1195,6 +1395,37 @@ mod tests {
         assert!(text.contains("fallback plot"));
     }
 
+    #[test]
+    fn trig_unit_circle_visual_renders_with_ratatui_canvas_block() {
+        let backend = TestBackend::new(80, 22);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let visual = sample_trig_visual();
+
+        terminal
+            .draw(|frame| render_visual_output(frame, &visual, Rect::new(0, 0, 80, 22)))
+            .expect("render trig visual");
+
+        let text = buffer_text(terminal.backend().buffer(), 80, 22);
+        assert!(text.contains("TRIG UNIT CIRCLE"));
+        assert!(text.contains("cos=x"));
+        assert!(text.contains("sin=y"));
+        assert!(text.contains("exact point"));
+    }
+
+    #[test]
+    fn trig_unit_circle_visual_uses_fallback_when_area_is_too_narrow() {
+        let backend = TestBackend::new(32, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let visual = sample_trig_visual();
+
+        terminal
+            .draw(|frame| render_visual_output(frame, &visual, Rect::new(0, 0, 32, 8)))
+            .expect("render trig visual fallback");
+
+        let text = buffer_text(terminal.backend().buffer(), 32, 8);
+        assert!(text.contains("fallback visual"));
+    }
+
     fn sample_plot() -> ConsolePlotBlock {
         ConsolePlotBlock {
             title: "PLOT / function".to_string(),
@@ -1227,6 +1458,22 @@ mod tests {
                     .collect(),
             }],
             fallback_lines: vec!["fallback plot".to_string()],
+        }
+    }
+
+    fn sample_trig_visual() -> ConsoleVisualBlock {
+        ConsoleVisualBlock {
+            title: "TRIG UNIT CIRCLE".to_string(),
+            kind: ConsoleVisualKind::TrigUnitCircle(ConsoleTrigUnitCircleBlock {
+                expression: "sin(x) = 1".to_string(),
+                function: "sin".to_string(),
+                relation: "=".to_string(),
+                value_label: "1".to_string(),
+                solution_points: vec![(0.0, 1.0)],
+                boundary_points: Vec::new(),
+                arc_points: Vec::new(),
+            }),
+            fallback_lines: vec![OutputLine::stdout("fallback visual")],
         }
     }
 

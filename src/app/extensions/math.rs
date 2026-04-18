@@ -14,12 +14,14 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::console_state::{
-    ConsolePlotBlock, ConsolePlotMode, ConsolePlotSeries, OutputLine, OutputSpan, OutputStream,
+    CommandOutput, ConsolePlotBlock, ConsolePlotMode, ConsolePlotSeries,
+    ConsoleTrigUnitCircleBlock, ConsoleVisualBlock, ConsoleVisualKind, OutputLine, OutputSpan,
+    OutputStream,
 };
 use crate::app::math::{
     convert_base, format_exact_number, format_expr, format_number as format_math_number,
     format_pi_multiple, parse_expression, parse_relation, relation_fallback, render_formula,
-    solve_exact, solve_relation, BaseConversion, EvalContext, ExactSolveReport, Expr,
+    solve_exact, solve_relation, BaseConversion, BinaryOp, EvalContext, ExactSolveReport, Expr,
     FormulaRender, Interval, MathError, PlotCache, PlotMode, PlotRender, PlotRequest, Relation,
     RelationOp, SolveOptions, SolveReport, MAX_PLOT_HEIGHT, MAX_PLOT_SAMPLES, MAX_PLOT_WIDTH,
     MIN_PLOT_HEIGHT, MIN_PLOT_SAMPLES, MIN_PLOT_WIDTH,
@@ -515,7 +517,7 @@ impl MathExtension {
                 Ok(SolveReport::Constant { holds }) => {
                     ConsoleCommandResponse::ok(vec![OutputLine::stdout(holds.to_string())])
                 }
-                Ok(report) => ConsoleCommandResponse::ok(solve_output(report, flags, ctx, None)),
+                Ok(report) => solve_response(report, flags, ctx, None),
                 Err(error) => math_error(input, error),
             };
         }
@@ -580,9 +582,7 @@ impl MathExtension {
             options.domain.filter(|_| options.domain_provided),
         );
         if let Some(exact) = exact {
-            return ConsoleCommandResponse::ok(exact_solve_output(
-                exact, &relation, input, flags, ctx, &variables,
-            ));
+            return exact_solve_response(exact, &relation, input, flags, ctx, &variables);
         }
 
         let unresolved = unknowns
@@ -605,12 +605,7 @@ impl MathExtension {
         solve_options.samples = options.samples.unwrap_or(2048);
 
         match solve_relation(&relation, Some(solve_options), &variables) {
-            Ok(report) => ConsoleCommandResponse::ok(solve_output(
-                report,
-                flags,
-                ctx,
-                Some((&relation, input, &variables)),
-            )),
+            Ok(report) => solve_response(report, flags, ctx, Some((&relation, input, &variables))),
             Err(error) => math_error(input, error),
         }
     }
@@ -1453,18 +1448,18 @@ fn calc_help() -> Vec<OutputLine> {
     ]
 }
 
-fn exact_solve_output(
+fn exact_solve_response(
     report: ExactSolveReport,
     relation: &Relation,
     input: &str,
     flags: CalcFlags,
     ctx: &ConsoleContext,
     variables: &BTreeMap<String, f64>,
-) -> Vec<OutputLine> {
+) -> ConsoleCommandResponse {
     if flags.math_block {
         let formula = exact_result_formula(&report.exact_lines, ctx);
         let visual = trig_unit_circle_visual(relation, &report.variable, variables);
-        return render_math_block(
+        let lines = render_math_block(
             MathBlock {
                 title: "MATH BLOCK / solve".to_string(),
                 mode: "exact + numeric".to_string(),
@@ -1473,7 +1468,7 @@ fn exact_solve_output(
                 input: input.to_string(),
                 exact_lines: report.exact_lines,
                 formula: Some(formula),
-                visual,
+                visual: None,
                 approx_lines: report.numeric_lines,
                 domain: report
                     .domain
@@ -1485,6 +1480,7 @@ fn exact_solve_output(
             },
             math_block_width(ctx),
         );
+        return response_with_visual(lines, visual);
     }
 
     let mut lines = Vec::new();
@@ -1499,7 +1495,7 @@ fn exact_solve_output(
             lines.push(OutputLine::stdout(exact.clone()));
         }
     }
-    lines
+    ConsoleCommandResponse::ok(lines)
 }
 
 fn exact_result_formula(exact_lines: &[String], ctx: &ConsoleContext) -> FormulaRender {
@@ -1527,14 +1523,16 @@ fn exact_result_formula(exact_lines: &[String], ctx: &ConsoleContext) -> Formula
     }
 }
 
-fn solve_output(
+fn solve_response(
     report: SolveReport,
     flags: CalcFlags,
     ctx: &ConsoleContext,
     relation_context: Option<(&Relation, &str, &BTreeMap<String, f64>)>,
-) -> Vec<OutputLine> {
+) -> ConsoleCommandResponse {
     match report {
-        SolveReport::Constant { holds } => vec![OutputLine::stdout(holds.to_string())],
+        SolveReport::Constant { holds } => {
+            ConsoleCommandResponse::ok(vec![OutputLine::stdout(holds.to_string())])
+        }
         SolveReport::Equality {
             variable,
             min,
@@ -1563,7 +1561,7 @@ fn solve_output(
                 let visual = relation_context.and_then(|(relation, _, variables)| {
                     trig_unit_circle_visual(relation, &variable, variables)
                 });
-                return render_math_block(
+                let lines = render_math_block(
                     MathBlock {
                         title: "MATH BLOCK / solve".to_string(),
                         mode: "numeric fallback".to_string(),
@@ -1580,7 +1578,7 @@ fn solve_output(
                             pretty: vec![relation_fallback(relation)],
                             fallback: relation_fallback(relation),
                         }),
-                        visual,
+                        visual: None,
                         approx_lines: result_lines,
                         domain: format!(
                             "[{}..{}]",
@@ -1591,9 +1589,10 @@ fn solve_output(
                     },
                     math_block_width(ctx),
                 );
+                return response_with_visual(lines, visual);
             }
 
-            result_lines.into_iter().map(OutputLine::stdout).collect()
+            ConsoleCommandResponse::ok(result_lines.into_iter().map(OutputLine::stdout).collect())
         }
         SolveReport::Inequality {
             variable,
@@ -1625,7 +1624,7 @@ fn solve_output(
                 let visual = relation_context.and_then(|(relation, _, variables)| {
                     trig_unit_circle_visual(relation, &variable, variables)
                 });
-                return render_math_block(
+                let lines = render_math_block(
                     MathBlock {
                         title: "MATH BLOCK / solve".to_string(),
                         mode: "numeric fallback".to_string(),
@@ -1642,7 +1641,7 @@ fn solve_output(
                             pretty: vec![relation_fallback(relation)],
                             fallback: relation_fallback(relation),
                         }),
-                        visual,
+                        visual: None,
                         approx_lines: result_lines,
                         domain: format!(
                             "[{}..{}]",
@@ -1653,11 +1652,26 @@ fn solve_output(
                     },
                     math_block_width(ctx),
                 );
+                return response_with_visual(lines, visual);
             }
 
-            result_lines.into_iter().map(OutputLine::stdout).collect()
+            ConsoleCommandResponse::ok(result_lines.into_iter().map(OutputLine::stdout).collect())
         }
     }
+}
+
+fn response_with_visual(
+    lines: Vec<OutputLine>,
+    visual: Option<ConsoleVisualBlock>,
+) -> ConsoleCommandResponse {
+    let mut outputs = lines
+        .into_iter()
+        .map(CommandOutput::Line)
+        .collect::<Vec<_>>();
+    if let Some(visual) = visual {
+        outputs.push(CommandOutput::Visual(visual));
+    }
+    ConsoleCommandResponse::outputs(outputs)
 }
 
 fn format_interval(interval: &Interval) -> String {
@@ -1757,14 +1771,14 @@ fn trig_unit_circle_visual(
     relation: &Relation,
     variable: &str,
     variables: &BTreeMap<String, f64>,
-) -> Option<Vec<OutputLine>> {
+) -> Option<ConsoleVisualBlock> {
     let trig = match_trig_visual_relation(relation, variable, variables)?;
     if !trig.value.is_finite() || trig.value < -1.0 || trig.value > 1.0 {
         return None;
     }
 
-    let mut lines = Vec::new();
-    lines.push(OutputLine::styled(
+    let mut fallback_lines = Vec::new();
+    fallback_lines.push(OutputLine::styled(
         OutputStream::Stdout,
         vec![
             OutputSpan::new("one-period visual: ", Color::DarkGray),
@@ -1773,8 +1787,8 @@ fn trig_unit_circle_visual(
             OutputSpan::new(format_math_number(trig.value), Color::Yellow),
         ],
     ));
-    lines.extend(render_trig_circle(trig));
-    lines.push(OutputLine::styled(
+    fallback_lines.extend(render_trig_circle(trig));
+    fallback_lines.push(OutputLine::styled(
         OutputStream::Stdout,
         vec![
             OutputSpan::new("legend: ", Color::DarkGray),
@@ -1786,7 +1800,47 @@ fn trig_unit_circle_visual(
             OutputSpan::new(" exact point", Color::DarkGray),
         ],
     ));
-    Some(lines)
+
+    let boundary_angles = trig_boundary_angles(trig);
+    let solution_points = if trig.op == RelationOp::Equal {
+        boundary_angles
+            .iter()
+            .map(|angle| unit_circle_point(*angle))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let boundary_points = if trig.op == RelationOp::Equal {
+        Vec::new()
+    } else {
+        boundary_angles
+            .iter()
+            .map(|angle| unit_circle_point(*angle))
+            .collect()
+    };
+    let arc_points = if trig.op == RelationOp::Equal {
+        Vec::new()
+    } else {
+        (0..720)
+            .map(|idx| std::f64::consts::TAU * idx as f64 / 720.0)
+            .filter(|angle| trig_relation_holds(trig, *angle))
+            .map(unit_circle_point)
+            .collect()
+    };
+
+    Some(ConsoleVisualBlock {
+        title: "TRIG UNIT CIRCLE".to_string(),
+        kind: ConsoleVisualKind::TrigUnitCircle(ConsoleTrigUnitCircleBlock {
+            expression: relation_fallback(relation),
+            function: trig.func.to_string(),
+            relation: trig.op.label().to_string(),
+            value_label: format_math_number(trig.value),
+            solution_points,
+            boundary_points,
+            arc_points,
+        }),
+        fallback_lines,
+    })
 }
 
 fn match_trig_visual_relation(
@@ -1795,7 +1849,7 @@ fn match_trig_visual_relation(
     variables: &BTreeMap<String, f64>,
 ) -> Option<TrigVisualRelation> {
     if let Some(value) = constant_expr_value(&relation.right, variable, variables) {
-        let func = match_trig_visual_expr(&relation.left, variable)?;
+        let func = match_trig_visual_expr(&relation.left, variable, relation.op, value)?;
         return Some(TrigVisualRelation {
             func,
             op: relation.op,
@@ -1804,12 +1858,9 @@ fn match_trig_visual_relation(
     }
 
     if let Some(value) = constant_expr_value(&relation.left, variable, variables) {
-        let func = match_trig_visual_expr(&relation.right, variable)?;
-        return Some(TrigVisualRelation {
-            func,
-            op: reverse_relation_op(relation.op),
-            value,
-        });
+        let op = reverse_relation_op(relation.op);
+        let func = match_trig_visual_expr(&relation.right, variable, op, value)?;
+        return Some(TrigVisualRelation { func, op, value });
     }
 
     None
@@ -1828,7 +1879,33 @@ fn constant_expr_value(
         .filter(|value| value.is_finite())
 }
 
-fn match_trig_visual_expr(expr: &Expr, variable: &str) -> Option<&'static str> {
+fn match_trig_visual_expr(
+    expr: &Expr,
+    variable: &str,
+    op: RelationOp,
+    value: f64,
+) -> Option<&'static str> {
+    if let Some(func) = match_direct_trig_visual_expr(expr, variable) {
+        return Some(func);
+    }
+
+    if op != RelationOp::Equal || value.abs() > 1e-9 {
+        return None;
+    }
+
+    let Expr::Binary {
+        op: BinaryOp::Power,
+        left,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let func = match_direct_trig_visual_expr(left, variable)?;
+    is_positive_integer_expr(right).then_some(func)
+}
+
+fn match_direct_trig_visual_expr(expr: &Expr, variable: &str) -> Option<&'static str> {
     let Expr::Function { name, args } = expr else {
         return None;
     };
@@ -1846,6 +1923,13 @@ fn match_trig_visual_expr(expr: &Expr, variable: &str) -> Option<&'static str> {
         "cos" => Some("cos"),
         _ => None,
     }
+}
+
+fn is_positive_integer_expr(expr: &Expr) -> bool {
+    let Expr::Number(value) = expr else {
+        return false;
+    };
+    *value > 0.0 && (*value - value.round()).abs() <= 1e-9
 }
 
 fn reverse_relation_op(op: RelationOp) -> RelationOp {
@@ -1930,6 +2014,10 @@ fn circle_point(angle: f64, cx: f64, cy: f64, radius: f64) -> (usize, usize) {
     let col = (cx + radius * angle.cos()).round().max(0.0) as usize;
     let row = (cy - radius * angle.sin()).round().max(0.0) as usize;
     (col.min(38), row.min(18))
+}
+
+fn unit_circle_point(angle: f64) -> (f64, f64) {
+    (angle.cos(), angle.sin())
 }
 
 fn put_circle_word(
@@ -2234,8 +2322,9 @@ mod tests {
     #[test]
     fn trig_visual_marks_equation_solution_points() {
         let relation = parse_relation("sin(x) = 1").unwrap().unwrap();
-        let lines = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
-        let text = lines
+        let visual = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
+        let text = visual
+            .fallback_lines
             .iter()
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
@@ -2243,7 +2332,11 @@ mod tests {
         assert!(text.contains("sin"));
         assert!(text.contains("cos"));
         assert!(text.contains('*'));
-        assert!(lines
+        let ConsoleVisualKind::TrigUnitCircle(circle) = &visual.kind;
+        assert_eq!(circle.function, "sin");
+        assert_eq!(circle.solution_points.len(), 1);
+        assert!(visual
+            .fallback_lines
             .iter()
             .filter_map(|line| line.spans.as_ref())
             .flatten()
@@ -2251,22 +2344,40 @@ mod tests {
     }
 
     #[test]
+    fn trig_visual_supports_zero_power_equations() {
+        let relation = parse_relation("cos(x)^2 = 0").unwrap().unwrap();
+        let visual = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
+        let ConsoleVisualKind::TrigUnitCircle(circle) = &visual.kind;
+
+        assert_eq!(circle.function, "cos");
+        assert_eq!(circle.relation, "=");
+        assert_eq!(circle.value_label, "0");
+        assert_eq!(circle.solution_points.len(), 2);
+    }
+
+    #[test]
     fn trig_visual_marks_inequality_arc_and_boundaries() {
         let relation = parse_relation("sin(x) > 0").unwrap().unwrap();
-        let lines = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
-        let text = lines
+        let visual = trig_unit_circle_visual(&relation, "x", &BTreeMap::new()).unwrap();
+        let text = visual
+            .fallback_lines
             .iter()
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains('#'));
         assert!(text.contains('B'));
-        assert!(lines
+        let ConsoleVisualKind::TrigUnitCircle(circle) = &visual.kind;
+        assert!(!circle.arc_points.is_empty());
+        assert_eq!(circle.boundary_points.len(), 2);
+        assert!(visual
+            .fallback_lines
             .iter()
             .filter_map(|line| line.spans.as_ref())
             .flatten()
             .any(|span| span.color == Color::Green));
-        assert!(lines
+        assert!(visual
+            .fallback_lines
             .iter()
             .filter_map(|line| line.spans.as_ref())
             .flatten()

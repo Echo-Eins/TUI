@@ -121,6 +121,7 @@ pub trait ConsoleSession: Send {
 pub enum CommandOutput {
     Line(OutputLine),
     Plot(ConsolePlotBlock),
+    Visual(ConsoleVisualBlock),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +172,29 @@ pub struct ConsolePlotBlock {
     pub requested_height: usize,
     pub series: Vec<ConsolePlotSeries>,
     pub fallback_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsoleVisualBlock {
+    pub title: String,
+    pub kind: ConsoleVisualKind,
+    pub fallback_lines: Vec<OutputLine>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConsoleVisualKind {
+    TrigUnitCircle(ConsoleTrigUnitCircleBlock),
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsoleTrigUnitCircleBlock {
+    pub expression: String,
+    pub function: String,
+    pub relation: String,
+    pub value_label: String,
+    pub solution_points: Vec<(f64, f64)>,
+    pub boundary_points: Vec<(f64, f64)>,
+    pub arc_points: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +325,10 @@ impl CommandBlock {
             CommandOutput::Line(line) => self.push_line(line, max_lines),
             CommandOutput::Plot(plot) => {
                 self.output_items.push(CommandOutput::Plot(plot));
+                self.trim_output_items(max_lines);
+            }
+            CommandOutput::Visual(visual) => {
+                self.output_items.push(CommandOutput::Visual(visual));
                 self.trim_output_items(max_lines);
             }
         }
@@ -792,6 +820,15 @@ impl ConsoleState {
         }
     }
 
+    pub fn accept_ghost_completion(&mut self) -> bool {
+        if self.ghost_text.is_none() {
+            return false;
+        }
+        self.accept_ghost_text();
+        self.clear_ghost_text();
+        true
+    }
+
     /// Accept the next word from the ghost text.
     pub fn accept_ghost_word(&mut self) {
         if let Some(ghost) = &self.ghost_text {
@@ -1072,11 +1109,41 @@ mod tests {
             }),
             16,
         );
+        block.push_output(
+            CommandOutput::Visual(ConsoleVisualBlock {
+                title: "TRIG UNIT CIRCLE".to_string(),
+                kind: ConsoleVisualKind::TrigUnitCircle(ConsoleTrigUnitCircleBlock {
+                    expression: "sin(x) = 1".to_string(),
+                    function: "sin".to_string(),
+                    relation: "=".to_string(),
+                    value_label: "1".to_string(),
+                    solution_points: vec![(0.0, 1.0)],
+                    boundary_points: Vec::new(),
+                    arc_points: Vec::new(),
+                }),
+                fallback_lines: vec![OutputLine::stdout("fallback visual")],
+            }),
+            16,
+        );
 
         assert_eq!(block.output_lines.len(), 1);
-        assert_eq!(block.output_items.len(), 2);
+        assert_eq!(block.output_items.len(), 3);
         assert!(matches!(block.output_items[0], CommandOutput::Line(_)));
         assert!(matches!(block.output_items[1], CommandOutput::Plot(_)));
+        assert!(matches!(block.output_items[2], CommandOutput::Visual(_)));
+    }
+
+    #[test]
+    fn accept_ghost_completion_replaces_input_without_literal_tab() {
+        let mut state = ConsoleState::new(16);
+        state.set_input(":pl".to_string());
+        state.update_ghost_text(Some(":plot".to_string()));
+
+        assert!(state.accept_ghost_completion());
+        assert_eq!(state.input_buffer, ":plot");
+        assert_eq!(state.cursor_position, 5);
+        assert!(state.ghost_text.is_none());
+        assert!(!state.input_buffer.contains('\t'));
     }
 
     #[test]

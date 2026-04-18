@@ -485,7 +485,11 @@ fn solve_exact_trig(
         let intervals = trig_domain_lines(variable, trig.func, trig.op, min, max)?;
         return Some(ExactSolveReport {
             variable: variable.to_string(),
-            method: "trig-domain",
+            method: if trig.powered_zero {
+                "trig-power-domain"
+            } else {
+                "trig-domain"
+            },
             status: "exact",
             numeric_lines: intervals.iter().map(|line| line.numeric.clone()).collect(),
             exact_lines: intervals.into_iter().map(|line| line.exact).collect(),
@@ -525,7 +529,11 @@ fn solve_exact_trig(
 
     Some(ExactSolveReport {
         variable: variable.to_string(),
-        method: "trig-family",
+        method: if trig.powered_zero {
+            "trig-power-family"
+        } else {
+            "trig-family"
+        },
         status: "exact-family",
         exact_lines: vec![line],
         numeric_lines: vec![
@@ -539,6 +547,7 @@ fn solve_exact_trig(
 struct TrigRelation {
     func: &'static str,
     op: RelationOp,
+    powered_zero: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -681,22 +690,50 @@ fn trig_point_domain_lines(
 
 fn match_trig_zero_relation(relation: &Relation, variable: &str) -> Option<TrigRelation> {
     if is_zero_expr(&relation.right) {
-        let func = match_trig_variable(&relation.left, variable)?;
+        let (func, powered_zero) = match_trig_zero_expr(&relation.left, variable, relation.op)?;
         return Some(TrigRelation {
             func,
             op: relation.op,
+            powered_zero,
         });
     }
 
     if is_zero_expr(&relation.left) {
-        let func = match_trig_variable(&relation.right, variable)?;
+        let op = reverse_relation_op(relation.op);
+        let (func, powered_zero) = match_trig_zero_expr(&relation.right, variable, op)?;
         return Some(TrigRelation {
             func,
-            op: reverse_relation_op(relation.op),
+            op,
+            powered_zero,
         });
     }
 
     None
+}
+
+fn match_trig_zero_expr(
+    expr: &Expr,
+    variable: &str,
+    op: RelationOp,
+) -> Option<(&'static str, bool)> {
+    if let Some(func) = match_trig_variable(expr, variable) {
+        return Some((func, false));
+    }
+
+    if op != RelationOp::Equal {
+        return None;
+    }
+
+    let Expr::Binary {
+        op: BinaryOp::Power,
+        left,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let func = match_trig_variable(left, variable)?;
+    is_positive_integer_number(right).then_some((func, true))
 }
 
 fn match_trig_variable(expr: &Expr, variable: &str) -> Option<&'static str> {
@@ -717,6 +754,13 @@ fn match_trig_variable(expr: &Expr, variable: &str) -> Option<&'static str> {
         "cos" => Some("cos"),
         _ => None,
     }
+}
+
+fn is_positive_integer_number(expr: &Expr) -> bool {
+    let Expr::Number(value) = expr else {
+        return false;
+    };
+    *value > 0.0 && close(*value, value.round())
 }
 
 fn reverse_relation_op(op: RelationOp) -> RelationOp {
@@ -1218,3 +1262,32 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
 }
 
 const EPS: f64 = 1e-10;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_solver_handles_trig_power_zero_equation_as_pi_family() {
+        let relation = crate::app::math::solver::parse_relation("cos(x)^2 = 0")
+            .unwrap()
+            .unwrap();
+        let report = solve_exact(&relation, "x", &BTreeMap::new(), None).unwrap();
+
+        assert_eq!(report.method, "trig-power-family");
+        assert_eq!(report.exact_lines, vec!["x = pi/2 + k*pi, k in Z"]);
+        assert!(!report
+            .numeric_lines
+            .iter()
+            .any(|line| line.contains("92.676")));
+    }
+
+    #[test]
+    fn exact_solver_does_not_reduce_powered_trig_inequality_to_wrong_base_sign() {
+        let relation = crate::app::math::solver::parse_relation("cos(x)^2 > 0")
+            .unwrap()
+            .unwrap();
+
+        assert!(solve_exact(&relation, "x", &BTreeMap::new(), None).is_none());
+    }
+}

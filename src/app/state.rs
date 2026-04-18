@@ -3133,6 +3133,15 @@ impl AppState {
                             }
                             return Ok(true);
                         }
+                        KeyCode::Char('\t') => {
+                            if is_initial_press {
+                                if self.console_state.accept_ghost_completion() {
+                                    self.console_state.reset_history_nav();
+                                    self.refresh_syntax_highlight();
+                                }
+                            }
+                            return Ok(true);
+                        }
                         KeyCode::Char(c) => {
                             if is_initial_press && self.allow_text_input() {
                                 self.console_state.reset_history_nav();
@@ -3180,8 +3189,9 @@ impl AppState {
                                     && self.console_state.ghost_text.is_some()
                                 {
                                     // Right at end of buffer: accept full ghost text
-                                    self.console_state.accept_ghost_text();
-                                    self.console_state.clear_ghost_text();
+                                    if self.console_state.accept_ghost_completion() {
+                                        self.refresh_syntax_highlight();
+                                    }
                                 } else {
                                     self.console_state.move_cursor_right();
                                 }
@@ -3390,9 +3400,11 @@ impl AppState {
                         }
                         KeyCode::Tab => {
                             // Accept full ghost text on Tab as alternative to Right
-                            if is_initial_press && self.console_state.ghost_text.is_some() {
-                                self.console_state.accept_ghost_text();
-                                self.console_state.clear_ghost_text();
+                            if is_initial_press {
+                                if self.console_state.accept_ghost_completion() {
+                                    self.console_state.reset_history_nav();
+                                    self.refresh_syntax_highlight();
+                                }
                             }
                             return Ok(true);
                         }

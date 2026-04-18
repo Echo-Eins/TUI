@@ -10,7 +10,7 @@ pub use exact::{
     format_exact_number, format_number, format_pi_multiple, relation_fallback, solve_exact,
     ExactSolveReport,
 };
-pub use expr::{parse_expression, EvalContext, Expr, MathError};
+pub use expr::{parse_expression, BinaryOp, EvalContext, Expr, MathError};
 pub use formula::{format_expr, render_formula, FormulaRender};
 pub use plot::{
     PlotCache, PlotMode, PlotRender, PlotRequest, PlotSeries, MAX_PLOT_HEIGHT, MAX_PLOT_SAMPLES,

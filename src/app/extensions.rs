@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::app::console_state::{split_shell_words, CommandOutput, ConsolePlotBlock, OutputLine};
+use crate::app::console_state::{
+    split_shell_words, CommandOutput, ConsolePlotBlock, ConsoleVisualBlock, OutputLine,
+};
 pub use crate::app::console_state::{ConsoleSession, SessionStatus, SessionSummary};
 
 mod math;
@@ -93,6 +95,8 @@ pub enum ConsoleResult {
     Table(Vec<Vec<String>>),
     Formula(Vec<String>),
     Plot(ConsolePlotBlock),
+    Visual(ConsoleVisualBlock),
+    Outputs(Vec<CommandOutput>),
     Canvas(Vec<String>),
     StartSession(Box<dyn ConsoleSession>),
     Error(String),
@@ -125,6 +129,13 @@ impl ConsoleCommandResponse {
         }
     }
 
+    pub fn outputs(outputs: Vec<CommandOutput>) -> Self {
+        Self {
+            result: ConsoleResult::Outputs(outputs),
+            exit_code: 0,
+        }
+    }
+
     pub fn session(session: Box<dyn ConsoleSession>) -> Self {
         Self {
             result: ConsoleResult::StartSession(session),
@@ -145,6 +156,8 @@ impl ConsoleCommandResponse {
                 .map(|line| CommandOutput::Line(OutputLine::stdout(line)))
                 .collect(),
             ConsoleResult::Plot(plot) => vec![CommandOutput::Plot(plot)],
+            ConsoleResult::Visual(visual) => vec![CommandOutput::Visual(visual)],
+            ConsoleResult::Outputs(outputs) => outputs,
             ConsoleResult::StartSession(_) => {
                 exit_code = 1;
                 vec![CommandOutput::Line(OutputLine::stderr(
@@ -171,6 +184,19 @@ impl ConsoleCommandResponse {
                 .fallback_lines
                 .into_iter()
                 .map(OutputLine::stdout)
+                .collect(),
+            ConsoleResult::Visual(visual) => visual.fallback_lines,
+            ConsoleResult::Outputs(outputs) => outputs
+                .into_iter()
+                .flat_map(|output| match output {
+                    CommandOutput::Line(line) => vec![line],
+                    CommandOutput::Plot(plot) => plot
+                        .fallback_lines
+                        .into_iter()
+                        .map(OutputLine::stdout)
+                        .collect(),
+                    CommandOutput::Visual(visual) => visual.fallback_lines,
+                })
                 .collect(),
             ConsoleResult::StartSession(_) => {
                 exit_code = 1;

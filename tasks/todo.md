@@ -91,6 +91,7 @@
 - [x] Fourth implementation milestone: finish formula command surface and implement the first bounded fallback `:plot` math modulator.
 - [x] Fifth implementation milestone: promote `:plot` to a typed Console output rendered by ratatui widgets, with ASCII fallback kept only as fallback/history output.
 - [x] Sixth implementation milestone: add trig Math Block unit-circle visuals, explicit plot axes, real `ConsoleSession` runtime wiring, and interactive plot zoom/pan.
+- [x] Seventh implementation milestone: make ratatui the production renderer for Console visual blocks, fix Tab ghost-completion, and close exact trig-power solver gaps.
 - [x] Keep the Linux Console repair and native Linux link fix as the quality baseline.
 - [x] Preserve normal shell behavior. Console extensions must not steal ordinary shell commands unexpectedly.
 - [x] Keep secondary functionality lazy, bounded, and inactive until requested.
@@ -194,6 +195,9 @@
 - [x] Return typed plot data from the math extension instead of flattening production plots into strings.
 - [x] Render plot command blocks with ratatui `Chart`/typed widgets in the Console UI.
 - [x] Keep ASCII plot canvas as a width-safe fallback and test/debug representation.
+- [x] Route non-plot visual math blocks, including the trigonometric unit circle, through typed ratatui renderers instead of styled text output.
+- [x] Keep ASCII visuals only as fallback/history/debug output for terminals or areas too small for typed rendering.
+- [x] Ensure all current and future graph-like visuals expose typed ratatui data first, with string output only as fallback/debug history.
 - [x] Render explicit `x` and `y` axes/titles for all typed plot graphs and preserve the width-safe fallback.
 - [x] Support pan and zoom through interactive plot sessions after the non-interactive renderer is stable.
 - [ ] Support cursor inspection of approximate x/y values in interactive plot sessions.
@@ -222,6 +226,9 @@
 - [x] Solve symbolic linear/quadratic equations such as `a*x^2 + b*x + c = 0 for x` exactly.
 - [x] Return exact trigonometric families for equations such as `sin(x) = 1` before numeric fallback.
 - [x] Render a rich trigonometric unit circle in `-mb` for supported trig equations and inequalities, including `sin`/`cos` axes, exact solution points, inequality bounds, and highlighted solution arcs.
+- [x] Render the trigonometric unit circle through a typed ratatui visual block in the Console UI, not only as styled text rows.
+- [x] Recognize exact zero equations with positive trig powers such as `cos(x)^2 = 0` and `sin(x)^2 = 0` before numeric fallback.
+- [x] Render exact pi-family solutions for supported trig-power zero equations in compact and Math Block output; numeric lists over broad domains must require `-num`/numeric fallback only when exact handling is impossible.
 - [x] Render exact result expressions in the Math Block formula section, including roots and fractions.
 - [x] Implement a real expression evaluator, not a string-based toy calculator.
 - [x] Use a small local Pratt parser for this milestone to avoid adding calculator dependencies before the shared AST/API shape is proven.
@@ -339,6 +346,8 @@
 ## Console UI and Design
 
 - [ ] Create a cohesive Console extension visual language before adding many modules.
+- [ ] Use typed ratatui widgets as the default production path for every graph/visual module; do not add new graph-like features as plain text first.
+- [x] Fix Console Tab ghost-completion so accepting a suggestion never inserts a literal tab/indent and never requires Backspace to refresh the visible suggestion.
 - [ ] Keep the design terminal-native but modern, similar in quality to the Network tab.
 - [ ] Keep games visually inside Console output history rather than visually acting like a separate tab.
 - [ ] Prefer ASCII-safe boards for first implementations to avoid repeating mojibake issues.
@@ -440,3 +449,7 @@
 - `:plot <expr> -i` starts an interactive plot session with arrow/HJKL pan, `+`/`-` zoom, `r`/`0` reset, and `q`/`Esc`/`Ctrl+C` quit; cursor inspect remains intentionally deferred.
 - Typed plot blocks now expose explicit `x`/`y` axis titles and visible x/y range labels; ASCII fallback labels the y axis as well.
 - Sixth milestone verification passed: `cargo fmt --all`, `cargo test` with 107 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.
+- Seventh milestone added `CommandOutput::Visual` and a typed `ConsoleVisualBlock` path so trigonometric unit-circle visuals render through ratatui canvas, while ASCII lines remain fallback/history output.
+- Console Tab completion now accepts both `KeyCode::Tab` and terminal-emitted `KeyCode::Char('\t')` without inserting a literal tab or requiring Backspace to refresh the suggestion.
+- Exact trig solving now handles zero equations with positive trig powers such as `cos(x)^2 = 0` as pi-family results before numeric fallback; powered trig inequalities are deliberately not reduced to an incorrect base-sign inequality.
+- Seventh milestone verification passed: `cargo fmt --all`, `cargo test` with 113 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.
