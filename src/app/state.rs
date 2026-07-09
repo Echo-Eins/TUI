@@ -100,6 +100,9 @@ pub struct AppState {
     // RAM UI state
     pub ram_state: RamUIState,
 
+    // Disk UI state
+    pub disk_state: DiskUIState,
+
     // Network UI state
     pub network_ui_state: NetworkUIState,
 
@@ -205,6 +208,18 @@ pub struct RamUIState {
     pub selected_index: usize,
     pub sort_column: RamProcessSortColumn,
     pub sort_ascending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskPanelFocus {
+    Filesystems,
+    Processes,
+}
+
+pub struct DiskUIState {
+    pub focused_panel: DiskPanelFocus,
+    pub selected_volume: usize,
+    pub expanded_volumes: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2839,6 +2854,12 @@ impl AppState {
                 sort_ascending: false,
             },
 
+            disk_state: DiskUIState {
+                focused_panel: DiskPanelFocus::Filesystems,
+                selected_volume: 0,
+                expanded_volumes: HashSet::new(),
+            },
+
             network_ui_state: NetworkUIState {
                 focus: NetworkFocusZone::Tools,
                 result_tab: NetworkResultTab::Summary,
@@ -3878,6 +3899,74 @@ impl AppState {
                     }
                     self.ram_state.sort_column = RamProcessSortColumn::PrivateBytes;
                     self.ram_state.sort_ascending = !self.ram_state.sort_ascending;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        if self.tab_manager.current() == TabType::Disk {
+            let volumes: Vec<(String, usize)> = self
+                .disk_data
+                .read()
+                .as_ref()
+                .map(|data| {
+                    data.logical_drives
+                        .iter()
+                        .map(|drive| (drive.stable_key(), drive.mount_points.len()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if volumes.is_empty() {
+                self.disk_state.selected_volume = 0;
+            } else {
+                self.disk_state.selected_volume =
+                    self.disk_state.selected_volume.min(volumes.len() - 1);
+            }
+
+            match key.code {
+                KeyCode::Left | KeyCode::Right => {
+                    if !self.allow_horizontal_nav() {
+                        return Ok(true);
+                    }
+                    self.disk_state.focused_panel = match self.disk_state.focused_panel {
+                        DiskPanelFocus::Filesystems => DiskPanelFocus::Processes,
+                        DiskPanelFocus::Processes => DiskPanelFocus::Filesystems,
+                    };
+                    return Ok(true);
+                }
+                KeyCode::Up => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.disk_state.focused_panel == DiskPanelFocus::Filesystems {
+                        self.disk_state.selected_volume =
+                            self.disk_state.selected_volume.saturating_sub(1);
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Down => {
+                    if !self.allow_nav() {
+                        return Ok(true);
+                    }
+                    if self.disk_state.focused_panel == DiskPanelFocus::Filesystems
+                        && self.disk_state.selected_volume + 1 < volumes.len()
+                    {
+                        self.disk_state.selected_volume += 1;
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if !is_initial_press
+                        || self.disk_state.focused_panel != DiskPanelFocus::Filesystems
+                    {
+                        return Ok(true);
+                    }
+                    if let Some((key, mount_count)) = volumes.get(self.disk_state.selected_volume) {
+                        if *mount_count > 1 && !self.disk_state.expanded_volumes.remove(key) {
+                            self.disk_state.expanded_volumes.insert(key.clone());
+                        }
+                    }
                     return Ok(true);
                 }
                 _ => {}

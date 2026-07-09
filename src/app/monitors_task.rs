@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,6 +7,50 @@ use tokio::time::sleep;
 use crate::app::Config;
 use crate::integrations::{OllamaClient, OllamaData, PowerShellExecutor};
 use crate::monitors::*;
+
+#[cfg(target_os = "linux")]
+async fn collect_on_blocking_pool<M, R, F>(monitor: &mut Option<M>, collect: F) -> Result<R>
+where
+    M: Send + 'static,
+    R: Send + 'static,
+    F: FnOnce(&mut M) -> Result<R> + Send + 'static,
+{
+    let mut owned = monitor
+        .take()
+        .ok_or_else(|| anyhow!("monitor is not initialized"))?;
+    match tokio::task::spawn_blocking(move || {
+        let result = collect(&mut owned);
+        (owned, result)
+    })
+    .await
+    {
+        Ok((returned, result)) => {
+            *monitor = Some(returned);
+            result
+        }
+        Err(error) => Err(anyhow!("monitor blocking task failed: {error}")),
+    }
+}
+
+macro_rules! collect_monitor_data {
+    ($monitor:expr) => {{
+        #[cfg(target_os = "linux")]
+        {
+            collect_on_blocking_pool($monitor, |monitor| {
+                futures::executor::block_on(monitor.collect_data())
+            })
+            .await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            $monitor
+                .as_mut()
+                .expect("monitor checked before collection")
+                .collect_data()
+                .await
+        }
+    }};
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PsSettings {
@@ -164,7 +209,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -199,8 +244,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *cpu_data.write() = Some(data);
                             update_monitor_error("CPU", &mut last_error, &cpu_error, None);
@@ -267,7 +312,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -302,8 +347,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *gpu_data.write() = Some(data);
                             update_monitor_error("GPU", &mut last_error, &gpu_error, None);
@@ -370,7 +415,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -405,8 +450,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *ram_data.write() = Some(data);
                             update_monitor_error("RAM", &mut last_error, &ram_error, None);
@@ -473,7 +518,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -508,8 +553,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *disk_data.write() = Some(data);
                             update_monitor_error("Disk", &mut last_error, &disk_error, None);
@@ -597,7 +642,7 @@ pub fn spawn_monitor_tasks(
                     max_depth,
                     refresh_interval_ms,
                 );
-                if last_settings.as_ref() != Some(&settings_key) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings_key) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -637,8 +682,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *disk_analyzer_data.write() = Some(data);
                             update_monitor_error(
@@ -712,7 +757,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -747,8 +792,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(monitor) = monitor.as_mut() {
-                    if let Ok(mut data) = monitor.collect_data().await {
+                if monitor.is_some() {
+                    if let Ok(mut data) = collect_monitor_data!(&mut monitor) {
                         if !data.traffic_history.is_empty() {
                             for sample in data.traffic_history.iter() {
                                 traffic_history.push_back(sample.clone());
@@ -824,7 +869,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -859,8 +904,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *process_data.write() = Some(data);
                             update_monitor_error("Process", &mut last_error, &process_error, None);
@@ -927,7 +972,7 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if last_settings.as_ref() != Some(&settings) {
+                if monitor.is_none() || last_settings.as_ref() != Some(&settings) {
                     if use_cache_config && settings.cache_ttl_seconds < cache_ttl_config {
                         if last_cache_ttl != Some(settings.cache_ttl_seconds) {
                             log::info!(
@@ -962,8 +1007,8 @@ pub fn spawn_monitor_tasks(
                     }
                 }
 
-                if let Some(ref mut monitor) = monitor {
-                    match monitor.collect_data().await {
+                if monitor.is_some() {
+                    match collect_monitor_data!(&mut monitor) {
                         Ok(data) => {
                             *service_data.write() = Some(data);
                             update_monitor_error("Service", &mut last_error, &service_error, None);
@@ -991,18 +1036,21 @@ pub fn spawn_monitor_tasks(
         let ollama_error = Arc::clone(&ollama_error);
         tokio::spawn(async move {
             let mut client: Option<OllamaClient> = None;
+            let mut client_timeout_seconds = None;
             let mut last_error: Option<String> = None;
             loop {
-                let (enabled, refresh_interval_ms) = {
+                let (enabled, refresh_interval_ms, command_timeout_seconds) = {
                     let cfg = config.read();
                     (
                         cfg.integrations.ollama.enabled,
                         cfg.integrations.ollama.refresh_interval_ms,
+                        cfg.integrations.ollama.command_timeout_seconds,
                     )
                 };
 
                 if !enabled {
                     client = None;
+                    client_timeout_seconds = None;
                     *ollama_data.write() = None;
                     update_monitor_error(
                         "Ollama",
@@ -1014,9 +1062,15 @@ pub fn spawn_monitor_tasks(
                     continue;
                 }
 
-                if client.is_none() {
-                    match OllamaClient::new(None) {
-                        Ok(c) => client = Some(c),
+                if client.is_none() || client_timeout_seconds != Some(command_timeout_seconds) {
+                    match OllamaClient::new_with_timeout(
+                        None,
+                        Duration::from_secs(command_timeout_seconds),
+                    ) {
+                        Ok(c) => {
+                            client = Some(c);
+                            client_timeout_seconds = Some(command_timeout_seconds);
+                        }
                         Err(e) => {
                             update_monitor_error(
                                 "Ollama",
@@ -1049,5 +1103,38 @@ pub fn spawn_monitor_tasks(
                 sleep(refresh_duration(refresh_interval_ms)).await;
             }
         });
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct StatefulMonitor {
+        collections: usize,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_collection_does_not_stall_async_worker_and_preserves_state() {
+        let mut monitor = Some(StatefulMonitor { collections: 0 });
+        let timer_fired = Arc::new(AtomicBool::new(false));
+        let timer_flag = Arc::clone(&timer_fired);
+
+        let collection = collect_on_blocking_pool(&mut monitor, |monitor| {
+            std::thread::sleep(Duration::from_millis(100));
+            monitor.collections += 1;
+            Ok(monitor.collections)
+        });
+        let timer = async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            timer_flag.store(true, Ordering::SeqCst);
+        };
+
+        let (result, ()) = tokio::join!(collection, timer);
+        assert_eq!(result.expect("collection"), 1);
+        assert!(timer_fired.load(Ordering::SeqCst));
+        assert_eq!(monitor.expect("monitor returned").collections, 1);
     }
 }

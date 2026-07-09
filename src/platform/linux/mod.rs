@@ -33,12 +33,14 @@ pub(super) struct RaplSnapshot {
 /// Methods are split across submodules by domain (cpu, memory, disk, network, process).
 pub struct LinuxSysMonitor {
     pub(super) rapl_snapshot: Mutex<Option<RaplSnapshot>>,
+    pub(super) cpu_snapshot: Mutex<Option<Vec<(String, cpu::CpuStat)>>>,
 }
 
 impl LinuxSysMonitor {
     pub fn new() -> Self {
         Self {
             rapl_snapshot: Mutex::new(None),
+            cpu_snapshot: Mutex::new(None),
         }
     }
 }

@@ -1,11 +1,13 @@
 use super::LinuxSysMonitor;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct NetworkInterfaceIpInfo {
@@ -258,17 +260,21 @@ impl LinuxSysMonitor {
     }
 
     pub fn ping_host(&self, target: &str, count: u32, timeout_secs: u32) -> Result<PingResult> {
-        let output = Command::new("ping")
-            .args([
+        let output = run_command_with_timeout(
+            "ping",
+            [
                 "-n",
                 "-c",
                 &count.max(1).to_string(),
                 "-W",
                 &timeout_secs.max(1).to_string(),
                 target,
-            ])
-            .output()
-            .with_context(|| format!("failed to execute ping for target {target}"))?;
+            ],
+            Duration::from_secs(
+                u64::from(count.max(1)).saturating_mul(u64::from(timeout_secs.max(1))) + 2,
+            ),
+        )
+        .with_context(|| format!("failed to execute ping for target {target}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut transmitted = 0u32;
@@ -433,8 +439,9 @@ impl LinuxSysMonitor {
     }
 
     fn ping_df_payload(&self, target: &str, payload: u32) -> Result<bool> {
-        let output = Command::new("ping")
-            .args([
+        let output = run_command_with_timeout(
+            "ping",
+            [
                 "-n",
                 "-c",
                 "1",
@@ -445,9 +452,10 @@ impl LinuxSysMonitor {
                 "-s",
                 &payload.to_string(),
                 target,
-            ])
-            .output()
-            .with_context(|| format!("failed to execute MTU probe ping for {target}"))?;
+            ],
+            Duration::from_secs(3),
+        )
+        .with_context(|| format!("failed to execute MTU probe ping for {target}"))?;
         Ok(output.status.success())
     }
 
@@ -483,9 +491,8 @@ impl LinuxSysMonitor {
         F: Fn(&str) -> bool,
     {
         let mut map = HashMap::new();
-        let output = Command::new("ip")
-            .args(["-o", family_flag, "addr", "show"])
-            .output();
+        let output =
+            run_command_with_timeout("ip", ["-o", family_flag, "addr", "show"], COMMAND_TIMEOUT);
 
         let Ok(output) = output else {
             return map;
@@ -598,9 +605,8 @@ impl LinuxSysMonitor {
     }
 
     fn read_ipv6_default_gateways(&self) -> Vec<GatewayInfo> {
-        let output = Command::new("ip")
-            .args(["-6", "route", "show", "default"])
-            .output();
+        let output =
+            run_command_with_timeout("ip", ["-6", "route", "show", "default"], COMMAND_TIMEOUT);
         let Ok(output) = output else {
             return Vec::new();
         };
@@ -677,7 +683,7 @@ impl LinuxSysMonitor {
     }
 
     fn read_dns_from_resolvectl(&self) -> Vec<DnsServerInfo> {
-        let output = Command::new("resolvectl").arg("dns").output();
+        let output = run_command_with_timeout("resolvectl", ["dns"], COMMAND_TIMEOUT);
         let Ok(output) = output else {
             return Vec::new();
         };
@@ -867,7 +873,7 @@ impl LinuxSysMonitor {
     }
 
     fn read_process_bandwidth_from_ss(&self) -> Vec<ProcessBandwidthInfo> {
-        let output = Command::new("ss").args(["-tinpH"]).output();
+        let output = run_command_with_timeout("ss", ["-tinpH"], COMMAND_TIMEOUT);
         let Ok(output) = output else {
             return Vec::new();
         };

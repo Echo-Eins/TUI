@@ -206,7 +206,7 @@ mod imp {
             }
         };
 
-        let stride = width * 4;
+        let stride = frame_stride(buffer.len(), height, width)?;
         let (start_x, start_y, crop_width, crop_height) = if let Some(region) = region {
             (
                 region.x as usize,
@@ -232,6 +232,22 @@ mod imp {
 
         RgbImage::from_raw(crop_width as u32, crop_height as u32, rgb)
             .ok_or_else(|| CaptureError::CaptureError("Failed to create image".into()))
+    }
+
+    fn frame_stride(buffer_len: usize, height: usize, width: usize) -> Result<usize, CaptureError> {
+        if height == 0 || width == 0 || buffer_len % height != 0 {
+            return Err(CaptureError::CaptureError(
+                "Invalid desktop frame dimensions".to_string(),
+            ));
+        }
+
+        let stride = buffer_len / height;
+        if stride < width.saturating_mul(4) {
+            return Err(CaptureError::CaptureError(
+                "Desktop frame stride is smaller than its packed row width".to_string(),
+            ));
+        }
+        Ok(stride)
     }
 
     #[cfg(target_os = "linux")]
@@ -305,6 +321,21 @@ mod imp {
             .to_rgb8();
 
         Ok(image)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn frame_stride_preserves_row_padding() {
+            assert_eq!(frame_stride(48, 2, 4).expect("valid frame"), 24);
+        }
+
+        #[test]
+        fn frame_stride_rejects_short_rows() {
+            assert!(frame_stride(28, 2, 4).is_err());
+        }
     }
 }
 

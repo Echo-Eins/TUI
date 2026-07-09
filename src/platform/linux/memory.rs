@@ -1,8 +1,11 @@
 use super::LinuxSysMonitor;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl LinuxSysMonitor {
     pub fn get_memory_info(&self) -> Result<MemoryInfo> {
@@ -176,10 +179,8 @@ impl LinuxSysMonitor {
     }
 
     fn get_memory_from_dmidecode(&self) -> Option<MemoryHardwareInfo> {
-        let output = Command::new("dmidecode")
-            .args(["-t", "memory"])
-            .output()
-            .ok()?;
+        let output =
+            run_command_with_timeout("dmidecode", ["-t", "memory"], COMMAND_TIMEOUT).ok()?;
 
         if !output.status.success() {
             return None;

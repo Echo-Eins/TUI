@@ -241,10 +241,14 @@ impl DiskMonitorTrait for WindowsDiskMonitor {
             .map(|p| PhysicalDiskInfo {
                 disk_number: p.DiskNumber,
                 friendly_name: p.FriendlyName.unwrap_or_else(|| "Unknown".to_string()),
+                device_path: format!(r"\\.\PhysicalDrive{}", p.DiskNumber),
                 model: p.Model.unwrap_or_else(|| "Unknown".to_string()),
                 media_type: p.MediaType.unwrap_or_else(|| "Unspecified".to_string()),
                 bus_type: p.BusType.unwrap_or_else(|| "Other".to_string()),
                 size: p.Size.unwrap_or(0),
+                filesystem_total: 0,
+                filesystem_used: 0,
+                filesystem_available: 0,
                 health_status: p.HealthStatus.unwrap_or_else(|| "Unknown".to_string()),
                 operational_status: p.OperationalStatus.unwrap_or_else(|| "Unknown".to_string()),
                 temperature: p.Temperature,
@@ -264,8 +268,17 @@ impl DiskMonitorTrait for WindowsDiskMonitor {
             .LogicalDrives
             .into_iter()
             .map(|l| DriveInfo {
-                letter: l.Letter,
+                letter: l.Letter.clone(),
                 name: l.Name.unwrap_or_default(),
+                source: l.Letter.clone(),
+                uuid: None,
+                mount_points: vec![l.Letter.clone()],
+                mount_details: vec![MountPointInfo {
+                    path: l.Letter,
+                    total: l.Total.unwrap_or(0),
+                    used: l.Used.unwrap_or(0),
+                    free: l.Free.unwrap_or(0),
+                }],
                 drive_type: l.DriveType.unwrap_or_else(|| "Local Disk".to_string()),
                 file_system: l.FileSystem.unwrap_or_default(),
                 total: l.Total.unwrap_or(0),

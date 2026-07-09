@@ -1,7 +1,11 @@
 use crate::integrations::LinuxSysMonitor;
 use crate::monitors::traits::*;
 use crate::monitors::types::*;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::Result;
+use std::time::Duration;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct LinuxServiceMonitor {
     linux_sys: LinuxSysMonitor,
@@ -37,9 +41,8 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
     }
 
     async fn start_service(&self, service_name: &str) -> Result<()> {
-        let output = std::process::Command::new("systemctl")
-            .args(["start", service_name])
-            .output()?;
+        let output =
+            run_command_with_timeout("systemctl", ["start", service_name], COMMAND_TIMEOUT)?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -51,9 +54,8 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
     }
 
     async fn stop_service(&self, service_name: &str) -> Result<()> {
-        let output = std::process::Command::new("systemctl")
-            .args(["stop", service_name])
-            .output()?;
+        let output =
+            run_command_with_timeout("systemctl", ["stop", service_name], COMMAND_TIMEOUT)?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -65,9 +67,8 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
     }
 
     async fn restart_service(&self, service_name: &str) -> Result<()> {
-        let output = std::process::Command::new("systemctl")
-            .args(["restart", service_name])
-            .output()?;
+        let output =
+            run_command_with_timeout("systemctl", ["restart", service_name], COMMAND_TIMEOUT)?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -91,9 +92,7 @@ impl ServiceMonitorTrait for LinuxServiceMonitor {
             ServiceStartType::Unknown => anyhow::bail!("Invalid startup type"),
         };
 
-        let output = std::process::Command::new("systemctl")
-            .args([cmd, service_name])
-            .output()?;
+        let output = run_command_with_timeout("systemctl", [cmd, service_name], COMMAND_TIMEOUT)?;
 
         if !output.status.success() {
             anyhow::bail!(

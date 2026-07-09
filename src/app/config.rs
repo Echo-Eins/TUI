@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -283,9 +284,15 @@ impl Config {
     pub fn load_or_default<P: AsRef<Path>>(path: P) -> Result<Self> {
         match Self::load(path.as_ref()) {
             Ok(config) => Ok(config),
-            Err(load_err) => {
+            Err(load_err)
+                if load_err.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == ErrorKind::NotFound)
+                }) =>
+            {
                 log::warn!(
-                    "Falling back to bundled default config: {}. A new config will be written to {:?} if possible.",
+                    "Config is missing: {}. A new default config will be written to {:?} if possible.",
                     load_err,
                     path.as_ref()
                 );
@@ -299,7 +306,42 @@ impl Config {
 
                 Ok(default_config)
             }
+            Err(load_err) => Err(load_err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("tui-{name}-{}-{unique}.toml", std::process::id()))
+    }
+
+    #[test]
+    fn missing_config_creates_default() {
+        let path = temp_config_path("missing");
+        let config = Config::load_or_default(&path).expect("default config");
+        assert_eq!(config.general.app_name, "TUI+");
+        assert!(path.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_config_is_not_overwritten() {
+        let path = temp_config_path("malformed");
+        let original = b"[general\ninvalid";
+        fs::write(&path, original).expect("write malformed config");
+
+        assert!(Config::load_or_default(&path).is_err());
+        assert_eq!(fs::read(&path).expect("read malformed config"), original);
+        let _ = fs::remove_file(path);
     }
 }
 

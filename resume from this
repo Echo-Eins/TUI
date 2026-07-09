@@ -1,0 +1,53 @@
+**Найденные проблемы**
+
+1. **High: искажение Linux screen capture.** `scrap` допускает stride больше `width * 4`, но код жёстко использует `width * 4`. Кадры могут съезжать или повреждаться. Нужно вычислять `buffer.len() / height`.
+[capture/mod.rs](/home/EchoEins/Coding/Rust/TUI/src/capture/mod.rs:190)
+
+2. **High: повреждённый конфиг перезаписывается дефолтным.** Любая ошибка чтения или TOML-парсинга вызывает сохранение default config поверх пользовательского файла. Разумнее создавать дефолт только при `NotFound`, а ошибки синтаксиса возвращать пользователю.
+[config.rs](/home/EchoEins/Coding/Rust/TUI/src/app/config.rs:283)
+
+3. **High: блокирующая работа внутри Tokio tasks.** Linux-мониторы используют `std::thread::sleep`, синхронный `/proc`-скан и `std::process::Command`. CPU-монитор блокируется минимум на 200 мс за обновление; сеть каждую секунду обходит `/proc/*/fd`. На слабой системе это вызовет задержки интерфейса.
+[cpu.rs](/home/EchoEins/Coding/Rust/TUI/src/platform/linux/cpu.rs:8)
+[network.rs](/home/EchoEins/Coding/Rust/TUI/src/platform/linux/network.rs:786)
+[monitors_task.rs](/home/EchoEins/Coding/Rust/TUI/src/app/monitors_task.rs:128)
+
+4. **High: внешние команды без timeout.** `systemctl`, `nvidia-smi`, `ss`, `dmidecode`, `ollama` могут зависнуть и навсегда остановить соответствующий monitor task. `command_timeout_seconds` Ollama фактически не применяется.
+[gpu.rs](/home/EchoEins/Coding/Rust/TUI/src/monitors/linux/gpu.rs:289)
+[ollama.rs](/home/EchoEins/Coding/Rust/TUI/src/integrations/ollama.rs:114)
+[services.rs](/home/EchoEins/Coding/Rust/TUI/src/platform/linux/services.rs:31)
+
+5. **Medium: Disk Analyzer включён по умолчанию, но не реализован для Linux.** Более того, сначала проверяется наличие Windows-файла `es.exe`, поэтому реальная Linux-ошибка обычно даже не достигается. Вкладка по умолчанию заведомо неисправна.
+[default_config.toml](/home/EchoEins/Coding/Rust/TUI/src/app/default_config.toml:63)
+[disk_analyzer.rs](/home/EchoEins/Coding/Rust/TUI/src/monitors/disk_analyzer.rs:68)
+
+6. **Medium: большая часть конфигурации не работает.** `show_*`, `top_processes_count`, `max_connections`, `graph_duration_seconds`, `refresh_rate_ms`, размеры графиков и `mouse_support` нигде не читаются после десериализации. Mouse capture всегда включается, tick всегда равен 200 мс.
+[config.rs](/home/EchoEins/Coding/Rust/TUI/src/app/config.rs:55)
+[TUI.rs](/home/EchoEins/Coding/Rust/TUI/src/bin/TUI.rs:20)
+
+7. **Medium: Linux GPU фактически поддерживает только NVIDIA и только одну карту.** Весь многострочный вывод `nvidia-smi` разбирается как одна CSV-запись; AMD/Intel веток нет. `gpu_index` ошибочно выводится из PCI bus id.
+[gpu.rs](/home/EchoEins/Coding/Rust/TUI/src/monitors/linux/gpu.rs:12)
+
+8. **Medium: mount points с пробелами обрабатываются неверно.** `/proc/mounts` содержит escape-последовательности вроде `\040`, но они передаются напрямую в `statvfs`, поэтому такие диски пропадают из UI.
+[disk.rs](/home/EchoEins/Coding/Rust/TUI/src/platform/linux/disk.rs:86)
+
+9. **Medium: Linux input несовместим с pure Wayland.** Используется только синхронный `xdotool`; ошибки запуска игнорируются. Каждый remote input event блокирует session loop, а клиент получает успех даже при фактическом отказе ввода.
+[input/mod.rs](/home/EchoEins/Coding/Rust/TUI/src/input/mod.rs:216)
+
+10. **Low: незавершённые UI-компоненты.** Общий Graph widget рисует только рамку, mouse selection radial menu не реализован.
+[graph.rs](/home/EchoEins/Coding/Rust/TUI/src/ui/widgets/graph.rs:34)
+[command_history.rs](/home/EchoEins/Coding/Rust/TUI/src/utils/command_history.rs:77)
+
+**Что рекомендую доделать**
+
+1. Исправить stride и добавить тест на padded frame.
+2. Перенести Linux-сбор данных в `spawn_blocking`, убрать двойное 100-мс измерение CPU, кэшировать `/proc`-результаты.
+3. Сделать единый async command runner с timeout, cancellation и ограничением output.
+4. Реализовать Linux disk analyzer через `du`/`walkdir` либо отключать вкладку на Linux.
+5. Реально подключить параметры конфигурации или удалить ложные настройки.
+6. Добавить AMDGPU/Intel GPU backends и модель `Vec<GpuData>`.
+7. Для Wayland использовать portal/libei/ydotool backend с явным capability status.
+8. Разбить `AppState` на контроллеры вкладок: сейчас файл превышает 6900 строк.
+9. Добавить Linux integration tests с фикстурами `/proc`/`sysfs` и CI workflow.
+10. Ввести обязательные `cargo fmt`, `cargo test`, `cargo clippy` в CI.
+
+Проверки: `cargo test --all-targets` прошёл, 119 тестов; `cargo check --all-targets` прошёл с 31 warning; форматирование чистое. Строгий `clippy -D warnings` падает со 124 замечаниями. `cargo-audit` не установлен. Файлы не изменялись; существующее изменение `tui-config.toml` сохранено.

@@ -80,6 +80,47 @@
 - `cross check --target x86_64-unknown-linux-gnu --all-targets` passes with existing warnings.
 - `cross test --target x86_64-unknown-linux-gnu --all-targets` passes with 84 tests.
 
+# High-Severity Linux/TUI Reliability Fixes
+
+- [x] Preserve padded `scrap` frame stride and add a regression test.
+- [x] Only create a default TUI config when the config file is missing; never overwrite malformed or unreadable user config.
+- [x] Run Linux monitor collection on Tokio's blocking pool while preserving monitor state.
+- [x] Replace sleep-based Linux CPU sampling with deltas between refresh cycles.
+- [x] Add bounded execution with timeout and process termination for Linux monitor commands.
+- [x] Apply configured command timeout to Ollama polling and actions.
+- [x] Run formatting, tests, checks, and targeted lint verification.
+- [x] Launch the TUI in a PTY and inspect runtime threads and CPU behavior.
+
+## High-Severity Review
+
+- Added timeout-controlled process execution that terminates the full Unix process group and drains stdout/stderr without pipe deadlocks.
+- Linux monitor collection no longer blocks Tokio worker threads; the regression test verifies timer progress on a single-worker runtime and preserves monitor state across collections.
+- Linux CPU usage now uses `/proc/stat` deltas between refresh cycles rather than sleeping twice per collection.
+- Verification passed: `cargo fmt --all`, `cargo test --all-targets` (128 tests), `cargo check --all-targets`, targeted Clippy checks for `await_holding_lock` and `large_futures`, `cargo build --bin TUI`, and `git diff --check`.
+- A 15-second PTY run remained stable at 27 threads across four samples, left no child processes, and left no TUI process after termination. A separate interactive PTY run also restored the terminal and exited cleanly on Ctrl+C.
+
+# Linux NVIDIA and Storage Redesign
+
+- [x] Parse `nvidia-smi` CSV per GPU row with quoted-field and unsupported-value handling.
+- [x] Use the explicit NVIDIA GPU index and UUID instead of deriving an index from PCI bus IDs.
+- [x] Scope compute, graphics, and `pmon` process data to the selected GPU.
+- [x] Exclude zram, loop, RAM, device-mapper, md, NBD, and sysfs-virtual devices from physical disks.
+- [x] Resolve filesystem devices through `lsblk` parents and sysfs slaves for partitions, LVM, dm-crypt, and md stacks.
+- [x] Deduplicate Btrfs subvolume mounts into one filesystem volume.
+- [x] Separate physical capacity from mounted-filesystem capacity and usage.
+- [x] Replace fixed-width Disk text rows with adaptive tables and a unified I/O dashboard.
+- [x] Add backend, parser, aggregation, graph-title, and render regression tests.
+- [x] Verify the redesigned Disk tab against the host's real NVMe/Btrfs topology.
+
+## NVIDIA and Storage Review
+
+- The host now reports one physical `nvme0n1`; the 7.69 GiB false SSD was `zram0` and is no longer classified as storage.
+- The Btrfs root filesystem is represented once with nine mount points instead of nine duplicate capacity rows; EFI remains a separate filesystem.
+- The physical disk card reports 953.87 GB device capacity and 502.57 GB used across 945.87 GB of mounted filesystems.
+- Disk queue depth now uses the kernel weighted-I/O-time average and no longer takes the maximum with an instantaneous in-flight request count.
+- Verification passed: `cargo fmt --all`, `cargo test --all-targets` (139 tests), `cargo check --all-targets`, targeted Clippy checks, `cargo build --bin TUI`, `git diff --check`, narrow and 180-column PTY rendering, and a 15-second runtime thread sample stable at 27 threads.
+- Live NVIDIA data could not be validated on this host because `nvidia-smi` cannot communicate with the installed driver; synthetic tests cover multiple GPUs, quoted CSV, units, missing values, and truncated rows.
+
 # Console Extension Platform, Math Modulator, and Mini-Games
 
 ## Current Status
@@ -453,3 +494,18 @@
 - Console Tab completion now accepts both `KeyCode::Tab` and terminal-emitted `KeyCode::Char('\t')` without inserting a literal tab or requiring Backspace to refresh the suggestion.
 - Exact trig solving now handles zero equations with positive trig powers such as `cos(x)^2 = 0` as pi-family results before numeric fallback; powered trig inequalities are deliberately not reduced to an incorrect base-sign inequality.
 - Seventh milestone verification passed: `cargo fmt --all`, `cargo test` with 113 tests, `cargo check --all-targets`, Linux `cross check --target x86_64-unknown-linux-gnu --all-targets`, and `git diff --check`.
+
+## Linux Disk Interaction And Hot-Plug
+
+- [x] Make the Filesystems panel keyboard-focusable from the Disk tab.
+- [x] Add volume selection with Up/Down and panel focus switching with Left/Right.
+- [x] Expand or collapse grouped mount points with Enter or Space.
+- [x] Preserve expansion state across monitor refreshes with stable filesystem keys.
+- [x] Accept desktop automounts below `/run/media` without exposing unrelated runtime mounts.
+- [x] Detect removable/hot-plug block devices from `lsblk`.
+- [x] Show removable USB storage as `Removable USB`.
+- [x] Add regression coverage for `/run/media` filesystems and expanded mount rendering.
+- [x] Verify the connected SanDisk exFAT filesystem appears in both Physical Disks and Filesystems.
+- [x] Verify focus switching and mount expansion in a real PTY session.
+
+Disk interaction verification passed: `cargo fmt --all`, `cargo test --lib` with 141 tests, `cargo test --all-targets`, `cargo build --bin TUI`, `cargo check --all-targets`, targeted thread-safety Clippy lints, and `git diff --check`.

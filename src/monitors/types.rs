@@ -177,10 +177,18 @@ pub struct DiskIOHistory {
 pub struct PhysicalDiskInfo {
     pub disk_number: u32,
     pub friendly_name: String,
+    #[serde(default)]
+    pub device_path: String,
     pub model: String,
     pub media_type: String, // HDD, SSD, NVMe
     pub bus_type: String,   // SATA, NVMe, USB, etc.
     pub size: u64,
+    #[serde(default)]
+    pub filesystem_total: u64,
+    #[serde(default)]
+    pub filesystem_used: u64,
+    #[serde(default)]
+    pub filesystem_available: u64,
     pub health_status: String, // Healthy, Warning, Unhealthy
     pub operational_status: String,
     pub temperature: Option<f32>,
@@ -196,15 +204,41 @@ pub struct PhysicalDiskInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountPointInfo {
+    pub path: String,
+    pub total: u64,
+    pub used: u64,
+    pub free: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveInfo {
     pub letter: String,
     pub name: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub mount_points: Vec<String>,
+    #[serde(default)]
+    pub mount_details: Vec<MountPointInfo>,
     pub drive_type: String,
     pub file_system: String,
     pub total: u64,
     pub used: u64,
     pub free: u64,
     pub disk_number: Option<u32>, // Link to physical disk
+}
+
+impl DriveInfo {
+    pub fn stable_key(&self) -> String {
+        self.uuid
+            .as_ref()
+            .filter(|uuid| !uuid.is_empty())
+            .map(|uuid| format!("uuid:{uuid}"))
+            .unwrap_or_else(|| format!("source:{}:{}", self.source, self.file_system))
+    }
 }
 
 // ======== NETWORK ========

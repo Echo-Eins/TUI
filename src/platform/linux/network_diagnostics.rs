@@ -1,4 +1,5 @@
 use super::LinuxSysMonitor;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -2374,9 +2375,7 @@ fn read_split_dns_domains() -> (Vec<String>, Option<String>) {
         );
     }
 
-    let output = std::process::Command::new("resolvectl")
-        .arg("domain")
-        .output();
+    let output = run_command_with_timeout("resolvectl", ["domain"], Duration::from_secs(5));
     let Ok(output) = output else {
         return (
             Vec::new(),

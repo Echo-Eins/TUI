@@ -1,12 +1,17 @@
 use crate::utils::json::parse_json_array;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::process::Command as TokioCommand;
+use tokio::time::timeout;
+
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaData {
@@ -77,12 +82,41 @@ pub struct ChatLogMetadata {
 
 pub struct OllamaClient {
     ollama_path: String,
+    command_timeout: Duration,
 }
 
 impl OllamaClient {
     pub fn new(ollama_path: Option<String>) -> Result<Self> {
+        Self::new_with_timeout(ollama_path, DEFAULT_COMMAND_TIMEOUT)
+    }
+
+    pub fn new_with_timeout(
+        ollama_path: Option<String>,
+        command_timeout: Duration,
+    ) -> Result<Self> {
         let path = ollama_path.unwrap_or_else(|| "ollama".to_string());
-        Ok(Self { ollama_path: path })
+        Ok(Self {
+            ollama_path: path,
+            command_timeout: command_timeout.max(Duration::from_secs(1)),
+        })
+    }
+
+    async fn run_ollama<I, S>(&self, args: I) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut command = TokioCommand::new(&self.ollama_path);
+        command.args(args).kill_on_drop(true);
+        timeout(self.command_timeout, command.output())
+            .await
+            .with_context(|| {
+                format!(
+                    "Ollama command timed out after {}s",
+                    self.command_timeout.as_secs()
+                )
+            })?
+            .context("Failed to execute Ollama command")
     }
 
     pub async fn collect_data(&mut self) -> Result<OllamaData> {
@@ -112,17 +146,14 @@ impl OllamaClient {
     }
 
     pub async fn check_availability(&self) -> bool {
-        match Command::new(&self.ollama_path).arg("--version").output() {
+        match self.run_ollama(["--version"]).await {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }
     }
 
     pub async fn list_models(&self) -> Result<Vec<OllamaModel>> {
-        let output = Command::new(&self.ollama_path)
-            .arg("list")
-            .output()
-            .context("Failed to execute ollama list")?;
+        let output = self.run_ollama(["list"]).await?;
 
         if !output.status.success() {
             return Ok(Vec::new());
@@ -187,10 +218,7 @@ impl OllamaClient {
         Ok(models)
     }
     pub async fn list_running(&self) -> Result<Vec<RunningModel>> {
-        let output = Command::new(&self.ollama_path)
-            .arg("ps")
-            .output()
-            .context("Failed to execute ollama ps")?;
+        let output = self.run_ollama(["ps"]).await?;
 
         if !output.status.success() {
             return Ok(Vec::new());
@@ -314,12 +342,14 @@ impl OllamaClient {
     }
 
     fn query_nvidia_smi_processes(&self) -> HashMap<u32, u64> {
-        let output = Command::new("nvidia-smi")
-            .args([
+        let output = run_command_with_timeout(
+            "nvidia-smi",
+            [
                 "--query-compute-apps=pid,used_memory",
                 "--format=csv,noheader,nounits",
-            ])
-            .output();
+            ],
+            PROBE_COMMAND_TIMEOUT,
+        );
         let Ok(output) = output else {
             return HashMap::new();
         };
@@ -360,9 +390,11 @@ impl OllamaClient {
             filter
         );
 
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &command])
-            .output();
+        let output = run_command_with_timeout(
+            "powershell",
+            ["-NoProfile", "-Command", &command],
+            PROBE_COMMAND_TIMEOUT,
+        );
         let Ok(output) = output else {
             return HashMap::new();
         };
@@ -387,11 +419,7 @@ impl OllamaClient {
     }
     #[allow(dead_code)]
     pub async fn show_model(&self, model_name: &str) -> Result<String> {
-        let output = Command::new(&self.ollama_path)
-            .arg("show")
-            .arg(model_name)
-            .output()
-            .context("Failed to execute ollama show")?;
+        let output = self.run_ollama(["show", model_name]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -402,12 +430,11 @@ impl OllamaClient {
     }
 
     pub async fn run_model(&self, model_name: &str, prompt: &str) -> Result<String> {
-        let mut command = Command::new(&self.ollama_path);
-        command.arg("run").arg(model_name);
+        let mut args = vec!["run", model_name];
         if !prompt.trim().is_empty() {
-            command.arg(prompt);
+            args.push(prompt);
         }
-        let output = command.output().context("Failed to execute ollama run")?;
+        let output = self.run_ollama(args).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -418,11 +445,7 @@ impl OllamaClient {
     }
 
     pub async fn stop_model(&self, model_name: &str) -> Result<()> {
-        let output = Command::new(&self.ollama_path)
-            .arg("stop")
-            .arg(model_name)
-            .output()
-            .context("Failed to execute ollama stop")?;
+        let output = self.run_ollama(["stop", model_name]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -433,11 +456,7 @@ impl OllamaClient {
     }
 
     pub async fn remove_model(&self, model_name: &str) -> Result<()> {
-        let output = Command::new(&self.ollama_path)
-            .arg("rm")
-            .arg(model_name)
-            .output()
-            .context("Failed to execute ollama rm")?;
+        let output = self.run_ollama(["rm", model_name]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -449,11 +468,7 @@ impl OllamaClient {
 
     #[allow(dead_code)]
     pub async fn pull_model(&self, model_name: &str) -> Result<String> {
-        let output = Command::new(&self.ollama_path)
-            .arg("pull")
-            .arg(model_name)
-            .output()
-            .context("Failed to execute ollama pull")?;
+        let output = self.run_ollama(["pull", model_name]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -564,10 +579,7 @@ impl OllamaClient {
             return Err(anyhow::anyhow!("Empty command"));
         }
 
-        let output = Command::new(&self.ollama_path)
-            .args(&parts)
-            .output()
-            .context("Failed to execute ollama command")?;
+        let output = self.run_ollama(&parts).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -873,9 +885,7 @@ mod tests {
 
     #[test]
     fn parse_model_list_columns() {
-        let client = OllamaClient {
-            ollama_path: "ollama".to_string(),
-        };
+        let client = OllamaClient::new(None).expect("client");
         let output = "\
 NAME                          ID              SIZE      MODIFIED\n\
 granite4:micro-h               076afb3855dc    1.9 GB    4 weeks ago\n\
@@ -895,9 +905,7 @@ gemini-3-pro-preview:latest    91a1db042ba1    -         5 weeks ago\n";
 
     #[test]
     fn parse_running_models_columns() {
-        let client = OllamaClient {
-            ollama_path: "ollama".to_string(),
-        };
+        let client = OllamaClient::new(None).expect("client");
         let output = "\
 NAME            ID              SIZE     PROCESSOR    CONTEXT    UNTIL\n\
 llama3:latest    a80c4f17acd5    2.0 GB   100% GPU     4096       44 minutes from now\n\

@@ -1,9 +1,11 @@
 use crate::integrations::LinuxSysMonitor;
 use crate::monitors::traits::*;
 use crate::monitors::types::*;
+use crate::platform::linux::BlockDeviceInfo;
 use anyhow::Result;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::time::Instant;
 
 pub struct LinuxDiskMonitor {
@@ -26,39 +28,12 @@ impl LinuxDiskMonitor {
 
 impl DiskMonitorTrait for LinuxDiskMonitor {
     async fn collect_data(&self) -> Result<DiskData> {
-        let mut logical_drives = self.get_logical_drives()?;
-        let mut physical_disks = self.get_physical_disks()?;
-        let mut disk_number_by_name = HashMap::new();
-        for disk in &physical_disks {
-            disk_number_by_name.insert(disk.friendly_name.clone(), disk.disk_number);
-        }
-
+        let block_devices = self.linux_sys.get_block_devices()?;
         let mounts = self.linux_sys.get_mounts()?;
-        for drive in &mut logical_drives {
-            if let Some(mount) = mounts.iter().find(|m| m.mount_point == drive.letter) {
-                if let Some(root_disk) = root_disk_name_from_device(&mount.device) {
-                    if let Some(disk_number) = disk_number_by_name.get(&root_disk) {
-                        drive.disk_number = Some(*disk_number);
-                    }
-                }
-            }
-        }
-
-        for mount in &mounts {
-            if mount.device.starts_with("/dev/") {
-                let Some(disk_name) = root_disk_name_from_device(&mount.device) else {
-                    continue;
-                };
-                if let Some(disk) = physical_disks
-                    .iter_mut()
-                    .find(|d| d.friendly_name == disk_name.as_str())
-                {
-                    if !disk.partitions.contains(&mount.mount_point) {
-                        disk.partitions.push(mount.mount_point.clone());
-                    }
-                }
-            }
-        }
+        let mut physical_disks = self.get_physical_disks(&block_devices)?;
+        let (logical_drives, volume_disks) =
+            self.get_logical_drives(&mounts, &block_devices, &physical_disks);
+        apply_volume_usage(&mut physical_disks, &logical_drives, &volume_disks);
 
         let io_stats = self.get_io_stats(&physical_disks)?;
         let process_activity = self.get_process_activity()?;
@@ -101,72 +76,186 @@ impl DiskMonitorTrait for LinuxDiskMonitor {
 }
 
 impl LinuxDiskMonitor {
-    fn get_logical_drives(&self) -> Result<Vec<DriveInfo>> {
-        let mounts = self.linux_sys.get_mounts()?;
+    fn get_logical_drives(
+        &self,
+        mounts: &[crate::platform::linux::disk::MountInfo],
+        block_devices: &[BlockDeviceInfo],
+        physical_disks: &[PhysicalDiskInfo],
+    ) -> (Vec<DriveInfo>, HashMap<usize, Vec<u32>>) {
+        let block_by_name: HashMap<&str, &BlockDeviceInfo> = block_devices
+            .iter()
+            .map(|device| (device.name.as_str(), device))
+            .collect();
+        let disk_number_by_name: HashMap<&str, u32> = physical_disks
+            .iter()
+            .map(|disk| (disk.friendly_name.as_str(), disk.disk_number))
+            .collect();
         let mut drives = Vec::new();
+        let mut drive_index_by_key = HashMap::new();
+        let mut drive_disks: HashMap<usize, Vec<u32>> = HashMap::new();
 
         for mount in mounts {
             if should_skip_mount(&mount) {
                 continue;
             }
-            if let Ok(space) = self.linux_sys.get_disk_space(&mount.mount_point) {
-                let name = if mount.mount_point == "/" {
-                    "Root".to_string()
-                } else {
-                    mount
-                        .mount_point
-                        .split('/')
-                        .last()
-                        .unwrap_or(&mount.mount_point)
-                        .to_string()
-                };
+            let Ok(space) = self.linux_sys.get_disk_space(&mount.mount_point) else {
+                continue;
+            };
+            let source_name = block_name_for_mount(mount);
+            let uuid = source_name
+                .as_deref()
+                .and_then(|name| block_by_name.get(name))
+                .and_then(|device| device.uuid.clone());
+            let volume_key = uuid
+                .as_ref()
+                .filter(|uuid| !uuid.is_empty())
+                .map(|uuid| format!("uuid:{uuid}"))
+                .unwrap_or_else(|| format!("dev:{}:{}", mount.major_minor, mount.fs_type));
 
-                drives.push(DriveInfo {
-                    letter: mount.mount_point.clone(),
-                    name,
-                    drive_type: mount.fs_type.clone(),
-                    file_system: mount.fs_type,
+            let disk_numbers = physical_disk_numbers_for_volume(
+                source_name.as_deref(),
+                uuid.as_deref(),
+                block_devices,
+                &block_by_name,
+                &disk_number_by_name,
+            );
+
+            if let Some(index) = drive_index_by_key.get(&volume_key).copied() {
+                let drive: &mut DriveInfo = &mut drives[index];
+                if !drive.mount_points.contains(&mount.mount_point) {
+                    drive.mount_points.push(mount.mount_point.clone());
+                }
+                if !drive
+                    .mount_details
+                    .iter()
+                    .any(|details| details.path == mount.mount_point)
+                {
+                    drive.mount_details.push(MountPointInfo {
+                        path: mount.mount_point.clone(),
+                        total: space.total_bytes,
+                        used: space.used_bytes,
+                        free: space.free_bytes,
+                    });
+                }
+                if mount.mount_point == "/" {
+                    drive.letter = mount.mount_point.clone();
+                    drive.name = volume_name(
+                        mount,
+                        block_by_name
+                            .get(source_name.as_deref().unwrap_or_default())
+                            .copied(),
+                    );
+                }
+                merge_disk_numbers(&mut drive_disks, index, disk_numbers);
+                drive.disk_number = drive_disks
+                    .get(&index)
+                    .filter(|disks| disks.len() == 1)
+                    .map(|disks| disks[0]);
+                continue;
+            }
+
+            let index = drives.len();
+            drive_index_by_key.insert(volume_key, index);
+            let disk_number = (disk_numbers.len() == 1).then_some(disk_numbers[0]);
+            drive_disks.insert(index, disk_numbers);
+            drives.push(DriveInfo {
+                letter: mount.mount_point.clone(),
+                name: volume_name(
+                    mount,
+                    block_by_name
+                        .get(source_name.as_deref().unwrap_or_default())
+                        .copied(),
+                ),
+                source: normalized_mount_source(&mount.device),
+                uuid,
+                mount_points: vec![mount.mount_point.clone()],
+                mount_details: vec![MountPointInfo {
+                    path: mount.mount_point.clone(),
                     total: space.total_bytes,
                     used: space.used_bytes,
                     free: space.free_bytes,
-                    disk_number: None,
-                });
-            }
+                }],
+                drive_type: "Local filesystem".to_string(),
+                file_system: mount.fs_type.clone(),
+                total: space.total_bytes,
+                used: space.used_bytes,
+                free: space.free_bytes,
+                disk_number,
+            });
         }
 
-        Ok(drives)
+        let mut paired: Vec<_> = drives
+            .into_iter()
+            .enumerate()
+            .map(|(index, drive)| {
+                let disks = drive_disks.remove(&index).unwrap_or_default();
+                (drive, disks)
+            })
+            .collect();
+        paired.sort_by(|(left, _), (right, _)| mount_sort_key(left).cmp(&mount_sort_key(right)));
+
+        let mut sorted_drives = Vec::with_capacity(paired.len());
+        let mut sorted_disks = HashMap::with_capacity(paired.len());
+        for (index, (drive, disks)) in paired.into_iter().enumerate() {
+            sorted_drives.push(drive);
+            sorted_disks.insert(index, disks);
+        }
+        (sorted_drives, sorted_disks)
     }
 
-    fn get_physical_disks(&self) -> Result<Vec<PhysicalDiskInfo>> {
-        let block_devices = self.linux_sys.get_block_devices()?;
+    fn get_physical_disks(
+        &self,
+        block_devices: &[BlockDeviceInfo],
+    ) -> Result<Vec<PhysicalDiskInfo>> {
         let mut disks = Vec::new();
         let temps = self.linux_sys.get_disk_temperatures();
 
-        for (i, dev) in block_devices
-            .into_iter()
-            .filter(|d| d.dev_type == "disk")
-            .enumerate()
-        {
+        let mut physical_devices: Vec<_> = block_devices
+            .iter()
+            .filter(|device| is_physical_disk(device))
+            .collect();
+        physical_devices.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for (i, dev) in physical_devices.into_iter().enumerate() {
             let smart = self.linux_sys.get_smart_data(&dev.name);
             let temperature = temps
                 .get(&dev.name)
                 .copied()
                 .or_else(|| smart.as_ref().and_then(|s| s.temperature));
 
-            let media_type = if dev.rota { "HDD" } else { "SSD" }.to_string();
+            let media_type = if dev.removable {
+                "Removable"
+            } else if dev.transport.eq_ignore_ascii_case("nvme") || dev.name.starts_with("nvme") {
+                "NVMe"
+            } else if dev.rota {
+                "HDD"
+            } else {
+                "SSD"
+            }
+            .to_string();
             let bus_type = if dev.transport.is_empty() {
-                "Unknown".to_string()
+                infer_bus_type(&dev.name).to_string()
             } else {
                 dev.transport.to_uppercase()
             };
 
             disks.push(PhysicalDiskInfo {
                 disk_number: i as u32,
-                friendly_name: dev.name,
-                model: dev.model.unwrap_or_else(|| "Unknown".to_string()),
+                friendly_name: dev.name.clone(),
+                device_path: dev.path.clone(),
+                model: dev
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or(&dev.name)
+                    .to_string(),
                 media_type,
                 bus_type,
                 size: dev.size,
+                filesystem_total: 0,
+                filesystem_used: 0,
+                filesystem_available: 0,
                 health_status: smart
                     .as_ref()
                     .map(|s| s.health_status.clone())
@@ -234,8 +323,7 @@ impl LinuxDiskMonitor {
                         } else {
                             0.0
                         };
-                        let queue_depth = ((weighted_time_io as f64 / 1000.0) / elapsed)
-                            .max(curr.io_in_progress as f64);
+                        let queue_depth = (weighted_time_io as f64 / 1000.0) / elapsed;
 
                         result.push(DiskIOStats {
                             disk_number: disk.disk_number,
@@ -357,43 +445,344 @@ fn should_skip_mount(mount: &crate::platform::linux::disk::MountInfo) -> bool {
             | "fuse.gvfsd-fuse"
             | "fuse.snapfuse"
             | "9p"
+            | "nfs"
+            | "nfs4"
+            | "cifs"
+            | "smb3"
     ) || device.starts_with("tmpfs")
         || device.starts_with("proc")
         || device.starts_with("sysfs")
         || mount_point.starts_with("/proc")
         || mount_point.starts_with("/sys")
-        || mount_point.starts_with("/run")
+        || (mount_point.starts_with("/run")
+            && !mount_point.starts_with("/run/media/")
+            && mount_point != "/run/media")
         || mount_point.starts_with("/dev")
         || mount_point.starts_with("/snap")
         || mount_point.starts_with("/var/lib/docker/")
 }
 
-fn root_disk_name_from_device(device: &str) -> Option<String> {
-    if !device.starts_with("/dev/") {
-        return None;
-    }
-    let name = device.trim_start_matches("/dev/");
-    if name.is_empty() || name.starts_with("mapper/") || name.starts_with("dm-") {
-        return None;
-    }
-    if name.starts_with("loop") || name.starts_with("ram") {
-        return None;
+fn normalized_mount_source(source: &str) -> String {
+    source
+        .split_once('[')
+        .map(|(device, _)| device)
+        .unwrap_or(source)
+        .to_string()
+}
+
+fn block_name_for_mount(mount: &crate::platform::linux::disk::MountInfo) -> Option<String> {
+    if let Some(name) = fs::read_link(format!("/sys/dev/block/{}", mount.major_minor))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()))
+        .and_then(|name| name.to_str().map(str::to_string))
+    {
+        return Some(name);
     }
 
-    if let Some((prefix, suffix)) = name.rsplit_once('p') {
-        if (prefix.starts_with("nvme") || prefix.starts_with("mmcblk"))
-            && suffix.chars().all(|c| c.is_ascii_digit())
-        {
-            return Some(prefix.to_string());
+    let source = normalized_mount_source(&mount.device);
+    if let Some(name) = source.strip_prefix("/dev/") {
+        let canonical = fs::canonicalize(&source).unwrap_or_else(|_| source.clone().into());
+        return canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .or_else(|| Some(name.trim_start_matches("mapper/").to_string()));
+    }
+    None
+}
+
+fn physical_disk_numbers_for_volume(
+    source_name: Option<&str>,
+    uuid: Option<&str>,
+    block_devices: &[BlockDeviceInfo],
+    block_by_name: &HashMap<&str, &BlockDeviceInfo>,
+    disk_number_by_name: &HashMap<&str, u32>,
+) -> Vec<u32> {
+    let mut source_names = Vec::new();
+    if let Some(source_name) = source_name {
+        source_names.push(source_name);
+    }
+    if let Some(uuid) = uuid.filter(|uuid| !uuid.is_empty()) {
+        source_names.extend(
+            block_devices
+                .iter()
+                .filter(|device| device.uuid.as_deref() == Some(uuid))
+                .map(|device| device.name.as_str()),
+        );
+    }
+
+    let mut disk_numbers = HashSet::new();
+    for source_name in source_names {
+        for physical_name in root_physical_devices(source_name, block_by_name) {
+            if let Some(disk_number) = disk_number_by_name.get(physical_name.as_str()) {
+                disk_numbers.insert(*disk_number);
+            }
+        }
+    }
+    let mut disk_numbers: Vec<_> = disk_numbers.into_iter().collect();
+    disk_numbers.sort_unstable();
+    disk_numbers
+}
+
+fn root_physical_devices(
+    source_name: &str,
+    block_by_name: &HashMap<&str, &BlockDeviceInfo>,
+) -> Vec<String> {
+    let mut queue = VecDeque::from([source_name.to_string()]);
+    let mut visited = HashSet::new();
+    let mut roots = HashSet::new();
+
+    while let Some(name) = queue.pop_front() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(device) = block_by_name.get(name.as_str()) {
+            if is_physical_disk(device) {
+                roots.insert(name.clone());
+                continue;
+            }
+            if let Some(parent) = device.parent.as_ref() {
+                queue.push_back(parent.clone());
+            }
+        }
+
+        if let Ok(slaves) = fs::read_dir(format!("/sys/class/block/{name}/slaves")) {
+            for slave in slaves.flatten() {
+                if let Some(slave_name) = slave.file_name().to_str() {
+                    queue.push_back(slave_name.to_string());
+                }
+            }
         }
     }
 
-    let mut chars: Vec<char> = name.chars().collect();
-    while chars.last().copied().is_some_and(|c| c.is_ascii_digit()) {
-        chars.pop();
+    let mut roots: Vec<_> = roots.into_iter().collect();
+    roots.sort();
+    roots
+}
+
+fn is_physical_disk(device: &BlockDeviceInfo) -> bool {
+    if device.dev_type != "disk"
+        || device.size == 0
+        || device.name.starts_with("loop")
+        || device.name.starts_with("ram")
+        || device.name.starts_with("zram")
+        || device.name.starts_with("dm-")
+        || device.name.starts_with("md")
+        || device.name.starts_with("nbd")
+    {
+        return false;
     }
-    if chars.is_empty() {
-        return None;
+
+    fs::canonicalize(format!("/sys/class/block/{}", device.name))
+        .map(|path| !path.to_string_lossy().contains("/devices/virtual/"))
+        .unwrap_or(true)
+}
+
+fn infer_bus_type(name: &str) -> &'static str {
+    if name.starts_with("nvme") {
+        "NVME"
+    } else if name.starts_with("mmcblk") {
+        "MMC"
+    } else if name.starts_with("sd") {
+        "SCSI/SATA"
+    } else if name.starts_with("vd") {
+        "VIRTIO"
+    } else {
+        "UNKNOWN"
     }
-    Some(chars.into_iter().collect())
+}
+
+fn volume_name(
+    mount: &crate::platform::linux::disk::MountInfo,
+    block_device: Option<&BlockDeviceInfo>,
+) -> String {
+    if mount.mount_point == "/" {
+        return "Root".to_string();
+    }
+    block_device
+        .and_then(|device| device.label.as_deref())
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            mount
+                .mount_point
+                .rsplit('/')
+                .find(|component| !component.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| mount.device.clone())
+}
+
+fn merge_disk_numbers(
+    volume_disks: &mut HashMap<usize, Vec<u32>>,
+    volume_index: usize,
+    disk_numbers: Vec<u32>,
+) {
+    let entry = volume_disks.entry(volume_index).or_default();
+    for disk_number in disk_numbers {
+        if !entry.contains(&disk_number) {
+            entry.push(disk_number);
+        }
+    }
+    entry.sort_unstable();
+}
+
+fn mount_sort_key(drive: &DriveInfo) -> (bool, &str) {
+    (drive.letter != "/", drive.letter.as_str())
+}
+
+fn apply_volume_usage(
+    physical_disks: &mut [PhysicalDiskInfo],
+    drives: &[DriveInfo],
+    volume_disks: &HashMap<usize, Vec<u32>>,
+) {
+    for disk in physical_disks.iter_mut() {
+        disk.filesystem_total = 0;
+        disk.filesystem_used = 0;
+        disk.filesystem_available = 0;
+        disk.partitions.clear();
+    }
+
+    for (index, drive) in drives.iter().enumerate() {
+        for disk_number in volume_disks.get(&index).into_iter().flatten() {
+            let Some(disk) = physical_disks
+                .iter_mut()
+                .find(|disk| disk.disk_number == *disk_number)
+            else {
+                continue;
+            };
+            disk.filesystem_total = disk.filesystem_total.saturating_add(drive.total);
+            disk.filesystem_used = disk.filesystem_used.saturating_add(drive.used);
+            disk.filesystem_available = disk.filesystem_available.saturating_add(drive.free);
+            for mount_point in &drive.mount_points {
+                if !disk.partitions.contains(mount_point) {
+                    disk.partitions.push(mount_point.clone());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn device(name: &str, dev_type: &str, parent: Option<&str>) -> BlockDeviceInfo {
+        BlockDeviceInfo {
+            name: name.to_string(),
+            path: format!("/dev/{name}"),
+            model: Some(name.to_string()),
+            dev_type: dev_type.to_string(),
+            size: 1_000,
+            rota: false,
+            transport: String::new(),
+            filesystem: None,
+            mount_point: None,
+            parent: parent.map(str::to_string),
+            serial: None,
+            label: None,
+            uuid: None,
+            removable: false,
+            hotplug: false,
+        }
+    }
+
+    #[test]
+    fn excludes_virtual_block_disks() {
+        assert!(!is_physical_disk(&device("zram0", "disk", None)));
+        assert!(!is_physical_disk(&device("loop0", "disk", None)));
+        assert!(is_physical_disk(&device("testdisk", "disk", None)));
+    }
+
+    #[test]
+    fn resolves_partition_through_mapper_to_physical_disk() {
+        let devices = [
+            device("nvme0n1", "disk", None),
+            device("nvme0n1p3", "part", Some("nvme0n1")),
+            device("dm-0", "crypt", Some("nvme0n1p3")),
+        ];
+        let by_name = devices
+            .iter()
+            .map(|device| (device.name.as_str(), device))
+            .collect();
+        assert_eq!(
+            root_physical_devices("dm-0", &by_name),
+            vec!["nvme0n1".to_string()]
+        );
+    }
+
+    #[test]
+    fn aggregates_each_unique_volume_once() {
+        let mut disks = vec![PhysicalDiskInfo {
+            disk_number: 0,
+            friendly_name: "nvme0n1".to_string(),
+            device_path: "/dev/nvme0n1".to_string(),
+            model: "NVMe".to_string(),
+            media_type: "NVMe".to_string(),
+            bus_type: "NVME".to_string(),
+            size: 1_000,
+            filesystem_total: 0,
+            filesystem_used: 0,
+            filesystem_available: 0,
+            health_status: "Healthy".to_string(),
+            operational_status: "OK".to_string(),
+            temperature: None,
+            write_cache_enabled: false,
+            power_on_hours: None,
+            tbw: None,
+            wear_level: None,
+            partitions: Vec::new(),
+        }];
+        let drives = vec![DriveInfo {
+            letter: "/".to_string(),
+            name: "Root".to_string(),
+            source: "/dev/nvme0n1p3".to_string(),
+            uuid: Some("uuid".to_string()),
+            mount_points: vec!["/".to_string(), "/home".to_string()],
+            mount_details: vec![
+                MountPointInfo {
+                    path: "/".to_string(),
+                    total: 900,
+                    used: 400,
+                    free: 500,
+                },
+                MountPointInfo {
+                    path: "/home".to_string(),
+                    total: 900,
+                    used: 400,
+                    free: 500,
+                },
+            ],
+            drive_type: "Local filesystem".to_string(),
+            file_system: "btrfs".to_string(),
+            total: 900,
+            used: 400,
+            free: 500,
+            disk_number: Some(0),
+        }];
+        apply_volume_usage(&mut disks, &drives, &HashMap::from([(0, vec![0])]));
+        assert_eq!(disks[0].filesystem_total, 900);
+        assert_eq!(disks[0].filesystem_used, 400);
+        assert_eq!(disks[0].partitions, vec!["/", "/home"]);
+    }
+
+    #[test]
+    fn keeps_desktop_automounted_removable_filesystems() {
+        let removable = crate::platform::linux::disk::MountInfo {
+            mount_point: "/run/media/user/USB".to_string(),
+            device: "/dev/sda1".to_string(),
+            fs_type: "exfat".to_string(),
+            major_minor: "8:1".to_string(),
+            fs_root: "/".to_string(),
+        };
+        let runtime = crate::platform::linux::disk::MountInfo {
+            mount_point: "/run/user/1000".to_string(),
+            device: "tmpfs".to_string(),
+            fs_type: "tmpfs".to_string(),
+            major_minor: "0:42".to_string(),
+            fs_root: "/".to_string(),
+        };
+
+        assert!(!should_skip_mount(&removable));
+        assert!(should_skip_mount(&runtime));
+    }
 }

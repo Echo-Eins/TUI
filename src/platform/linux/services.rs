@@ -1,7 +1,10 @@
 use super::LinuxSysMonitor;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::process::Command;
+use std::time::Duration;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct LinuxServiceInfo {
@@ -29,15 +32,17 @@ impl LinuxSysMonitor {
     }
 
     fn get_services_from_systemctl_show(&self) -> Result<Vec<LinuxServiceInfo>> {
-        let output = Command::new("systemctl")
-            .args([
+        let output = run_command_with_timeout(
+            "systemctl",
+            [
                 "show",
                 "--type=service",
                 "--all",
                 "--no-pager",
                 "--property=Id,Description,ActiveState,SubState,UnitFileState,CanStop,CanReload,Type,Wants,Requires",
-            ])
-            .output()?;
+            ],
+            COMMAND_TIMEOUT,
+        )?;
 
         if !output.status.success() {
             anyhow::bail!("systemctl show failed with status: {}", output.status);
@@ -111,15 +116,17 @@ impl LinuxSysMonitor {
         let mut services = Vec::new();
         let unit_file_states = self.read_unit_file_states().unwrap_or_default();
 
-        let output = Command::new("systemctl")
-            .args([
+        let output = run_command_with_timeout(
+            "systemctl",
+            [
                 "list-units",
                 "--type=service",
                 "--all",
                 "--no-pager",
                 "--no-legend",
-            ])
-            .output()?;
+            ],
+            COMMAND_TIMEOUT,
+        )?;
 
         if !output.status.success() {
             anyhow::bail!("systemctl failed with status: {}", output.status);
@@ -172,14 +179,16 @@ impl LinuxSysMonitor {
     }
 
     fn read_unit_file_states(&self) -> Result<HashMap<String, String>> {
-        let output = Command::new("systemctl")
-            .args([
+        let output = run_command_with_timeout(
+            "systemctl",
+            [
                 "list-unit-files",
                 "--type=service",
                 "--no-pager",
                 "--no-legend",
-            ])
-            .output()?;
+            ],
+            COMMAND_TIMEOUT,
+        )?;
 
         if !output.status.success() {
             anyhow::bail!(

@@ -1,15 +1,19 @@
 use super::LinuxSysMonitor;
+use crate::utils::process::run_command_with_timeout;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct MountInfo {
     pub mount_point: String,
     pub device: String,
     pub fs_type: String,
+    pub major_minor: String,
+    pub fs_root: String,
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +31,7 @@ pub struct DiskTemp {
 
 impl LinuxSysMonitor {
     pub fn get_disk_info(&self) -> Result<Vec<DiskInfo>> {
-        let output = Command::new("df").args(["-B1", "-T"]).output()?;
+        let output = run_command_with_timeout("df", ["-B1", "-T"], COMMAND_TIMEOUT)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut disks = Vec::new();
@@ -84,17 +88,23 @@ impl LinuxSysMonitor {
     }
 
     pub fn get_mounts(&self) -> Result<Vec<MountInfo>> {
-        let content = fs::read_to_string("/proc/mounts")?;
+        let content = fs::read_to_string("/proc/self/mountinfo")?;
         let mut mounts = Vec::new();
         for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                mounts.push(MountInfo {
-                    device: parts[0].to_string(),
-                    mount_point: parts[1].to_string(),
-                    fs_type: parts[2].to_string(),
-                });
+            let Some(separator) = parts.iter().position(|part| *part == "-") else {
+                continue;
+            };
+            if separator < 6 || parts.len() <= separator + 2 {
+                continue;
             }
+            mounts.push(MountInfo {
+                major_minor: parts[2].to_string(),
+                fs_root: unescape_mount_field(parts[3]),
+                mount_point: unescape_mount_field(parts[4]),
+                fs_type: parts[separator + 1].to_string(),
+                device: unescape_mount_field(parts[separator + 2]),
+            });
         }
         Ok(mounts)
     }
@@ -125,7 +135,7 @@ impl LinuxSysMonitor {
 
         #[cfg(not(unix))]
         {
-            let output = Command::new("df").args(["-B1", mount]).output()?;
+            let output = run_command_with_timeout("df", ["-B1", mount], COMMAND_TIMEOUT)?;
             if !output.status.success() {
                 anyhow::bail!("df failed for mount {}", mount);
             }
@@ -170,15 +180,17 @@ impl LinuxSysMonitor {
     }
 
     pub fn get_block_devices(&self) -> Result<Vec<BlockDeviceInfo>> {
-        let output = Command::new("lsblk")
-            .args([
+        let output = run_command_with_timeout(
+            "lsblk",
+            [
                 "-b",
                 "-J",
                 "-o",
-                "NAME,MODEL,TYPE,SIZE,ROTA,TRAN,FSTYPE,MOUNTPOINT,PKNAME,SERIAL,REV,LABEL,UUID",
-            ])
-            .output()
-            .context("Failed to run lsblk")?;
+                "NAME,MODEL,TYPE,SIZE,ROTA,TRAN,FSTYPE,MOUNTPOINT,PKNAME,SERIAL,REV,LABEL,UUID,RM,HOTPLUG",
+            ],
+            COMMAND_TIMEOUT,
+        )
+        .context("Failed to run lsblk")?;
 
         if !output.status.success() {
             anyhow::bail!("lsblk failed with status {}", output.status);
@@ -206,6 +218,7 @@ impl LinuxSysMonitor {
 
         result.push(BlockDeviceInfo {
             name: name.clone(),
+            path: format!("/dev/{name}"),
             model: device.model,
             dev_type: device.dev_type,
             size: device.size.unwrap_or(0),
@@ -217,6 +230,8 @@ impl LinuxSysMonitor {
             serial: device.serial,
             label: device.label,
             uuid: device.uuid,
+            removable: device.rm.unwrap_or(false),
+            hotplug: device.hotplug.unwrap_or(false),
         });
 
         if let Some(children) = device.children {
@@ -231,10 +246,11 @@ impl LinuxSysMonitor {
         let mut results = Vec::new();
 
         // Try btrfs filesystem show
-        let output = match Command::new("btrfs")
-            .args(["filesystem", "show", "--raw"])
-            .output()
-        {
+        let output = match run_command_with_timeout(
+            "btrfs",
+            ["filesystem", "show", "--raw"],
+            COMMAND_TIMEOUT,
+        ) {
             Ok(o) if o.status.success() => o,
             _ => return results,
         };
@@ -301,10 +317,11 @@ impl LinuxSysMonitor {
         // Try to get subvolume info for each btrfs mount
         for info in &mut results {
             if let Some(mount) = self.find_btrfs_mount(&info.uuid) {
-                if let Ok(output) = Command::new("btrfs")
-                    .args(["subvolume", "list", "-a", &mount])
-                    .output()
-                {
+                if let Ok(output) = run_command_with_timeout(
+                    "btrfs",
+                    ["subvolume", "list", "-a", &mount],
+                    COMMAND_TIMEOUT,
+                ) {
                     if output.status.success() {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         for line in stdout.lines() {
@@ -318,10 +335,11 @@ impl LinuxSysMonitor {
                 }
 
                 // Get usage info
-                if let Ok(output) = Command::new("btrfs")
-                    .args(["filesystem", "usage", "-b", &mount])
-                    .output()
-                {
+                if let Ok(output) = run_command_with_timeout(
+                    "btrfs",
+                    ["filesystem", "usage", "-b", &mount],
+                    COMMAND_TIMEOUT,
+                ) {
                     if output.status.success() {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         for line in stdout.lines() {
@@ -365,10 +383,9 @@ impl LinuxSysMonitor {
     /// Get SMART data for a disk device using smartctl
     pub fn get_smart_data(&self, device_name: &str) -> Option<SmartData> {
         let device_path = format!("/dev/{}", device_name);
-        let output = Command::new("smartctl")
-            .args(["-a", "-j", &device_path])
-            .output()
-            .ok()?;
+        let output =
+            run_command_with_timeout("smartctl", ["-a", "-j", &device_path], COMMAND_TIMEOUT)
+                .ok()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let json: serde_json::Value = serde_json::from_str(&stdout).ok()?;
@@ -517,6 +534,7 @@ pub struct DiskInfo {
 #[derive(Debug, Clone)]
 pub struct BlockDeviceInfo {
     pub name: String,
+    pub path: String,
     pub model: Option<String>,
     pub dev_type: String,
     pub size: u64,
@@ -528,6 +546,8 @@ pub struct BlockDeviceInfo {
     pub serial: Option<String>,
     pub label: Option<String>,
     pub uuid: Option<String>,
+    pub removable: bool,
+    pub hotplug: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -603,4 +623,43 @@ struct LsblkEntry {
     label: Option<String>,
     #[serde(rename = "uuid")]
     uuid: Option<String>,
+    #[serde(rename = "rm")]
+    rm: Option<bool>,
+    #[serde(rename = "hotplug")]
+    hotplug: Option<bool>,
+}
+
+fn unescape_mount_field(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1..index + 4]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() && *byte < b'8')
+        {
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            result.push(value);
+            index += 4;
+        } else {
+            result.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_mountinfo_octal_escapes() {
+        assert_eq!(unescape_mount_field("/mnt/My\\040Disk"), "/mnt/My Disk");
+        assert_eq!(unescape_mount_field("/path\\134name"), "/path\\name");
+    }
 }

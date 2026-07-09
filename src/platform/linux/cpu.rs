@@ -1,5 +1,5 @@
 use super::{LinuxSysMonitor, RaplDomainSample, RaplSnapshot};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -7,20 +7,37 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 impl LinuxSysMonitor {
-    pub fn get_cpu_usage(&self) -> Result<f32> {
-        let stat1 = self.read_cpu_stat()?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let stat2 = self.read_cpu_stat()?;
+    pub fn get_cpu_usage_snapshot(&self) -> Result<(f32, Vec<f32>)> {
+        let current = self.read_all_cpu_stats()?;
+        let mut previous = self.cpu_snapshot.lock();
 
-        let total_diff = stat2.total().saturating_sub(stat1.total());
-        let idle_diff = stat2.idle.saturating_sub(stat1.idle);
+        let Some(old) = previous.as_ref() else {
+            *previous = Some(current.clone());
+            let core_count = current.iter().filter(|(name, _)| name != "cpu").count();
+            return Ok((0.0, vec![0.0; core_count]));
+        };
 
-        if total_diff == 0 {
-            return Ok(0.0);
+        let old_map: HashMap<&str, &CpuStat> = old
+            .iter()
+            .map(|(name, stat)| (name.as_str(), stat))
+            .collect();
+        let mut overall = 0.0;
+        let mut cores = Vec::new();
+
+        for (name, current_stat) in &current {
+            let usage = old_map
+                .get(name.as_str())
+                .map(|old_stat| cpu_usage_between(old_stat, current_stat))
+                .unwrap_or(0.0);
+            if name == "cpu" {
+                overall = usage;
+            } else {
+                cores.push(usage);
+            }
         }
 
-        let usage = 100.0 * (1.0 - (idle_diff as f64 / total_diff as f64));
-        Ok(usage.clamp(0.0, 100.0) as f32)
+        *previous = Some(current);
+        Ok((overall, cores))
     }
 
     pub fn get_cpu_info(&self) -> Result<CpuInfo> {
@@ -158,41 +175,6 @@ impl LinuxSysMonitor {
         None
     }
 
-    /// Get per-core usage by reading individual cpuN lines from /proc/stat
-    pub fn get_per_core_usage(&self) -> Result<Vec<f32>> {
-        let stat1 = self.read_all_cpu_stats()?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let stat2 = self.read_all_cpu_stats()?;
-
-        // Build a HashMap from stat2 for quick lookup
-        let stat2_map: HashMap<String, CpuStat> = stat2.into_iter().collect();
-
-        let mut result = Vec::new();
-        for (name, s1) in &stat1 {
-            if name == "cpu" {
-                continue; // Skip the total line
-            }
-            if let Some(s2) = stat2_map.get(name) {
-                let total_diff = s2.total().saturating_sub(s1.total());
-                let idle_diff = s2.idle.saturating_sub(s1.idle);
-                let usage: f64 = if total_diff > 0 {
-                    100.0 * (1.0 - (idle_diff as f64 / total_diff as f64))
-                } else {
-                    0.0
-                };
-                result.push(usage.clamp(0.0, 100.0) as f32);
-            }
-        }
-
-        if result.is_empty() {
-            let usage = self.get_cpu_usage()?;
-            let info = self.get_cpu_info()?;
-            result = vec![usage; info.thread_count];
-        }
-
-        Ok(result)
-    }
-
     fn read_all_cpu_stats(&self) -> Result<Vec<(String, CpuStat)>> {
         let content = fs::read_to_string("/proc/stat")?;
         let mut stats = Vec::new();
@@ -221,27 +203,6 @@ impl LinuxSysMonitor {
         }
 
         Ok(stats)
-    }
-
-    fn read_cpu_stat(&self) -> Result<CpuStat> {
-        let content = fs::read_to_string("/proc/stat")?;
-        let line = content.lines().next().context("Empty /proc/stat")?;
-
-        let values: Vec<u64> = line
-            .split_whitespace()
-            .skip(1)
-            .filter_map(|s| s.parse().ok())
-            .collect();
-
-        Ok(CpuStat {
-            user: *values.get(0).unwrap_or(&0),
-            nice: *values.get(1).unwrap_or(&0),
-            system: *values.get(2).unwrap_or(&0),
-            idle: *values.get(3).unwrap_or(&0),
-            iowait: *values.get(4).unwrap_or(&0),
-            irq: *values.get(5).unwrap_or(&0),
-            softirq: *values.get(6).unwrap_or(&0),
-        })
     }
 
     /// Read CPU temperature from hwmon or thermal zones
@@ -529,8 +490,8 @@ fn read_rapl_max_power_watts(path: &Path) -> f32 {
     max_uw as f32 / 1_000_000.0
 }
 
-#[derive(Debug)]
-struct CpuStat {
+#[derive(Debug, Clone)]
+pub(crate) struct CpuStat {
     user: u64,
     nice: u64,
     system: u64,
@@ -540,9 +501,51 @@ struct CpuStat {
     softirq: u64,
 }
 
+fn cpu_usage_between(previous: &CpuStat, current: &CpuStat) -> f32 {
+    let total_diff = current.total().saturating_sub(previous.total());
+    let idle_diff = current.idle.saturating_sub(previous.idle);
+    if total_diff == 0 {
+        return 0.0;
+    }
+    let usage = 100.0 * (1.0 - idle_diff as f64 / total_diff as f64);
+    usage.clamp(0.0, 100.0) as f32
+}
+
 impl CpuStat {
     fn total(&self) -> u64 {
         self.user + self.nice + self.system + self.idle + self.iowait + self.irq + self.softirq
+    }
+}
+
+#[cfg(test)]
+mod cpu_usage_tests {
+    use super::*;
+
+    fn stat(user: u64, system: u64, idle: u64) -> CpuStat {
+        CpuStat {
+            user,
+            nice: 0,
+            system,
+            idle,
+            iowait: 0,
+            irq: 0,
+            softirq: 0,
+        }
+    }
+
+    #[test]
+    fn calculates_usage_from_consecutive_snapshots() {
+        let previous = stat(100, 50, 850);
+        let current = stat(150, 100, 900);
+        assert!((cpu_usage_between(&previous, &current) - 66.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn handles_counter_reset_without_spike() {
+        assert_eq!(
+            cpu_usage_between(&stat(100, 50, 850), &stat(10, 5, 85)),
+            0.0
+        );
     }
 }
 

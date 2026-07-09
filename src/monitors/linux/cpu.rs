@@ -84,8 +84,7 @@ impl LinuxCpuMonitor {
 impl CpuMonitorTrait for LinuxCpuMonitor {
     async fn collect_data(&self) -> Result<CpuData> {
         let cpu_info = self.linux_sys.get_cpu_info()?;
-        let overall_usage = self.linux_sys.get_cpu_usage()?;
-        let core_usage_values = self.linux_sys.get_per_core_usage()?;
+        let (overall_usage, core_usage_values) = self.linux_sys.get_cpu_usage_snapshot()?;
 
         let core_usage: Vec<CoreUsage> = core_usage_values
             .iter()
